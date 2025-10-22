@@ -80,36 +80,79 @@ const login = async ({email, password}) => {
     }
 };
 
-const refresh = async (refreshToken) => {
+const adminLogin = async ({ email, password }) => {
     const client = await pool.connect();
-    try{
-        //Tìm refresh_token trong DB
+    try {
+        await client.query('BEGIN');
         const result = await client.query(
-            'SELECT * FROM refresh_tokens WHERE token = $1 AND revoked = FALSE AND expires_at > NOW()',
-            [refreshToken]
+            'SELECT id, email, password_hash, full_name, role, status FROM users WHERE email = $1',
+            [email]
         );
-        if(result.rows.length === 0){
-            throw new Error('Invalid refresh token');
-        }
-        const tokenData = result.rows[0];
-        // Kết quả: Nếu hợp lệ, tokenData = { id: uuid, user_id: '123', token: 'a1b2c3...', expires_at: timestamp, revoked: false }
+        if (result.rows.length === 0) throw new Error('Invalid email or password');
+        
+        const user = result.rows[0];
 
-        //Lấy user từ user_id
-        const userResult = await client.query('SELECT id, email, role FROM users WHERE id = $1', [tokenData.user_id]);
-        const user = userResult.rows[0];
-        //Kết quả: user = { id: '123', email: 'mail@example.com', role: 'customer' }
-
-        //Tạo access truy cập mới
-        const newAccessToken = generateToken(user);
-
-        return {accessToken: newAccessToken};
-    }finally{
+        if (user.role !== 'admin') throw new Error('Unauthorized: Admin access only');
+        if (user.status === 'banned') throw new Error('Account is banned');
+        
+        const isMatch = await bcrypt.compare(password, user.password_hash);
+        if (!isMatch) throw new Error('Invalid email or password');
+        
+        const token = generateToken(user);
+        const refreshToken = generateFreshToken();
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+        await client.query(
+            'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+            [user.id, refreshToken, expiresAt]
+        );
+        await client.query('COMMIT');
+        return {
+            accessToken: token,
+            refreshToken,
+            user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role }
+        };
+    } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
         client.release();
     }
 };
 
-const logout = async (refreshToken)=>{
-    await pool.query('UPDATE refresh_tokens SET revoked = TRUE WHERE token = $ 1', [refreshToken]);
+const refresh = async (refreshToken) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      'SELECT * FROM refresh_tokens WHERE token = $1 AND revoked = FALSE',
+      [refreshToken]
+    );
+    if (result.rows.length === 0) throw new Error('Invalid refresh token');
+    const tokenData = result.rows[0];
+
+    // Kiểm tra và cập nhật revoked nếu hết hạn
+    if (tokenData.expires_at <= new Date()) {
+      await client.query(
+        'UPDATE refresh_tokens SET revoked = TRUE WHERE token = $1',
+        [refreshToken]
+      );
+      throw new Error('Refresh token has expired');
+    }
+
+    const userResult = await client.query(
+      'SELECT id, email, role FROM users WHERE id = $1',
+      [tokenData.user_id]
+    );
+    const user = userResult.rows[0];
+    const newAccessToken = generateToken(user);
+    await client.query('COMMIT');
+    return { accessToken: newAccessToken };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
 const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString(); // 6 chữ số
@@ -182,4 +225,51 @@ const verifyOtpAndRegister = async ({ email, otp, password, full_name, phone }) 
     client.release();
   }
 };
-module.exports = {register, login, refresh, logout, sendOtp, verifyOtpAndRegister};
+
+const logout = async (refreshToken)=>{
+   const client = await pool.connect();
+   try {
+    await client.query('BEGIN');
+    const result = await client.query('UPDATE refresh_tokens SET revoked = TRUE WHERE token = $1 RETURNING *', [refreshToken]);
+    if(result.rows.length === 0){
+        throw new Error('Invalid refresh token');
+    }
+    await client.query('COMMIT');
+   }catch(error){
+    await client.query('ROLLBACK');
+    throw error;
+   }finally{
+    client.release();
+   }
+};
+
+
+const googleLogin = async (user) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Tạo token
+    const token = generateToken(user);
+
+    const refreshToken = generateFreshToken();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 ngày
+    await client.query(
+      'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [user.id, refreshToken, expiresAt]
+    );
+
+    await client.query('COMMIT');
+    return {
+      accessToken: token,
+      refreshToken,
+      user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role }
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+module.exports = {register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister, googleLogin};

@@ -7,7 +7,7 @@ const generateToken = (user)=> {
             id: user.id, email: user.email, role: user.role
         },
         process.env.JWT_SECRET,
-        { expiresIn: '7d'}
+        { expiresIn: '1h'}
     );
 };
 
@@ -21,6 +21,6 @@ const verifyToken = (token) => {
 
 const generateFreshToken = ()=>{
     return crypto.randomBytes(40).toString('hex'); //tạo chuỗi randoom có 80 ký tự
-}
+};
 
 module.exports = {generateToken, verifyToken, generateFreshToken};

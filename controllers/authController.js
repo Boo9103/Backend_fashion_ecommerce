@@ -1,5 +1,7 @@
 const authService = require('../services/authService');
 const pool = require('../config/db');
+const passport = require('../config/passport');
+
 
 const register = async (req, res, next) => {
     try {
@@ -27,6 +29,19 @@ const login = async (req, res, next)=>{
     }catch (error){
         next(error);
     }
+};
+
+const adminLogin = async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Missing email or password' });
+    }
+    const result = await authService.adminLogin({ email, password });
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
 };
 
 const refresh = async (req, res, next) => {
@@ -78,5 +93,66 @@ const verifyOtpController = async (req, res, next) => {
   }
 };
 
-module.exports = { register, login, refresh, sendOtpController, verifyOtpController };
+const logout = async (req, res, next)=> {
+  try {
+    const { refreshToken } = req.body;
+    if(!refreshToken){
+      return res.status(400).json({ error: 'Mising refresh token' });
+    }
+    await authService.logout(refreshToken);
+    res.status(204).send();
+  }catch(error){
+    next(error);
+  }
+}
+
+const googleAuth = passport.authenticate('google', { scope: ['profile', 'email'] });
+
+const googleCallback = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      console.error('googleCallback: missing req.user');
+      return res.redirect(`${process.env.FE_URL || 'http://localhost:5000'}/callback?status=error`);
+    }
+
+    const user = req.user;
+    const result = await authService.googleLogin(user); // { accessToken, refreshToken, user }
+    if (!result || !result.accessToken) {
+      console.error('googleCallback: invalid result from googleLogin', result);
+      return res.redirect(`${process.env.FE_URL || 'http://localhost:5000'}/callback?status=error`);
+    }
+
+    const FE = (process.env.FE_URL || 'http://localhost:5000').replace(/\/+$/, '');
+
+    if (process.env.NODE_ENV === 'production') {
+      res.cookie('accessToken', result.accessToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        maxAge: 60 * 60 * 1000,
+      });
+      res.cookie('refreshToken', result.refreshToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      });
+      return res.redirect(`${FE}/callback?status=success`);
+    }
+
+    // development: add tokens in query (ONLY dev)
+    const params = new URLSearchParams({
+      status: 'success',
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+    }).toString();
+
+    return res.redirect(`${FE}/callback?${params}`);
+  } catch (error) {
+    console.error('googleCallback error:', error);
+    return res.redirect(`${(process.env.FE_URL || 'http://localhost:5000').replace(/\/+$/, '')}/callback?status=error`);
+  }
+};
+
+module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController,logout, googleAuth, googleCallback };
 
