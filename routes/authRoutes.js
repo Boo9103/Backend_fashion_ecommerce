@@ -24,4 +24,6 @@ router.get(
   authController.googleCallback
 );
 
+router.get('/check-login',authMiddleware, authController.checkLoginStatus);
+
 module.exports = router;

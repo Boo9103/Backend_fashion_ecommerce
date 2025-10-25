@@ -1,6 +1,7 @@
 const authService = require('../services/authService');
 const pool = require('../config/db');
 const passport = require('../config/passport');
+const jwt = require('jsonwebtoken');
 
 
 const register = async (req, res, next) => {
@@ -154,5 +155,26 @@ const googleCallback = async (req, res, next) => {
   }
 };
 
-module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController,logout, googleAuth, googleCallback };
+const checkLoginStatus = (req, res)=>{
+  try{
+    const token = req.headers.authorization?.split(' ')[1];// Lấy token sau "Bearer "
+    if(!token){
+      return res.status(200).json({ loggedIn: false,user: null });
+    }
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    return res.status(200).json({
+      loggedIn: true,
+      user: {
+        id: decoded.id,
+        role: decoded.role,
+        email: decoded.email || null, // Thêm email nếu có trong payload
+        full_name: decoded.full_name || null // thêm nếu có
+      }
+    });
+  }catch(error){
+    return res.status(200).json({ loggedIn: false, user: null });
+  }
+};
+
+module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController,logout, googleAuth, googleCallback, checkLoginStatus };
 

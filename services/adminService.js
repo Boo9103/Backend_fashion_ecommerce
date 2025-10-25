@@ -12,15 +12,49 @@ const getUsers = async (role, status)=> {
     return result.rows;
 };
 
-const banUser = async (userId, action)=>{
-    const newStatus = action === 'ban' ? 'banned' : 'active';
-    const result = await pool.query(
-        'UPDATE users SET status = $1 WHERE id = $2 AND role = $3 RETURNING *',
-        [newStatus, userId, 'customer']
+const deactiveUser = async (userId) => {
+    //Kiểm tra status trước
+    const checkResult = await pool.query(
+        'SELECT status FROM users WHERE id = $1 AND role = $2',
+        [userId, 'customer']
     );
-    if(result.rowCount === 0){
-        throw new Error('User not found or cannot be banned/unbanned');
-    }
+    if (checkResult.rowCount === 0) throw new Error('User not found or not a customer');
+    if (checkResult.rows[0].status !== 'active') throw new Error ('User is not active');
+
+    //Xử lý update nếu pass check
+    const result = await pool.query(
+        'UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+        ['banned', userId]
+    );
+    return result.rows[0];
+};
+
+const restoreUser = async (userId) => {
+    const checkResult = await pool.query(
+        'SELECT status FROM users WHERE id = $1 AND role = $2',
+        [userId, 'customer']
+    );
+    if (checkResult.rowCount === 0) throw new Error('User not found or not a customer');
+    if (checkResult.rows[0].status !== 'banned') throw new Error ('User is not banned');
+    const result = await pool.query(
+        'UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+        ['active', userId]
+    );
+    return result.rows[0];
+};
+
+const hardDeleteUser = async (userId) => {
+    //Xóa liên quan trước (cascade)
+    await pool.query('DELETE FROM orders WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM reviews WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM carts WHERE user_id = $1', [userId]);
+
+    //Xóa user
+    const result = await pool.query(
+        'DELETE FROM users WHERE id = $1 AND role = $2 RETURNING id',
+        [userId, 'customer']
+    );
+    if (result.rowCount === 0) throw new Error('User not found or not a customer');
     return result.rows[0];
 };
 
@@ -46,20 +80,35 @@ const updateUser = async (userId, updateData)=>{
     return result.rows[0];
 }
 
-const deleteUser = async (userId) => {
-  console.log('Executing deleteUser query for userId:', userId); // Debug
-  const result = await pool.query(
-    'UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2 AND role = $3 RETURNING id, email, full_name, name, role, status, updated_at',
-    ['banned', userId, 'customer']
-  );
-  if (result.rowCount === 0) throw new Error('User not found or not a customer');
-  return result.rows[0];
+const getUsersById = async (userId) =>{
+    const result = await pool.query(
+        'SELECT id, email, full_name, name, phone, role, status, created_at, updated_at FROM users WHERE id = $1 AND role = $2',
+        [userId, 'customer']
+    );
+    if (result.rowCount === 0){
+        throw new Error('User not found or not a customer');
+    }
+    return result.rows[0];
 };
+
+const updateUserRole = async (userId, newRole)=>{
+    if(!['customer', 'admin'].includes(newRole)) throw new Error('Invalid role');
+    const result = await pool.query(
+        'UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2 RETURNING id, email, full_name, name, phone, role, status, updated_at',
+        [newRole, userId]
+    );
+    if(result.rowCount === 0) throw new Error('User not found');
+    return result.rows[0];
+}
+
 
 module.exports = {
     getUsers,
-    banUser,
+    deactiveUser,
+    restoreUser,
+    hardDeleteUser,
     createUser,
+    getUsersById,
     updateUser,
-    deleteUser
+    updateUserRole,
 };

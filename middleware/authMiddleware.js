@@ -13,8 +13,10 @@ const extractToken = (req) => {
 const authMiddleware = (req, res, next) => {
   try {
     const token = extractToken(req);
-    if (!token) return res.status(401).json({ error: 'No token provided' });
-
+    if (!token) {
+      req.user = null; // Không token, gắn null để checkLoginStatus xử lý
+      return next(); // Cho phép tiếp tục
+    }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded; // gắn thông tin user vào req (id, email, role...)
     next();
