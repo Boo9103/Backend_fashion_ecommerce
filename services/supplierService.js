@@ -40,13 +40,6 @@ exports.updateSupplier = async (id, data)=> {
   return result.rows[0];
 };
 
-exports.deleteSupplier = async (id) => {
-  const checkProducts = await pool.query('SELECT id FROM products WHERE supplier_id = $1', [id]);
-  if (checkProducts.rowCount > 0) throw new Error('Supplier has associated products');
-  const result = await pool.query('DELETE FROM suppliers WHERE id = $1 RETURNING id', [id]);
-  if (result.rowCount === 0) throw new Error('Supplier not found');
-  return result.rows[0];
-};
 
 exports.getSuppliers = async ()=> {
   const result = await pool.query(
@@ -62,3 +55,29 @@ exports.getSupplierById = async (id)=>{
   return result.rows[0];
 };
 
+exports.deleteSupplier = async (id, cascade = false) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Kiểm tra sản phẩm liên quan
+    const checkProducts = await client.query('SELECT id FROM products WHERE supplier_id = $1', [id]);
+    if (checkProducts.rowCount > 0) {
+      if (!cascade) throw new Error('Supplier has associated products');
+      // Nếu cascade=true, xóa tất cả sản phẩm liên quan trước
+      await client.query('DELETE FROM products WHERE supplier_id = $1', [id]);
+    }
+
+    // Xóa supplier
+    const result = await client.query('DELETE FROM suppliers WHERE id = $1 RETURNING id', [id]);
+    if (result.rowCount === 0) throw new Error('Supplier not found');
+
+    await client.query('COMMIT');
+    return result.rows[0];
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};

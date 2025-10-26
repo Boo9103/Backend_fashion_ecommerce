@@ -75,7 +75,9 @@ exports.updateCategory = async (req, res) => {
 exports.deleteCategory = async (req, res) =>{
   try {
     const { id } = req.params;
-    const deleteCategory = await categoryService.deleteCategory(id);
+    const { cascade } = req.query; //Lấy param cascade từ query string
+
+    const deleteCategory = await categoryService.deleteCategory(id, cascade === 'true');
     return res.status(200).json({ message: 'Category deleted successfully', category: deleteCategory });
   }catch(error){
     console.error('deleteCategory error:', error);

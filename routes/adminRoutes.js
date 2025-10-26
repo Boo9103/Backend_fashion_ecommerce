@@ -18,6 +18,9 @@ router.delete('/suppliers/:id', authMiddleware, adminSupplierController.deleteSu
 router.get('/suppliers', authMiddleware, adminSupplierController.getSupplier);
 router.get('/suppliers/:id', authMiddleware, adminSupplierController.getSupplierById);
 
+//Vd: http://localhost:3000/admin/categories/6ce72005-09aa-48fd-aa35-03cefb4cf849?cascade=true (delete), nếu k có cascade = true thì mặc định là false,
+//thì khi xóa sẽ bảo có node con k xóa được, còn khi set cascade = true thì xóa được
+
 //User management
 router.get('/users', authMiddleware, adminController.getUsers);
 router.post('/users', authMiddleware, adminController.createUser);

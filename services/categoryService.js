@@ -55,19 +55,29 @@ const updateCategory = async (id, { name, parent_id, image }) => {
   return result.rows[0];
 };
 
-const deleteCategory = async (id)=>{
-    //Kiểm tra sub-categories
-    const checkSub = await pool.query(
-        'SELECT id FROM categories WHERE parent_id = $1', [id]
-    );
-    if (checkSub.rows.length > 0) throw new Error ('Category has sub-categories');
-
-    //Xóa category
-    const result = await pool.query(
-        'DELETE FROM categories WHERE id = $1 RETURNING id', [id]
-    );
-    if (result.rowCount === 0) throw new Error ('Category not found');
-    return result.rows[0];
+const deleteCategory = async (id, cascade = false)=>{
+    const client = await pool.connect();
+    try{
+        await client.query('BEGIN');
+        //Kiểm tra sub-categories
+        const checkSub = await client.query('SELECT id FROM categories WHERE parent_id = $1', [id]);
+        if(checkSub.rows.length > 0 ){
+            if(!cascade) throw new Error('Category has sub-categories.');
+            //Nếu cascade = true, xóa tất cả sub-categories trước
+            await client.query('DELETE FROM categories WHERE parent_id = $1', [id]);
+        
+        }
+        //Xóa category cha
+        const result = await client.query('DELETE FROM categories WHERE id = $1', [id]);
+        if(result.rowCount===0) throw new Error('Category not found');
+        await client.query('COMMIT');
+        return;
+    } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        client.release();
+    }
 };
 
 

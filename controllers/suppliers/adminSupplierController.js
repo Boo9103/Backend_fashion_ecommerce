@@ -60,7 +60,8 @@ exports.updateSupplier = async (req, res) => {
 exports.deleteSupplier = async (req, res) => {
   try{
     const { id } = req.params;
-    const deletedSupplier = await supplierService.deleteSupplier(id);
+    const { cascade } = req.query; // Lấy param cascade
+    const deletedSupplier = await supplierService.deleteSupplier(id, cascade === 'true');
     return res.status(200).json({ message: 'Supplier deleted successfully', supplier: deletedSupplier });
   }catch (error) {
     console.error('deleteSupplier error:', error);
