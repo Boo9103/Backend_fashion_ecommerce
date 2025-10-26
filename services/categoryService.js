@@ -17,7 +17,7 @@ const createCategory = async ({ name, parent_id, image }) => {
         }
         // Insert category
         const result = await client.query(
-            'INSERT INTO categories (name, parent_id, image) VALUES ($1, $2, $3) RETURNING id',
+            'INSERT INTO categories (name, parent_id, image) VALUES ($1, $2, $3) RETURNING id, name, parent_id, image',
             [name, parent_id || null, image]
         );
         await client.query('COMMIT');
@@ -29,6 +29,50 @@ const createCategory = async ({ name, parent_id, image }) => {
     }
 }
 
+const updateCategory = async (id, { name, parent_id, image }) => {
+
+  const existing = await pool.query('SELECT id FROM categories WHERE id = $1', [id]);
+  if (existing.rowCount === 0) throw new Error('Category not found');
+
+  if (!name || typeof name !== 'string' || name.trim() === '') {
+    throw new Error('Name is required');
+  }
+  if (parent_id && String(parent_id) === String(id)) {
+    throw new Error('parent_id cannot equal id');
+  }
+  if (parent_id) {
+    const chk = await pool.query('SELECT id FROM categories WHERE id = $1', [parent_id]);
+    if (chk.rowCount === 0) throw new Error('Invalid parent_id');
+  }
+
+  const result = await pool.query(
+    `UPDATE categories
+       SET name = $1, parent_id = $2, image = $3, updated_at = NOW()
+     WHERE id = $4
+     RETURNING id, name, parent_id, image, updated_at`,
+    [name.trim(), parent_id || null, image || null, id]
+  );
+  return result.rows[0];
+};
+
+const deleteCategory = async (id)=>{
+    //Kiểm tra sub-categories
+    const checkSub = await pool.query(
+        'SELECT id FROM categories WHERE parent_id = $1', [id]
+    );
+    if (checkSub.rows.length > 0) throw new Error ('Category has sub-categories');
+
+    //Xóa category
+    const result = await pool.query(
+        'DELETE FROM categories WHERE id = $1 RETURNING id', [id]
+    );
+    if (result.rowCount === 0) throw new Error ('Category not found');
+    return result.rows[0];
+};
+
+
 module.exports = {
-    createCategory
+    createCategory,
+    updateCategory,
+    deleteCategory
 };
