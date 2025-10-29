@@ -3,6 +3,7 @@ const router = express.Router();
 const adminController = require('../controllers/adminController');
 const adminCategoryController = require('../controllers/categories/adminCategoryController');
 const adminSupplierController = require('../controllers/suppliers/adminSupplierController');
+const adminProductController = require('../controllers/products/adminProductController');
 const authMiddleware = require('../middleware/authMiddleware');
 
 //Category management
@@ -29,5 +30,11 @@ router.post('/users/:userId/deactivate', authMiddleware, adminController.deactiv
 router.post('/users/:userId/restore', authMiddleware, adminController.restoreUser);
 router.delete('/users/:userId/delete', authMiddleware, adminController.hardDeleteUser);
 
+//Product management
+router.get('/products', authMiddleware, adminProductController.getFlashSaleProducts);
+router.post('/products', authMiddleware, adminProductController.createProduct);
+router.patch('/products/:id', authMiddleware, adminProductController.updateFlashSale);
+router.put('/products/:id', authMiddleware, adminProductController.updateProduct);
+router.delete('/products/:id', authMiddleware, adminProductController.deleteProduct);
 
 module.exports = router;
