@@ -2,14 +2,16 @@ const pool = require('../../config/db');
 const productService = require('../../services/productService');
 
 exports.getFlashSaleProducts = async (req, res) => {
-  const { category_id, supplier_id, limit, page, flash_sale } = req.query;
+  const { category_id, supplier_id, limit, page, flash_sale, min_price, max_price } = req.query;
 
   const filters = {
     category_id,
     supplier_id,
     limit: parseInt(limit) || 10,
     page: parseInt(page) || 1,
-    is_flash_sale: flash_sale === 'true' ? true : flash_sale === 'false' ? false : undefined
+    is_flash_sale: flash_sale === 'true' ? true : flash_sale === 'false' ? false : undefined,
+    min_price: min_price ? parseFloat(min_price) : undefined,
+    max_price: max_price ? parseFloat(max_price) : undefined,
   };
 
   try {
@@ -28,6 +30,7 @@ exports.createProduct = async (req, res)=> {
             images = [], variants = []
         } = req.body;
 
+       
         //Validate required fields
         if (!name || !category_id || !supplier_id || !price) {
             return res.status(400).json({ message: 'Name, category_id, supplier_id, price are required' });
@@ -80,7 +83,13 @@ exports.updateFlashSale = async (req, res)=>{
         const updated = await productService.updateFlashSale(id, {sale_percent, is_flash_sale});
         return res.status(200).json({ message: 'Flash sale updated', product: updated});
     }catch(error){
-        return res.status(400).json({ message: error.message || 'Update flash sale failed' });
+        if (error.message.includes('sale_percent must be greater than 0')) {
+        return res.status(400).json({ message: error.message });
+    }
+        if (error.message === 'Cannot enable flash sale with 0% discount') {
+            return res.status(400).json({ message: 'Discount must be greater than 0% for flash sale' });
+        }
+        return res.status(400).json({ message: error.message });
     }
 };
 

@@ -1,6 +1,6 @@
 const pool = require('../config/db');
 
-exports.getProducts = async ( {category_id, supplier_id, is_flash_sale, limit = 10, page = 1})=>{
+exports.getProducts = async ( {category_id, supplier_id, is_flash_sale,min_price, max_price, limit = 10, page = 1})=>{
     const offset = (page-1)*limit;
     let query = `
       SELECT * FROM v_product_full p
@@ -21,15 +21,27 @@ exports.getProducts = async ( {category_id, supplier_id, is_flash_sale, limit = 
       params.push(supplier_id);
       hasWhere = true;
     }
-    // 3. Lọc flash sale (MỚI)
+    // 3. Lọc flash sale
     if (is_flash_sale !== undefined) {
       query += hasWhere ? ' AND p.is_flash_sale = $' + (params.length + 1)
                         : ' WHERE p.is_flash_sale = $1';
       params.push(is_flash_sale); // true / false
       hasWhere = true;
     }
+    // 4. Lọc theo giá (final_price)
+    if(min_price !== undefined){
+      query += hasWhere ? ` AND p.final_price >= $${params.length + 1}` : `WHERE p.final_price >= $1`;
+      params.push(min_price);
+      hasWhere = true;
+    }
 
-    // 4. Phân trang
+    if(max_price !== undefined){
+      query += hasWhere ? ` AND p.final_price <= $${params.length + 1}` : `WHERE p.final_price <= $1`;
+      params.push(max_price);
+      hasWhere = true;
+    }
+
+    // 5. Phân trang
     const limitPos = params.length + 1;
     const offsetPos = params.length + 2;
     query += ` LIMIT $${limitPos} OFFSET $${offsetPos}`;
@@ -45,6 +57,22 @@ exports.createProduct = async (productData) => {
     price, sale_percent = 0, is_flash_sale = false,
     images = [], variants = []
   } = productData;
+
+  //validate: sp có ít nhất 1 ảnh
+  if(!images || images.length === 0){
+      const err = new Error('Product must have at least 1 image');
+      err.statusCode = 400;
+      throw err;
+  }
+
+  //validate: variant have at least 1 variant image
+  for( const variant of variants){
+      if(!variant.images || variant.images.length === 0){
+        const err = new Error(`Variant ${variant.sku} must have at least 1 image`);
+        err.statusCode = 400;
+        throw err;
+      }
+  }
 
   // set to match DB (ensure you ALTER TABLE to same value)
   const MAX_SKU_LEN = 64;
@@ -225,6 +253,11 @@ exports.updateFlashSale = async(productId, { sale_percent, is_flash_sale})=> {
   try{
     await client.query('BEGIN');
 
+    // Validate ở BE trước
+    if (is_flash_sale === true && (!sale_percent || sale_percent <= 0)) {
+      throw new Error('sale_percent must be greater than 0 when is_flash_sale = true');
+    }
+
     const result = await client.query(
       `UPDATE products
       SET sale_percent = $1, is_flash_sale = $2, updated_at = NOW()
@@ -239,6 +272,11 @@ exports.updateFlashSale = async(productId, { sale_percent, is_flash_sale})=> {
     return result.rows[0];
   } catch (error) {
     await client.query('ROLLBACK');
+
+    // XỬ LÝ LỖI TỪ CHECK CONSTRAINT
+    if (error.constraint === 'chk_flash_sale_percent') {
+      throw new Error('Cannot enable flash sale with 0% discount');
+    }
     throw error;
   } finally {
     client.release();
@@ -247,6 +285,22 @@ exports.updateFlashSale = async(productId, { sale_percent, is_flash_sale})=> {
 
 exports.updateProduct = async (productId, data) => {
   const { name, description, price, images = [], variants = [] } = data;
+
+  // VALIDATE: Nếu có gửi images → phải có ít nhất 1
+  if (images.length === 0) {
+    const err = new Error('Product must have at least 1 image');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  // VALIDATE: Mỗi variant phải có ít nhất 1 ảnh
+  for (const v of variants) {
+    if (!v.images || v.images.length === 0) {
+      const err = new Error(`Variant SKU "${v.sku}" must have at least 1 image`);
+      err.statusCode = 400;
+      throw err;
+    }
+  }
   const client = await pool.connect();
 
   try{

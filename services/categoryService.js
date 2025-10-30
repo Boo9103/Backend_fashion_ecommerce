@@ -8,6 +8,12 @@ const createCategory = async ({ name, parent_id, image }) => {
         if (!name || name.trim() === ''){
             throw new Error('Name is required');
         }
+
+        //Kiểm tra image bắt buộc
+        if (!image || image.trim() === ''){
+            throw new Error('Image is required');
+        }
+
         // Kiểm tra parent_id nếu có
         if(parent_id){
             const parentCheck = await client.query('SELECT id FROM categories WHERE id = $1', [parent_id]);
@@ -31,28 +37,31 @@ const createCategory = async ({ name, parent_id, image }) => {
 
 const updateCategory = async (id, { name, parent_id, image }) => {
 
-  const existing = await pool.query('SELECT id FROM categories WHERE id = $1', [id]);
-  if (existing.rowCount === 0) throw new Error('Category not found');
+    const existing = await pool.query('SELECT id FROM categories WHERE id = $1', [id]);
+    if (existing.rowCount === 0) throw new Error('Category not found');
 
-  if (!name || typeof name !== 'string' || name.trim() === '') {
-    throw new Error('Name is required');
-  }
-  if (parent_id && String(parent_id) === String(id)) {
-    throw new Error('parent_id cannot equal id');
-  }
-  if (parent_id) {
-    const chk = await pool.query('SELECT id FROM categories WHERE id = $1', [parent_id]);
-    if (chk.rowCount === 0) throw new Error('Invalid parent_id');
-  }
+    if (!name || typeof name !== 'string' || name.trim() === '') {
+        throw new Error('Name is required');
+    }
+    if(image !== undefined && (!image || image.trim() === '')){
+        throw new Error('Image is required');
+    }
+    if (parent_id && String(parent_id) === String(id)) {
+        throw new Error('parent_id cannot equal id');
+    }
+    if (parent_id) {
+        const chk = await pool.query('SELECT id FROM categories WHERE id = $1', [parent_id]);
+        if (chk.rowCount === 0) throw new Error('Invalid parent_id');
+    }
 
-  const result = await pool.query(
+    const result = await pool.query(
     `UPDATE categories
-       SET name = $1, parent_id = $2, image = $3, updated_at = NOW()
-     WHERE id = $4
-     RETURNING id, name, parent_id, image, updated_at`,
+        SET name = $1, parent_id = $2, image = $3, updated_at = NOW()
+        WHERE id = $4
+        RETURNING id, name, parent_id, image, updated_at`,
     [name.trim(), parent_id || null, image || null, id]
-  );
-  return result.rows[0];
+    );
+    return result.rows[0];
 };
 
 const deleteCategory = async (id, cascade = false)=>{

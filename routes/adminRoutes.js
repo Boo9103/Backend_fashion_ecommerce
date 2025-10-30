@@ -36,5 +36,6 @@ router.post('/products', authMiddleware, adminProductController.createProduct);
 router.patch('/products/:id', authMiddleware, adminProductController.updateFlashSale);
 router.put('/products/:id', authMiddleware, adminProductController.updateProduct);
 router.delete('/products/:id', authMiddleware, adminProductController.deleteProduct);
+//vd lọc theo giá:http://localhost:3000/admin/products?flash_sale=true&min_price=200000&max_price=500000
 
 module.exports = router;
