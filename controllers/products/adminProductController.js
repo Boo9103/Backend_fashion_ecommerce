@@ -1,8 +1,10 @@
-const pool = require('../../config/db');
+const { validatePriceRange } = require('../../utils/validate');
 const productService = require('../../services/productService');
 
 exports.getFlashSaleProducts = async (req, res) => {
   const { category_id, supplier_id, limit, page, flash_sale, min_price, max_price } = req.query;
+  
+  const { min, max } = validatePriceRange(min_price, max_price);
 
   const filters = {
     category_id,
@@ -10,8 +12,8 @@ exports.getFlashSaleProducts = async (req, res) => {
     limit: parseInt(limit) || 10,
     page: parseInt(page) || 1,
     is_flash_sale: flash_sale === 'true' ? true : flash_sale === 'false' ? false : undefined,
-    min_price: min_price ? parseFloat(min_price) : undefined,
-    max_price: max_price ? parseFloat(max_price) : undefined,
+    min_price: min,
+    max_price: max,
   };
 
   try {

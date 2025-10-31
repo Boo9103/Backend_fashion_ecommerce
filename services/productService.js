@@ -1,4 +1,10 @@
 const pool = require('../config/db');
+const {
+  validatePrice,
+  validateStockQty,
+  validateSalePercent,
+  validateSoldQuantity
+} = require('../utils/validate');
 
 exports.getProducts = async ( {category_id, supplier_id, is_flash_sale,min_price, max_price, limit = 10, page = 1})=>{
     const offset = (page-1)*limit;
@@ -53,10 +59,21 @@ exports.getProducts = async ( {category_id, supplier_id, is_flash_sale,min_price
 
 exports.createProduct = async (productData) => {
   const {
-    name, description, brand, category_id, supplier_id,
+    name, description, category_id, supplier_id,
     price, sale_percent = 0, is_flash_sale = false,
     images = [], variants = []
   } = productData;
+
+  productData.price = validatePrice(price);
+  productData.sale_percent = validateSalePercent(sale_percent);
+
+  for(const v of variants){
+    v.stock_qty = validateStockQty(v.stock_qty);
+
+    if(v.sold_qty !== undefined){
+      v.sold_qty = validateSoldQuantity(v.sold_qty);
+    }
+  }
 
   //validate: sp có ít nhất 1 ảnh
   if(!images || images.length === 0){
@@ -285,6 +302,10 @@ exports.updateFlashSale = async(productId, { sale_percent, is_flash_sale})=> {
 
 exports.updateProduct = async (productId, data) => {
   const { name, description, price, images = [], variants = [] } = data;
+
+  if (!price || price <= 0) {
+    throw new Error('Price must be greater than 0');
+  }
 
   // VALIDATE: Nếu có gửi images → phải có ít nhất 1
   if (images.length === 0) {

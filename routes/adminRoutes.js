@@ -4,6 +4,7 @@ const adminController = require('../controllers/adminController');
 const adminCategoryController = require('../controllers/categories/adminCategoryController');
 const adminSupplierController = require('../controllers/suppliers/adminSupplierController');
 const adminProductController = require('../controllers/products/adminProductController');
+const adminPromotionController = require('../controllers/promotions/adminPromotionController');
 const authMiddleware = require('../middleware/authMiddleware');
 
 //Category management
@@ -38,4 +39,12 @@ router.put('/products/:id', authMiddleware, adminProductController.updateProduct
 router.delete('/products/:id', authMiddleware, adminProductController.deleteProduct);
 //vd lọc theo giá:http://localhost:3000/admin/products?flash_sale=true&min_price=200000&max_price=500000
 
+
+//Promotion management
+router.post('/promotions', authMiddleware, adminPromotionController.createPromotion);
+router.get('/promotions', authMiddleware, adminPromotionController.getPromotions);
+router.get('/promotions/:id', authMiddleware, adminPromotionController.getPromotionById);
+router.put('/promotions/:id', authMiddleware, adminPromotionController.updatePromotion);
+router.delete('/promotions/:id', authMiddleware, adminPromotionController.deletePromotion);
+router.patch('/promotions/:id/status', authMiddleware, adminPromotionController.updatePromotionStatus);
 module.exports = router;
