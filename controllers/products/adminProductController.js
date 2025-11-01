@@ -1,5 +1,6 @@
 const { validatePriceRange } = require('../../utils/validate');
 const productService = require('../../services/productService');
+const e = require('express');
 
 exports.getFlashSaleProducts = async (req, res) => {
   const { category_id, supplier_id, limit, page, flash_sale, min_price, max_price } = req.query;
@@ -122,5 +123,17 @@ exports.deleteProduct = async (req, res)=> {
         return res.status(200).json({ message: 'Product deleted successfully' });
     }catch(error){
         return res.status(400).json({ message: error.message || 'Delete product failed' });
+    }
+};
+
+exports.getProductById = async (req, res)=> {
+    const { id } =req.params;
+    try {
+        const product = await productService.getProductById(id);
+        if (!product) return res.status(404).json({ message: 'Product not found' });
+        return res.status(200).json(product);
+    }catch(error){
+        console.error('getProduct error:', error && error.stack ? error.stack : error);
+        return res.status(500).json({ message: 'Server error' });
     }
 };

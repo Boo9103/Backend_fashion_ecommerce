@@ -34,6 +34,7 @@ router.delete('/users/:userId/delete', authMiddleware, adminController.hardDelet
 //Product management
 router.get('/products', authMiddleware, adminProductController.getFlashSaleProducts);
 router.post('/products', authMiddleware, adminProductController.createProduct);
+router.get('/products/:id', authMiddleware, adminProductController.getProductById);
 router.patch('/products/:id', authMiddleware, adminProductController.updateFlashSale);
 router.put('/products/:id', authMiddleware, adminProductController.updateProduct);
 router.delete('/products/:id', authMiddleware, adminProductController.deleteProduct);

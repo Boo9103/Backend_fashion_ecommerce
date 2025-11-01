@@ -441,3 +441,52 @@ exports.deleteProduct = async (productId) => {
     if (client) client && client.release();
   }
 };
+
+
+exports.getProductById = async (productId) => {
+  const q = `
+    SELECT 
+      p.id,
+      p.name,
+      p.description,
+      p.price,
+      p.sale_percent,
+      p.is_flash_sale,
+      c.name AS category_name,
+      s.name AS supplier_name,
+      COALESCE(
+        (
+          SELECT json_agg(json_build_object('url', pi.url) ORDER BY pi.id)
+          FROM product_images pi
+          WHERE pi.product_id = p.id AND pi.variant_id IS NULL
+        ), '[]'::json
+      ) AS product_images,
+      COALESCE(
+        (
+          SELECT json_agg(
+            json_build_object(
+              'id', pv.id,
+              'sku', pv.sku,
+              'color_name', pv.color_name,
+              'color_code', pv.color_code,
+              'sizes', pv.sizes,
+              'stock_qty', pv.stock_qty,
+              'images', (
+                SELECT COALESCE(json_agg(json_build_object('url', pi2.url) ORDER BY pi2.id), '[]'::json)
+                FROM product_images pi2
+                WHERE pi2.variant_id = pv.id
+              )
+            ) ORDER BY pv.id
+          )
+          FROM product_variants pv
+          WHERE pv.product_id = p.id
+        ), '[]'::json
+      ) AS variants
+    FROM products p
+    LEFT JOIN categories c ON p.category_id = c.id
+    LEFT JOIN suppliers s ON p.supplier_id = s.id
+    WHERE p.id = $1
+  `;
+  const res = await pool.query(q, [productId]);
+  return res.rowCount ? res.rows[0] : null;
+};
