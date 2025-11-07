@@ -6,55 +6,55 @@ const {
   validateSoldQuantity
 } = require('../utils/validate');
 
-exports.getProducts = async ({ category_id, supplier_id, is_flash_sale, min_price, max_price, limit = 10, page = 1 }) => {
-  const offset = (page - 1) * limit;
-  let query = `
+exports.getProducts = async ( {category_id, supplier_id, is_flash_sale,min_price, max_price, limit = 10, page = 1})=>{
+    const offset = (page-1)*limit;
+    let query = `
       SELECT * FROM v_product_full p
     `;
-  const params = [];
-  let hasWhere = false;
-  // 1. Lọc category
-  if (category_id) {
-    query += ' WHERE p.category_id = $1';
-    params.push(category_id);
-    hasWhere = true;
-  }
+    const params = [];
+    let hasWhere = false;
+    // 1. Lọc category
+    if (category_id) {
+      query += ' WHERE p.category_id = $1';
+      params.push(category_id);
+      hasWhere = true;
+    }
 
-  // 2. Lọc supplier
-  if (supplier_id) {
-    query += hasWhere ? ' AND p.supplier_id = $' + (params.length + 1)
-      : ' WHERE p.supplier_id = $1';
-    params.push(supplier_id);
-    hasWhere = true;
-  }
-  // 3. Lọc flash sale
-  if (is_flash_sale !== undefined) {
-    query += hasWhere ? ' AND p.is_flash_sale = $' + (params.length + 1)
-      : ' WHERE p.is_flash_sale = $1';
-    params.push(is_flash_sale); // true / false
-    hasWhere = true;
-  }
-  // 4. Lọc theo giá (final_price)
-  if (min_price !== undefined) {
-    query += hasWhere ? ` AND p.final_price >= $${params.length + 1}` : `WHERE p.final_price >= $1`;
-    params.push(min_price);
-    hasWhere = true;
-  }
+    // 2. Lọc supplier
+    if (supplier_id) {
+      query += hasWhere ? ' AND p.supplier_id = $' + (params.length + 1) 
+                        : ' WHERE p.supplier_id = $1';
+      params.push(supplier_id);
+      hasWhere = true;
+    }
+    // 3. Lọc flash sale
+    if (is_flash_sale !== undefined) {
+      query += hasWhere ? ' AND p.is_flash_sale = $' + (params.length + 1)
+                        : ' WHERE p.is_flash_sale = $1';
+      params.push(is_flash_sale); // true / false
+      hasWhere = true;
+    }
+    // 4. Lọc theo giá (final_price)
+    if(min_price !== undefined){
+      query += hasWhere ? ` AND p.final_price >= $${params.length + 1}` : `WHERE p.final_price >= $1`;
+      params.push(min_price);
+      hasWhere = true;
+    }
 
-  if (max_price !== undefined) {
-    query += hasWhere ? ` AND p.final_price <= $${params.length + 1}` : `WHERE p.final_price <= $1`;
-    params.push(max_price);
-    hasWhere = true;
-  }
+    if(max_price !== undefined){
+      query += hasWhere ? ` AND p.final_price <= $${params.length + 1}` : `WHERE p.final_price <= $1`;
+      params.push(max_price);
+      hasWhere = true;
+    }
 
-  // 5. Phân trang
-  const limitPos = params.length + 1;
-  const offsetPos = params.length + 2;
-  query += ` LIMIT $${limitPos} OFFSET $${offsetPos}`;
-  params.push(limit, offset);
+    // 5. Phân trang
+    const limitPos = params.length + 1;
+    const offsetPos = params.length + 2;
+    query += ` LIMIT $${limitPos} OFFSET $${offsetPos}`;
+    params.push(limit, offset);
 
-  const result = await pool.query(query, params);
-  return result.rows;
+    const result = await pool.query(query, params);
+    return result.rows;
 };
 
 exports.createProduct = async (productData) => {
@@ -67,28 +67,28 @@ exports.createProduct = async (productData) => {
   productData.price = validatePrice(price);
   productData.sale_percent = validateSalePercent(sale_percent);
 
-  for (const v of variants) {
-    // v.stock_qty = validateStockQty(v.stock_qty);
+  for(const v of variants){
+    v.stock_qty = validateStockQty(v.stock_qty);
 
-    // if (v.sold_qty !== undefined) {
-    //   v.sold_qty = validateSoldQuantity(v.sold_qty);
-    // }
+    if(v.sold_qty !== undefined){
+      v.sold_qty = validateSoldQuantity(v.sold_qty);
+    }
   }
 
   //validate: sp có ít nhất 1 ảnh
-  if (!images || images.length === 0) {
-    const err = new Error(`Product must have at least 1 image, current is ${images.length}`);
-    err.statusCode = 400;
-    throw err;
+  if(!images || images.length === 0){
+      const err = new Error('Product must have at least 1 image');
+      err.statusCode = 400;
+      throw err;
   }
 
   //validate: variant have at least 1 variant image
-  for (const variant of variants) {
-    if (!variant.images || variant.images.length === 0) {
-      const err = new Error(`Variant ${variant.sku} must have at least 1 image, current is ${variant.images.length}`);
-      err.statusCode = 400;
-      throw err;
-    }
+  for( const variant of variants){
+      if(!variant.images || variant.images.length === 0){
+        const err = new Error(`Variant ${variant.sku} must have at least 1 image`);
+        err.statusCode = 400;
+        throw err;
+      }
   }
 
   // set to match DB (ensure you ALTER TABLE to same value)
@@ -205,7 +205,7 @@ exports.createProduct = async (productData) => {
 
     // === 6. LẤY DỮ LIỆU ĐẦY ĐỦ (NESTED JSON) ===
     const result = await client.query(
-      `SELECT 
+        `SELECT 
             p.id,
             p.name,
             p.description,
@@ -251,7 +251,7 @@ exports.createProduct = async (productData) => {
         LEFT JOIN categories c ON p.category_id = c.id
         LEFT JOIN suppliers s ON p.supplier_id = s.id
         WHERE p.id = $1`,
-      [productId]
+        [productId]
     );
 
     return result.rows[0];
@@ -264,10 +264,10 @@ exports.createProduct = async (productData) => {
   }
 };
 
-exports.updateFlashSale = async (productId, { sale_percent, is_flash_sale }) => {
+exports.updateFlashSale = async(productId, { sale_percent, is_flash_sale})=> {
   const client = await pool.connect();
 
-  try {
+  try{
     await client.query('BEGIN');
 
     // Validate ở BE trước
@@ -283,7 +283,7 @@ exports.updateFlashSale = async (productId, { sale_percent, is_flash_sale }) => 
       [sale_percent, is_flash_sale, productId]
     );
 
-    if (result.rowCount === 0) throw new Error('Product not found');
+    if (result.rowCount === 0) throw new Error ('Product not found');
 
     await client.query('COMMIT');
     return result.rows[0];
@@ -324,7 +324,7 @@ exports.updateProduct = async (productId, data) => {
   }
   const client = await pool.connect();
 
-  try {
+  try{
     await client.query('BEGIN');
 
     //1. cập nhật product
@@ -335,12 +335,12 @@ exports.updateProduct = async (productId, data) => {
       RETURNING *`,
       [name, description, price, productId]
     );
-    if (productRes.rowCount === 0) throw new Error('Product not found');
+    if (productRes.rowCount === 0) throw new Error ('Product not found');
 
     //2. Xóa ảnh cũ + thêm mới (product images)
     await client.query('DELETE FROM product_images WHERE product_id = $1 AND variant_id IS NULL', [productId]);
-    if (images.length > 0) {
-      const values = images.map((_, i) => `($1, $${i + 2})`).join(',');
+    if(images.length > 0){
+      const values = images.map((_, i)=> `($1, $${i+2})`).join(',');
       const params = [productId, ...images];
       await client.query(
         `INSERT INTO product_images (product_id, url) VALUES ${values}`,
@@ -350,21 +350,21 @@ exports.updateProduct = async (productId, data) => {
 
     //3. Xóa variants cũ + ảnh của variants
     const oldVariants = await client.query('SELECT id FROM product_variants WHERE product_id = $1', [productId]);
-    for (const v of oldVariants.rows) {
+    for (const v of oldVariants.rows){
       await client.query('DELETE FROM product_images WHERE variant_id = $1', [v.id]);
     }
     // fix: thêm dấu '=' cho WHERE
     await client.query('DELETE FROM product_variants WHERE product_id = $1', [productId]);
 
     //4. Thêm variants mới
-    for (const variant of variants) {
+    for(const variant of variants){
       // use the iterator variable `variant` (was `v` before)
       const { sku, color_name, color_code, sizes, stock_qty, images: vImages = [] } = variant;
-
+      
       //kiểm tra sku 
       const checkSku = await client.query('SELECT 1 FROM product_variants WHERE sku = $1', [sku]);
-      if (checkSku.rowCount > 0) {
-        throw new Error(`SKU "${sku}" already exists`);
+      if(checkSku.rowCount > 0){
+        throw new Error (`SKU "${sku}" already exists`);
       }
 
       const variantRes = await client.query(
@@ -376,8 +376,8 @@ exports.updateProduct = async (productId, data) => {
       );
       const variantId = variantRes.rows[0].id;
 
-      if (vImages.length > 0) {
-        const values = vImages.map((_, i) => `($1, $${i + 2})`).join(',');
+      if(vImages.length > 0){
+        const values = vImages.map((_, i)=> `($1, $${i+2})`).join(',');
         await client.query(
           `INSERT INTO product_images (variant_id, url) VALUES ${values}`,
           [variantId, ...vImages]
@@ -392,7 +392,7 @@ exports.updateProduct = async (productId, data) => {
 
     await client.query('COMMIT');
     return full.rows[0];
-  } catch (error) {
+  }catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
@@ -452,8 +452,6 @@ exports.getProductById = async (productId) => {
       p.price,
       p.sale_percent,
       p.is_flash_sale,
-      p.category_id,
-      p.supplier_id,
       c.name AS category_name,
       s.name AS supplier_name,
       COALESCE(
