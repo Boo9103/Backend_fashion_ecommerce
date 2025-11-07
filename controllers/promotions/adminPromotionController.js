@@ -133,14 +133,14 @@ exports.deletePromotion = async (req, res) => {
     try{
         const deleted = await promotionService.deletePromotion(id);
         return res.json({
-            message: 'Promotion deleted successfully',
+            message: 'Xóa mã giảm giá thành công',
             promotion: deleted
         })
     }catch (error){
-        if (error.message === 'Promotion not found') {
+        if (error.message === 'Không tìm thấy mã giảm giá') {
             return res.status(404).json({ message: error.message });
         }
-        return res.status(500).json({ message: 'Server error', error: error.message });
+        return res.status(500).json({ message: 'Lỗi server', error: error.message });
   }
 };
 
