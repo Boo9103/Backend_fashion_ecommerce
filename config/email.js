@@ -22,4 +22,17 @@ const sendOtpEmail = async (to, otp)=> {
     });
 };
 
-module.exports = { sendOtpEmail };
+// Gửi email OTP quên mật khẩu
+const sendResetPasswordEmail = async (to, otp) => {
+  let template = fs.readFileSync(path.join(__dirname, '../templates/resetPasswordTemplate.html'), 'utf-8');
+  template = template.replace('{{OTP}}', otp);
+
+  await transporter.sendMail({
+    from: `HS Fashion <${process.env.EMAIL_USER}>`,
+    to,
+    subject: 'Mã xác nhận đặt lại mật khẩu - HS Fashion',
+    html: template,
+  });
+};
+
+module.exports = { sendOtpEmail, sendResetPasswordEmail };

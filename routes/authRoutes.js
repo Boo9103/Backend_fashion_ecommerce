@@ -4,16 +4,15 @@ const authController = require('../controllers/authController');
 const { authMiddleware, requireAdmin, requireUser } = require('../middleware/authMiddleware');
 const passport = require('../config/passport');
 
-// debug: kiểm tra handlers trước khi dùng
-// console.log('authController:', authController);
-// console.log('typeof authController.login =', typeof authController.login);
-
 router.post('/login', authController.login); 
 router.post('/refresh', authController.refresh);
 router.post('/register', authController.sendOtpController); // Gửi OTP
 router.post('/verify-otp', authController.verifyOtpController); // Verify và lưu
 router.post('/logout', requireUser, authController.logout);
 router.post('/admin/login', authController.adminLogin);
+
+router.post('/reset-password', authController.requestPasswordReset);//gửi otp đổi mk
+router.post('/reset-password/verify', authController.verifyResetOtp); //xác thực otp đổi mk
 
 router.get('/me', requireUser, (req, res) => {
     res.json({ user: req.user });
