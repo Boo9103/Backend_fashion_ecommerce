@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
-const { authMiddleware, requireAdmin } = require('../middleware/authMiddleware');
+const { authMiddleware, requireAdmin, requireUser } = require('../middleware/authMiddleware');
 const passport = require('../config/passport');
 
 // debug: kiểm tra handlers trước khi dùng
@@ -12,10 +12,10 @@ router.post('/login', authController.login);
 router.post('/refresh', authController.refresh);
 router.post('/register', authController.sendOtpController); // Gửi OTP
 router.post('/verify-otp', authController.verifyOtpController); // Verify và lưu
-router.post('/logout', authMiddleware, authController.logout);
+router.post('/logout', requireUser, authController.logout);
 router.post('/admin/login', authController.adminLogin);
 
-router.get('/me', authMiddleware, (req, res) => {
+router.get('/me', requireUser, (req, res) => {
     res.json({ user: req.user });
 });
 
@@ -26,6 +26,6 @@ router.get(
   authController.googleCallback
 );
 
-router.get('/check-login',authMiddleware, authController.checkLoginStatus);
+router.get('/check-login',requireUser, authController.checkLoginStatus);
 
 module.exports = router;
