@@ -272,4 +272,115 @@ const googleLogin = async (user) => {
     client.release();
   }
 };
+
 module.exports = {register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister, googleLogin};
+
+exports.requestPasswordReset = async (email) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    //Kiểm tra email tồn tại 
+    const userResult = await client.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (userResult.rows.length === 0) {
+      // Trả về message chung để tránh lộ thông tin tài khoản
+      await client.query('ROLLBACK'); 
+      return { message: 'If this email exists, an OTP has been sent.' };
+    }
+    const user = userResult.rows[0];
+    if (user.status === 'banned') {
+      throw new Error('Account is banned');
+    }
+
+    // CHỐNG SPAM: kiểm tra lần gửi gần nhất (tương tự sendOtp)
+    const lastOtp = await client.query(`
+      SELECT created_at FROM otp_verifications
+      WHERE email = $1
+      ORDER BY created_at DESC LIMIT 1
+      `, [email]);
+    
+    if(lastOtp.rows.length > 0){
+      const lastSent = new Date(lastOtp.rows[0].created_at);
+      if ((Date.now() - lastSent.getTime()) / 1000 < 60) {
+        throw new Error('OTP already sent recently. Please wait before requesting again.');
+      }
+    }
+    
+    //Tạo OTP
+    const otp = generateOtp();
+    const expireSeconds = parseInt(process.env.OTP_EXPIRY || '300'); // mặc định 5p
+    const expiresAt = Math.floor(Date.now() / 1000) + expireSeconds;
+
+    //Xóa OTP cũ (nếu có)
+    await client.query('DELETE FROM otp_verifications WHERE email = $1', [email]);
+
+    //Lưu OTP mới
+    await client.query(
+      'INSERT INTO otp_verifications (email, otp, expires_at) VALUES ($1, $2, to_timestamp($3))',
+      [email, otp, expiresAt]
+    );
+
+    await client.query('COMMIT');
+
+    //Gửi email
+    const { sendResetPasswordEmail } = require('../config/email');
+    await sendResetPasswordEmail(email, otp);
+    return { message: 'OTP sent to your email' };
+  }catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+exports.verifyOtpAndResetPassword = async ({ email, otp, newPassword }) => {
+  const  client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    //Kiểm tra otp còn hạn và khớp
+    const result = await client.query(
+      `SELECT otp FROM otp_verifications WHERE email = $1 AND expires_at > NOW()`,
+      [email]
+    );
+
+    if(result.rows.length === 0 || result.rows[0].otp !== otp){ 
+      throw new Error('Invalid or expired OTP');
+    }
+
+    //Kiểm tra user tồn tại
+    const userResult = await client.query('SELECT id FROM users WHERE email = $1', [email]);
+
+    if(userResult.rows.length === 0){
+      throw new Error('User not found');
+    }
+
+    const user = userResult.rows[0];
+
+    //Băm mật khẩu mới
+    const password_hash = await bcrypt.hash(newPassword, 10);
+
+    //Cập nhật mật khẩu
+    await client.query(`
+      UPDATE users SET password_hash = $1 WHERE id = $2
+      `, [password_hash, user.id]);
+
+    //Xóa OTP sau khi dùng
+    await client.query('DELETE FROM otp_verifications WHERE email = $1', [email]);
+
+    //revoke tất cả refresh token hiện tại của user
+    await client.query(
+      'UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1 AND revoked = FALSE',
+      [user.id]
+    );
+
+    await client.query('COMMIT');
+    return { message: 'Password has been reset successfully' };
+  }catch(error){
+    await client.query('ROLLBACK');
+    throw error;  
+  }finally{
+    client.release();
+  }
+};

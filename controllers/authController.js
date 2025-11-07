@@ -178,3 +178,29 @@ const checkLoginStatus = (req, res)=>{
 
 module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController,logout, googleAuth, googleCallback, checkLoginStatus };
 
+exports.requestPasswordReset = async (req, res, next) => {
+  const { email } = req.body;
+  try {
+    if(!email){
+      return res.status(400).json({ error: 'Missing email' });
+    }
+    const result = await authService.requestPasswordReset(email);
+    res.status(200).json( result);
+  }catch(error){
+    return next(error);
+  }
+};
+
+exports.verifyResetOtp = async (req, res, next) => {
+  const { email, otp, newPassword } = req.body;
+
+  try{
+    if(!email || !otp || !newPassword){
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    const result = await authService.verifyOtpAndResetPassword({ email, otp, newPassword });
+    res.status(200).json(result);
+  }catch(error){
+    return next(error);
+  }
+};
