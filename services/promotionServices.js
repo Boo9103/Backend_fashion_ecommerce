@@ -170,12 +170,7 @@ exports.createPromotion = async (data) => {
 
     // TH2: product_ids === null hoặc undefined → áp dụng cho TẤT CẢ sản phẩm
     } else if (product_ids === null || product_ids === undefined) {
-      await client.query(
-        `INSERT INTO promotion_products (promotion_id, product_id)
-         SELECT $1, id FROM products
-         ON CONFLICT (promotion_id, product_id) DO NOTHING`,
-        [promoId]
-      );
+      //Không làm gì cả
     }
 
     // TH3: product_ids = [] → không insert gì cả (chưa áp dụng sản phẩm)
@@ -218,9 +213,11 @@ exports.createPromotion = async (data) => {
 
 
 exports.getPromotions = async ({ status, type, code, page, limit })=> {
+
+    await this.expirePromotions();
     const offset = (page - 1)*limit;
 
-   let query = `
+    let query = `
     SELECT 
         p.*,
         CASE 
@@ -282,6 +279,7 @@ exports.getPromotions = async ({ status, type, code, page, limit })=> {
 
 
 exports.getPromotionById = async (id)=>{
+    await this.expirePromotions();
     const result = await pool.query(
         `SELECT 
                 p.*,
@@ -522,4 +520,19 @@ exports.updatePromotionStatus = async (id, data)=>{
     } finally {
         client.release();
     }
+};
+
+
+exports.expirePromotions = async function(){
+    const q =`
+        UPDATE promotions 
+        SET status = 'inactive',
+            updated_at = NOW()
+        WHERE end_date < NOW()
+            AND status != 'inactive'
+        RETURNING id
+    `;
+
+    const res = await pool.query(q);
+    return res.rowCount;
 };
