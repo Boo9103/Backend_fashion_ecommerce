@@ -9,7 +9,7 @@ exports.createPromotion = async (req, res)=>{
             status = 'active', product_ids = []
         } = req.body;
 
-        if(product_ids !== undefined && !Array.isArray(product_ids)){
+        if(product_ids !== null && !Array.isArray(product_ids)){
             return res.status(400).json({ error: 'product_ids must be an array or null' });
         }
 
