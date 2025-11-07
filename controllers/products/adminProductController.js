@@ -1,6 +1,5 @@
 const { validatePriceRange } = require('../../utils/validate');
 const productService = require('../../services/productService');
-const e = require('express');
 
 exports.getFlashSaleProducts = async (req, res) => {
   const { category_id, supplier_id, limit, page, flash_sale, min_price, max_price } = req.query;
@@ -137,3 +136,47 @@ exports.getProductById = async (req, res)=> {
         return res.status(500).json({ message: 'Server error' });
     }
 };
+
+exports.getProductsForPromotion = async (req, res) => {
+    const { search_key, category_id, supplier_id, limit, page } = req.query;
+
+    try {
+        if(req.user?.role !== 'admin'){
+            return res.status(403).json({ message: 'Access denied: Admins only' });
+        }
+
+        const filter = {
+            search_key,
+            category_id,
+            supplier_id,
+            limit: parseInt(limit) || 10,
+            page: parseInt(page) || 1,
+        };
+
+        // productService.getProducts currently returns an array of rows.
+        // Keep backward-compatibility: accept both shapes ({products, total}) or plain array.
+        const Result = await productService.getProducts(filter);
+        let products = [];
+        let total = 0;
+        if (Array.isArray(Result)) {
+            products = Result;
+            total = products.length;
+        } else if (Result && typeof Result === 'object') {
+            products = Result.products || [];
+            total = typeof Result.total === 'number' ? Result.total : (products.length || 0);
+        }
+
+        return res.json({ 
+            message: 'Products retrieved successfully for promotion',
+            products,
+            pagination: {
+                limit: parseInt(limit) || 10,
+                page: parseInt(page) || 1,
+                total
+            }
+        });
+    
+    }catch(error){
+        return res.status(500).json({ message: 'Server error' });
+    }
+}

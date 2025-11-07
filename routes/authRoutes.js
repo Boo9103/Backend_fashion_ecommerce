@@ -1,11 +1,13 @@
 const express = require('express');
+const router = express.Router();
 const authController = require('../controllers/authController');
-const authMiddleware = require('../middleware/authMiddleware');
+const { authMiddleware, requireAdmin } = require('../middleware/authMiddleware');
 const passport = require('../config/passport');
 
-const router = express.Router();
+// debug: kiểm tra handlers trước khi dùng
+// console.log('authController:', authController);
+// console.log('typeof authController.login =', typeof authController.login);
 
-// router.post('/register', authController.register);
 router.post('/login', authController.login); 
 router.post('/refresh', authController.refresh);
 router.post('/register', authController.sendOtpController); // Gửi OTP

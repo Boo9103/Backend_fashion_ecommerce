@@ -6,55 +6,74 @@ const {
   validateSoldQuantity
 } = require('../utils/validate');
 
-exports.getProducts = async ( {category_id, supplier_id, is_flash_sale,min_price, max_price, limit = 10, page = 1})=>{
-    const offset = (page-1)*limit;
-    let query = `
-      SELECT * FROM v_product_full p
-    `;
-    const params = [];
-    let hasWhere = false;
-    // 1. Lọc category
-    if (category_id) {
-      query += ' WHERE p.category_id = $1';
-      params.push(category_id);
-      hasWhere = true;
-    }
+// Returns products. Default behavior: only return products with status = 'active' unless
+// caller passes `status` explicitly. To return all statuses, pass status = 'all'.
+exports.getProducts = async ( {search_key, category_id, supplier_id, is_flash_sale, min_price, max_price, status, limit = 10, page = 1})=>{
+  const offset = (page-1)*limit;
+  let query = `SELECT * FROM v_product_full p`;
+  const conditions = [];
+  const params = [];
 
-    // 2. Lọc supplier
-    if (supplier_id) {
-      query += hasWhere ? ' AND p.supplier_id = $' + (params.length + 1) 
-                        : ' WHERE p.supplier_id = $1';
-      params.push(supplier_id);
-      hasWhere = true;
-    }
-    // 3. Lọc flash sale
-    if (is_flash_sale !== undefined) {
-      query += hasWhere ? ' AND p.is_flash_sale = $' + (params.length + 1)
-                        : ' WHERE p.is_flash_sale = $1';
-      params.push(is_flash_sale); // true / false
-      hasWhere = true;
-    }
-    // 4. Lọc theo giá (final_price)
-    if(min_price !== undefined){
-      query += hasWhere ? ` AND p.final_price >= $${params.length + 1}` : `WHERE p.final_price >= $1`;
-      params.push(min_price);
-      hasWhere = true;
-    }
+  // 0. Lọc theo key search (tên sản phẩm)
+  if (search_key) {
+    // Postgres uses ILIKE for case-insensitive pattern matching
+    conditions.push(`p.name ILIKE $${params.length + 1}`);
+    params.push(`%${search_key}%`);
+  }
+  // 1. Lọc category
+  if (category_id) {
+    conditions.push(`p.category_id = $${params.length + 1}`);
+    params.push(category_id);
+  }
+  // 2. Lọc supplier
+  if (supplier_id) {
+    conditions.push(`p.supplier_id = $${params.length + 1}`);
+    params.push(supplier_id);
+  }
+  // 2.5 Lọc theo trạng thái sản phẩm
+  // Nếu caller không truyền `status` thì mặc định chỉ lấy 'active'.
+  if (typeof status === 'undefined') {
+    conditions.push(`p.status = $${params.length + 1}`);
+    params.push('active');
+  } else if (status !== 'all') {
+    // Nếu status = 'all' thì không lọc theo status
+    conditions.push(`p.status = $${params.length + 1}`);
+    params.push(status);
+  }
+  // 3. Lọc flash sale
+  if (is_flash_sale !== undefined) {
+    conditions.push(`p.is_flash_sale = $${params.length + 1}`);
+    params.push(is_flash_sale);
+  }
+  // 4. Lọc theo giá (final_price)
+  if (min_price !== undefined) {
+    conditions.push(`p.final_price >= $${params.length + 1}`);
+    params.push(min_price);
+  }
+  if (max_price !== undefined) {
+    conditions.push(`p.final_price <= $${params.length + 1}`);
+    params.push(max_price);
+  }
 
-    if(max_price !== undefined){
-      query += hasWhere ? ` AND p.final_price <= $${params.length + 1}` : `WHERE p.final_price <= $1`;
-      params.push(max_price);
-      hasWhere = true;
-    }
+  if (conditions.length > 0) {
+    query += ' WHERE ' + conditions.join(' AND ');
+  }
 
-    // 5. Phân trang
-    const limitPos = params.length + 1;
-    const offsetPos = params.length + 2;
-    query += ` LIMIT $${limitPos} OFFSET $${offsetPos}`;
-    params.push(limit, offset);
+  // 5. Phân trang
+  query += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+  params.push(limit, offset);
 
+  // Debug log
+  console.log('[getProducts] Query:', query);
+  console.log('[getProducts] Params:', params);
+
+  try {
     const result = await pool.query(query, params);
     return result.rows;
+  } catch (err) {
+    console.error('[getProducts] ERROR:', err && err.stack ? err.stack : err);
+    throw err;
+  }
 };
 
 exports.createProduct = async (productData) => {
