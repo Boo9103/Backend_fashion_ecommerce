@@ -5,31 +5,31 @@ const jwt = require('jsonwebtoken');
 
 
 const register = async (req, res, next) => {
-    try {
-        const {email, password, full_name, phone} = req.body;
+  try {
+    const { email, password, full_name, phone } = req.body;
 
-        //Kiểm tra đầu vào
-        if(!email || !password || !full_name) {
-            return res.status(400).json({ error: 'Missing required fields'});
-        }
-        const user = await authService.register({ email, password, full_name, phone});
-        res.status(201).json(user);
-    }catch(error){
-        next(error);
+    //Kiểm tra đầu vào
+    if (!email || !password || !full_name) {
+      return res.status(400).json({ error: 'Missing required fields' });
     }
+    const user = await authService.register({ email, password, full_name, phone });
+    res.status(201).json(user);
+  } catch (error) {
+    next(error);
+  }
 };
 
-const login = async (req, res, next)=>{
-    try{
-        const {email, password} = req.body;
-        if(!email || !password){
-            return res.status(400).json({ error: 'Missing email or password'});
-        }
-        const result = await authService.login({email, password});
-        res.status(200).json(result); //Trả về {token, user}
-    }catch (error){
-        next(error);
+const login = async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Missing email or password' });
     }
+    const result = await authService.login({ email, password });
+    res.status(200).json(result); //Trả về {token, user}
+  } catch (error) {
+    next(error);
+  }
 };
 
 const adminLogin = async (req, res, next) => {
@@ -46,16 +46,16 @@ const adminLogin = async (req, res, next) => {
 };
 
 const refresh = async (req, res, next) => {
-    try{
-        const { refreshToken } = req.body;
-        if(!refreshToken){
-            return res.status(400).json({ error: 'Missing refresh token'});
-        }
-        const result = await authService.refresh(refreshToken);
-        res.status(200).json(result); // { "accessToken": "new_jwt" }
-    }catch(error){
-        next(error);
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken) {
+      return res.status(400).json({ error: 'Missing refresh token' });
     }
+    const result = await authService.refresh(refreshToken);
+    res.status(200).json(result); // { "accessToken": "new_jwt" }
+  } catch (error) {
+    next(error);
+  }
 };
 
 const sendOtpController = async (req, res, next) => {
@@ -94,15 +94,15 @@ const verifyOtpController = async (req, res, next) => {
   }
 };
 
-const logout = async (req, res, next)=> {
+const logout = async (req, res, next) => {
   try {
     const { refreshToken } = req.body;
-    if(!refreshToken){
+    if (!refreshToken) {
       return res.status(400).json({ error: 'Mising refresh token' });
     }
     await authService.logout(refreshToken);
     res.status(204).send();
-  }catch(error){
+  } catch (error) {
     next(error);
   }
 }
@@ -155,11 +155,11 @@ const googleCallback = async (req, res, next) => {
   }
 };
 
-const checkLoginStatus = (req, res)=>{
-  try{
+const checkLoginStatus = (req, res) => {
+  try {
     const token = req.headers.authorization?.split(' ')[1];// Lấy token sau "Bearer "
-    if(!token){
-      return res.status(200).json({ loggedIn: false,user: null });
+    if (!token) {
+      return res.status(200).json({ loggedIn: false, user: null });
     }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     return res.status(200).json({
@@ -171,36 +171,37 @@ const checkLoginStatus = (req, res)=>{
         full_name: decoded.full_name || null // thêm nếu có
       }
     });
-  }catch(error){
+  } catch (error) {
     return res.status(200).json({ loggedIn: false, user: null });
   }
 };
 
-module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController,logout, googleAuth, googleCallback, checkLoginStatus };
 
-exports.requestPasswordReset = async (req, res, next) => {
+const requestPasswordReset = async (req, res, next) => {
   const { email } = req.body;
   try {
-    if(!email){
-      return res.status(400).json({ error: 'Missing email' });
+    if (!email) {
+      return res.status(400).json({ error: 'Tài khoản chưa tồn tại' });
     }
     const result = await authService.requestPasswordReset(email);
-    res.status(200).json( result);
-  }catch(error){
+    res.status(200).json(result);
+  } catch (error) {
     return next(error);
   }
 };
 
-exports.verifyResetOtp = async (req, res, next) => {
+const verifyResetOtp = async (req, res, next) => {
   const { email, otp, newPassword } = req.body;
 
-  try{
-    if(!email || !otp || !newPassword){
+  try {
+    if (!email || !otp || !newPassword) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
     const result = await authService.verifyOtpAndResetPassword({ email, otp, newPassword });
     res.status(200).json(result);
-  }catch(error){
+  } catch (error) {
     return next(error);
   }
 };
+
+module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController, logout, googleAuth, googleCallback, checkLoginStatus, requestPasswordReset, verifyResetOtp};

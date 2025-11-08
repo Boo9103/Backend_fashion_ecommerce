@@ -273,9 +273,8 @@ const googleLogin = async (user) => {
   }
 };
 
-module.exports = {register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister, googleLogin};
 
-exports.requestPasswordReset = async (email) => {
+const requestPasswordReset = async (email) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -334,7 +333,7 @@ exports.requestPasswordReset = async (email) => {
   }
 };
 
-exports.verifyOtpAndResetPassword = async ({ email, otp, newPassword }) => {
+const verifyOtpAndResetPassword = async ({ email, otp, newPassword }) => {
   const  client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -384,3 +383,5 @@ exports.verifyOtpAndResetPassword = async ({ email, otp, newPassword }) => {
     client.release();
   }
 };
+
+module.exports = {register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister, googleLogin, requestPasswordReset, verifyOtpAndResetPassword};

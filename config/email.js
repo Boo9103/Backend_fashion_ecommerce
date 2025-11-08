@@ -24,6 +24,8 @@ const sendOtpEmail = async (to, otp)=> {
 
 // Gửi email OTP quên mật khẩu
 const sendResetPasswordEmail = async (to, otp) => {
+  const fs = require('fs');
+  const path = require('path');
   let template = fs.readFileSync(path.join(__dirname, '../templates/resetPasswordTemplate.html'), 'utf-8');
   template = template.replace('{{OTP}}', otp);
 
