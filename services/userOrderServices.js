@@ -148,8 +148,9 @@ exports.createOrder = async (userId, orderData) => {
                 final_price: r.unit_price,
                 promo_applied: false,
                 name_snapshot: r.product_name,
-                color_snapshot: r.color ?? null,
-                size_snapshot: r.size ?? null,
+                // use the column aliases returned by the query
+                color_snapshot: r.variant_color ?? null,
+                size_snapshot: r.variant_size ?? null,
                 line_base
             };
         });
@@ -194,7 +195,8 @@ exports.createOrder = async (userId, orderData) => {
             if(promo.min_order_value != null && total_amount < Number(promo.min_order_value)){
                 throw new Error('Order total not eligible for this promotion');
             }
-            if(promo.usage_limit != null && promo.used_count != null && promo.used_count > promo.usage_limit){
+            const usedCount = Number(promo.used_count) || 0;
+            if(promo.usage_limit != null && usedCount >= Number(promo.usage_limit)){
                 throw new Error('Promotion usage limit reached');
             }
 
@@ -205,20 +207,25 @@ exports.createOrder = async (userId, orderData) => {
             }
 
             //f. tính số tiền giảm theo loại voucher + CAP(giảm tối đa)
-            const type = (promo.type || '').toLowerCase();
+            const rawType = String((promo.type || '')).trim().toLowerCase();
+            const type = (rawType === 'percent') ? 'percentage' : rawType;
+            const promoValue = Number(promo.value);
+            if (!Number.isFinite(promoValue) || promoValue < 0) {
+                throw new Error('Invalid promotion value');
+            }
             let rawDiscount = 0;
 
-            if(type === 'percent' || type === 'percentage'){
-                rawDiscount = eligibleSubtotal * (Number(promo.value) / 100);
+            if(type === 'percentage'){
+                rawDiscount = eligibleSubtotal * (promoValue / 100);
             }else if (type === 'amount'){
-                rawDiscount = Number(promo.value);
+                rawDiscount = promoValue;
             }else{
                 throw new Error('Unknown promotion type');
             }
 
             const maxCap = promo.max_discount_value != null ? Number(promo.max_discount_value) : Infinity;
             //Không vượt quá eligibleSubtotal & cap
-            discount_amount = Math.min(rawDiscount, eligibleSubtotal);
+            discount_amount = Math.min(rawDiscount, eligibleSubtotal, Number.isFinite(maxCap) ? maxCap : Infinity);
             discount_amount = round2(discount_amount);
 
             //g. phân bổ discount xuống từng item theo tý lệ line_base
@@ -319,15 +326,30 @@ exports.createOrder = async (userId, orderData) => {
         }
 
         //9. Tăng used_count của promotion
-        if(promotion_id){
+        if (promotion_id){
+            // lock the promotion row
+            const promoLock = await client.query(
+                `SELECT id, used_count, usage_limit FROM promotions WHERE id = $1 FOR UPDATE`,
+                [promotion_id]
+            );
+            if (promoLock.rowCount === 0){
+                throw new Error('Promotion not found when finalizing order');
+            }
+            const currentUsed = Number(promoLock.rows[0].used_count) || 0;
+            const usageLimit = promoLock.rows[0].usage_limit != null ? Number(promoLock.rows[0].usage_limit) : null;
+            if (usageLimit != null && currentUsed + 1 > usageLimit){
+                throw new Error('Promotion usage limit reached (concurrent update)');
+            }
+
             await client.query(
                 `UPDATE promotions
                  SET used_count = COALESCE(used_count, 0) + 1, updated_at = NOW()
                  WHERE id = $1`,
                  [promotion_id]
             );
-            await client.query('COMMIT');
         }
+
+        await client.query('COMMIT');
 
         //10. Trả về kết quả
         return {
@@ -359,21 +381,25 @@ exports.createOrder = async (userId, orderData) => {
 
 function allocateByRatio(items, totalDiscount){
     const subtotal = items.reduce((sum, it) => sum + it.line_base, 0);
-    if (subtotal <= 0) return items.map(()=>0); //nếu subtotal <=0 thì trả về mảng toàn số 0 có độ dài bằng items.length
+    if (subtotal <= 0) return items.map(()=>0);
 
-    const alloc = [];  //-> mảng chứa số tiền giảm tương ứng từng item
-    let used = 0; // -> biến lưu tổng số tiền đã phân bổ
+    // Work in cents to avoid float precision loss, distribute remainder to last item
+    const totalCents = Math.round(totalDiscount * 100);
+    let usedCents = 0;
+    const alloc = [];
 
-    for ( let i = 0; i < items.length; i++){
-        if ( i < items.length -1){
-            const part = Math.floor(totalDiscount * (items[i].line_base / subtotal));
-            alloc.push(part);
-            used += part;
-        }else{
-            alloc.push(totalDiscount - used); // dồn phần dư vào item cuối
+    for (let i = 0; i < items.length; i++){
+        if (i < items.length - 1){
+            const partCents = Math.round((items[i].line_base / subtotal) * totalCents);
+            alloc.push(partCents / 100);
+            usedCents += partCents;
+        } else {
+            // last item gets the remainder
+            const lastCents = totalCents - usedCents;
+            alloc.push(lastCents / 100);
         }
     }
-    return alloc;  // mảng số tiền giảm tương ứng từng item
+    return alloc;
 }
 
 function round2(n){

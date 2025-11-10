@@ -191,17 +191,31 @@ const requestPasswordReset = async (req, res, next) => {
 };
 
 const verifyResetOtp = async (req, res, next) => {
-  const { email, otp, newPassword } = req.body;
+  const { email, otp } = req.body;
 
   try {
-    if (!email || !otp || !newPassword) {
+    if (!email || !otp) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    const result = await authService.verifyOtpAndResetPassword({ email, otp, newPassword });
+    const result = await authService.verifyOtp({ email, otp });
     res.status(200).json(result);
   } catch (error) {
     return next(error);
   }
 };
 
-module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController, logout, googleAuth, googleCallback, checkLoginStatus, requestPasswordReset, verifyResetOtp};
+const resetPassword = async (req, res, next) => {
+  const { refreshToken, newPassword } = req.body;
+
+  try{Ơ
+    if (!refreshToken || !newPassword) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    const result = await authService.resetPassword({ refreshToken, newPassword});
+    return res.status(200).json(result);
+  } catch (error) {
+    return next(error); 
+  }
+}
+
+module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController, logout, googleAuth, googleCallback, checkLoginStatus, requestPasswordReset, verifyResetOtp, resetPassword};

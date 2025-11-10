@@ -41,7 +41,7 @@ const authMiddleware = (roles = []) => {
 };
 
 const requireAdmin = authMiddleware(['admin']);
-const requireUser = authMiddleware(['customer', 'admin']);
+const requireUser = authMiddleware(['customer']);
 
 module.exports = {
   authMiddleware,

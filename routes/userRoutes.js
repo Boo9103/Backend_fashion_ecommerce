@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const userController = require('../controllers/users/userController');
 const orderController = require('../controllers/orders/orderController');
 const { authMiddleware, requireUser } = require('../middleware/authMiddleware');
 
@@ -7,7 +8,29 @@ router.post('/orders', requireUser, orderController.createOrder);
 router.get('/orders', requireUser, orderController.getOrders);
 router.get('/orders/:id', requireUser, orderController.getOrderById);
 router.post('/orders/:id/cancel', requireUser, orderController.cancelOrder);
+
+//profile
+router.get('/profile', requireUser, userController.getUserById);
+router.put('/profile', requireUser, userController.updateUserProfile);
+
+//address
+router.get('/addresses', requireUser, userController.getAddresses);
+router.post('/addresses', requireUser, userController.addAddress);
+router.put('/addresses/:id', requireUser, userController.updateAddress);
+router.delete('/addresses/:id', requireUser, userController.deleteAddress);
+router.get('/addresses/:id', requireUser, userController.getAddressById);
+router.patch('/addresses/:id/set-default', requireUser, userController.setDefaultAddress);
+
+
+
+
+
+
+
+
+
 module.exports = router;
+
 
 
 //create order
@@ -33,3 +56,14 @@ module.exports = router;
 
 //get by it: http://localhost:3000/user/orders/931718f6-1ba1-499e-9f48-44bf4cef13fe
 //post cancel: http://localhost:3000/user/orders/931718f6-1ba1-499e-9f48-44bf4cef13fe/cancel
+
+//post address
+// {
+//   "receive_name": "Nguyen Van A",
+//   "phone": "0123456789",
+//   "address": "123 ABC St, District 1, HCM",
+//   "is_default": true,
+//   "tag": "Home"
+// }
+
+//get address by id: http://localhost:3000/user/addresses/417b8d65-7b4f-4d1a-85f4-e2acae48f32a
