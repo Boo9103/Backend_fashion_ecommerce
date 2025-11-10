@@ -12,6 +12,8 @@ router.post('/orders/:id/cancel', requireUser, orderController.cancelOrder);
 //profile
 router.get('/profile', requireUser, userController.getUserById);
 router.put('/profile', requireUser, userController.updateUserProfile);
+//Hard delte user (chưa test - chưa có tk) - ní test api này đi nhe
+router.delete('/profile', requireUser, userController.deleteAccount);
 
 //address
 router.get('/addresses', requireUser, userController.getAddresses);
@@ -21,13 +23,8 @@ router.delete('/addresses/:id', requireUser, userController.deleteAddress);
 router.get('/addresses/:id', requireUser, userController.getAddressById);
 router.patch('/addresses/:id/set-default', requireUser, userController.setDefaultAddress);
 
-
-
-
-
-
-
-
+//user: deactive
+router.patch('/profile/deactive', requireUser, userController.deactivateAccount);
 
 module.exports = router;
 

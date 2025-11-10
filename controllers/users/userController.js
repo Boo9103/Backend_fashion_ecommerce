@@ -100,3 +100,33 @@ exports.setDefaultAddress = async(req, res, next) => {
         next(error);
     }
 };
+
+exports.deleteAccount = async (req, res, next) => {
+    try{
+        const ok = await userService.deleteUserAccount(req.user.id);
+        if(!ok) return res.status(400).json({ message: 'User not found'});
+
+        return res.status(200).json({ message: 'User account deleted successfully' });
+    } catch (error) {
+        next(error);
+    }
+};
+
+exports.deactivateAccount = async(req, res, next) => {
+    try {
+        const userId = req.user && req.user.id;
+        if(!userId){
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const updated = await userService.deactivateUserAccount(userId);
+        if(!updated){
+            return res.status(400).json({ message: 'User not found' });
+        }
+
+        //Fe nên xóa token local và redirect/ show message
+        return res.status(200).json({ message: 'User account deactivated successfully' });
+    } catch (error) {
+        next(error);
+    }
+};

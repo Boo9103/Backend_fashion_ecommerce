@@ -44,6 +44,7 @@ router.put('/users/:userId', requireAdmin, adminController.updateUser);
 router.post('/users/:userId/deactivate', requireAdmin, adminController.deactiveUser);
 router.post('/users/:userId/restore', requireAdmin, adminController.restoreUser);
 router.delete('/users/:userId', requireAdmin, adminController.hardDeleteUser);
+router.patch('/users/:id/email', requireAdmin, adminController.updateUserEmail);
 
 //Product management
 router.get('/products', requireAdmin, adminProductController.getFlashSaleProducts);

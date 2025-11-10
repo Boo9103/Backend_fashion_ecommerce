@@ -259,3 +259,87 @@ exports.setDefaultAddress = async (userId, addressId) => {
         client.release();
     }
 };
+
+exports.deleteUserAccount = async (userId)=> {
+    const client = await pool.connect();
+    try{
+        await client.query('BEGIN');
+
+        //Kiểm tra user tồn tại 
+        const check = await client.query(`
+            SELECT email FROM users WHERE id = $1
+            `, [userId]);
+
+        if(check.rows.length === 0){
+            await client.query('ROLLBACK');
+            return false; // user không tồn tại
+        }
+        const userEmail = check.rows[0].email;
+
+        //Xóa dữ liệu con
+        await client.query(`DELETE FROM order_items WHERE order_id IN
+            (SELECT id FROM orders WHERE user_id = $1)`, [userId]);
+        await client.query('DELETE FROM orders WHERE user_id = $1', [userId]);
+
+        // cart -> cart_items
+        await client.query(`
+            DELETE FROM cart_items
+            WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1)
+        `, [userId]).catch(()=>{});
+        await client.query(`DELETE FROM carts WHERE user_id = $1`, [userId]).catch(()=>{});
+
+        await client.query(`
+            DELETE FROM user_addresses
+            WHERE user_id = $1`, [userId]);
+        await client.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [userId]);
+
+        //otp_verifications lưu theo email nên xóa theo email
+        await client.query('DELETE FROM otp_verifications WHERE email = $1', [userEmail]);
+
+        //Xóa User
+        await client.query('DELETE FROM users WHERE id = $1', [userId]);
+        
+        await client.query('COMMIT');
+        return true;
+    }catch (error){
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        client.release();
+    }
+};
+
+exports.deactiveUserAccount = async (userId)=> {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        //Kiểm tra user tồn tại
+        const check = await client.query(`
+            SELECT id FROM users WHERE id = $1
+            `, [userId]);
+        if(check.rows.length === 0){
+            await client.query('ROLLBACK');
+            return false; // user không tồn tại
+        }
+
+        //Cập nhật status user -> deactive
+        const { rows } = await client.query(`
+            UPDATE users 
+            SET status = $1, updated_at = NOW()
+            WHERE id = $2
+            RETURNING id, email, full_name, phone, role, status, google_id, name, created_at, updated_at`,
+            ['deactive', userId]);
+
+        //revolked refresh tokens (buột logout)
+        await client.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [userId]);
+
+        await client.query('COMMIT');
+        return rows[0];
+    }catch (error){
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        client.release();
+    }
+};

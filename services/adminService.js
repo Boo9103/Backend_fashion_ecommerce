@@ -101,6 +101,79 @@ const updateUserRole = async (userId, newRole)=>{
     return result.rows[0];
 }
 
+const updateUserEmail = async (targetUserId, newEmail) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const tid = String(targetUserId || '').trim();
+        if (!tid) {
+            await client.query('ROLLBACK');
+            const e = new Error('User id is required');
+            e.status = 400;
+            throw e;
+        }
+
+        //1. Lấy user và kiểm tra role + google_id
+        const userRes = await client.query(`
+            SELECT id, email, google_id, role FROM users WHERE id = $1
+            `, [targetUserId]);
+        if (userRes.rowCount === 0) {
+            await client.query('ROLLBACK');
+            const err = new Error('User not found');
+            err.status = 404;
+            console.error(`[adminService.updateUserEmail] user not found id=${tid}`);
+            throw err;
+        }
+        const user = userRes.rows[0];
+
+        if(user.role !== 'customer'){
+            await client.query('ROLLBACK');
+            const err = new Error('Can only update email for customer accounts');
+            err.status = 400;
+            throw err;
+        }
+
+        if(user.google_id){
+            await client.query('ROLLBACK');
+            const err = new Error('Cannot change email for Google/OAuth accounts');
+            err.status = 400;
+            throw err;
+        }
+
+        //2. Normalize và kiểm tra trùng email
+        const normalizedEmail = newEmail.trim().toLowerCase();
+        if(!normalizedEmail){
+            await client.query('ROLLBACK');
+            throw new Error('Invalid email');
+        }
+
+        const dup = await client.query(`
+            SELECT id FROM users WHERE email = $1 AND id <> $2 LIMIT 1`,
+            [normalizedEmail, targetUserId]);
+        if(dup.rowCount > 0){
+            await client.query('ROLLBACK');
+            throw new Error('Email already in use');
+        }
+
+        //3. Cập nhật email và revolked tokens
+        const upd = await client.query(`
+            UPDATE users SET email = $1, updated_at = NOW()
+            WHERE id = $2
+            RETURNING id, email, full_name, name, phone, role, status, created_at, updated_at
+            `, [normalizedEmail, targetUserId]);
+        await client.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [targetUserId]);
+
+        await client.query('COMMIT');
+        return upd.rows[0];
+    } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        client.release();
+    }
+};
+
 
 module.exports = {
     getUsers,
@@ -111,4 +184,5 @@ module.exports = {
     getUsersById,
     updateUser,
     updateUserRole,
+    updateUserEmail
 };
