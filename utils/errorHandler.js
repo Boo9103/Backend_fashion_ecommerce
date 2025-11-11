@@ -29,7 +29,7 @@ const errorHandler = (err, req, res, next) => {
         }
 
         // Map to HTTP status codes
-        let status = 500;
+        let status = err.statusCode || 500;
         if (err.status && Number.isInteger(err.status)) status = err.status;
         else if (err.name === 'ValidationError' || err instanceof SyntaxError) status = 400;
         else if (err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError') status = 401;

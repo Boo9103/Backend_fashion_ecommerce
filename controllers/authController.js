@@ -178,7 +178,6 @@ const checkLoginStatus = (req, res) => {
   }
 };
 
-
 const requestPasswordReset = async (req, res, next) => {
   const { email } = req.body;
   try {
@@ -186,9 +185,9 @@ const requestPasswordReset = async (req, res, next) => {
       return res.status(400).json({ error: 'Tài khoản chưa tồn tại' });
     }
     const result = await authService.requestPasswordReset(email);
-    res.status(200).json(result);
+    return res.status(200).json(result);
   } catch (error) {
-    return next(error);
+    next(error);
   }
 };
 
@@ -196,12 +195,16 @@ const requestPasswordReset = async (req, res, next) => {
 
 const verifyResetOtp = async (req, res, next) => {
   const { email, otp } = req.body;
+  console.log("!!!");
+  console.table(email);
+  console.log(otp);
+  
 
   try {
     if (!email || !otp) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    const result = await authService.verifyOtp({ email, otp });
+    const result = await authService.verifyOtp(email, otp);
     res.status(200).json(result);
   } catch (error) {
     return next(error);
@@ -212,16 +215,15 @@ const verifyResetOtp = async (req, res, next) => {
 
 const resetPassword = async (req, res, next) => {
   const { resetToken, newPassword } = req.body;
-
-  try{
+  try {
     if (!resetToken || !newPassword) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    const result = await authService.resetPasswordWithToken({ resetToken, newPassword});
+    const result = await authService.resetPasswordWithToken({ resetToken, newPassword });
     return res.status(200).json(result);
   } catch (error) {
-    return next(error); 
+    return next(error);
   }
 }
 //     return { message: 'Password has been reset successfully' };
-module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController, logout, googleAuth, googleCallback, checkLoginStatus, requestPasswordReset, verifyResetOtp, resetPassword};
+module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController, logout, googleAuth, googleCallback, checkLoginStatus, requestPasswordReset, verifyResetOtp, resetPassword };

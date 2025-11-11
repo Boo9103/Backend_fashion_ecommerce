@@ -4,119 +4,135 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const { generateToken, generateFreshToken, verifyToken } = require('../config/jwt');
 
-const register = async ({ email, password, full_name, phone}) => {
-    const client = await pool.connect();
-    try{
-        await client.query('BEGIN');
+const register = async ({ email, password, full_name, phone }) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-        //Kiểm tra email đã tồn tại
-        const checkEmail = await client.query('SELECT id FROM users WHERE email = $1', [email]);
-        if (checkEmail.rows.length > 0){
-            throw new Error('Email already exists'); 
-        }
+    const checkEmail = await client.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (checkEmail.rows.length > 0) {
+      const error = new Error('Email already exists');
+      error.statusCode = 409;
+      throw error;
+    }
 
-        //Băm mật khẩu
-        const password_hash = await bcrypt.hash(password, 10);
+    const password_hash = await bcrypt.hash(password, 10);
 
-        //Tạo người dùng mới
-        const result = await client.query(
-            `INSERT INTO users (email, password_hash, full_name, phone, role, status)
+    const result = await client.query(
+      `INSERT INTO users (email, password_hash, full_name, phone, role, status)
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id, email, full_name, phone, role, status, created_at`,
-            [email, password_hash, full_name, phone, 'customer', 'active']
-        );
+      [email, password_hash, full_name, phone, 'customer', 'active']
+    );
 
-        await client.query('COMMIT');
-        return result.rows[0];
-    }catch(error){
-        await client.query('ROLLBACK');
-        throw error;
-    }finally{
-        client.release();
-    }
-    
+    await client.query('COMMIT');
+    return result.rows[0];
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
-const login = async ({email, password}) => {
-    const client = await pool.connect();
-    try{
-        //Tìm user
-        const result = await client.query(
-            'SELECT id, email, password_hash, full_name, role, status FROM users WHERE email = $1', [email]
-        );
-        if(result.rows.length === 0) {
-            throw new Error('Invalid email or password');
-        }
-        const user = result.rows[0];
-
-        //Kiểm tra status
-        if(user.status === 'banned'){
-            throw new Error('Account is banned');
-        }
-
-        //Kiểm tra password
-        const isMatch = await bcrypt.compare(password, user.password_hash);
-        if(!isMatch){
-            throw new Error('Invalid email or password');
-        }
-
-        //Tạo token
-        const token = generateToken(user);
-
-        const refreshToken = generateFreshToken();
-        const expiresAt = new Date(Date.now() + 7*24*60*60*1000); // 7 ngày
-        await client.query(
-            'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
-            [user.id, refreshToken, expiresAt]
-        );
-
-        return {
-            accessToken: token, //jwt ngắn hạn
-            refreshToken,   // chuỗi randoom
-            user: {id: user.id, email: user.email, full_name: user.full_name, role: user.role}
-        };
-    }finally {
-        client.release();
+const login = async ({ email, password }) => {
+  const client = await pool.connect();
+  try {
+    const result = await client.query(
+      'SELECT id, email, password_hash, full_name, role, status FROM users WHERE email = $1', [email]
+    );
+    if (result.rows.length === 0) {
+      const error = new Error('Invalid email or password');
+      error.statusCode = 401;
+      throw error;
     }
+    const user = result.rows[0];
+
+    if (user.status === 'banned') {
+      const error = new Error('Account is banned');
+      error.statusCode = 403;
+      throw error;
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password_hash);
+    if (!isMatch) {
+      const error = new Error('Invalid email or password');
+      error.statusCode = 401;
+      throw error;
+    }
+
+    const token = generateToken(user);
+
+    const refreshToken = generateFreshToken();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await client.query(
+      'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [user.id, refreshToken, expiresAt]
+    );
+
+    return {
+      accessToken: token,
+      refreshToken,
+      user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role }
+    };
+  } finally {
+    client.release();
+  }
 };
 
 const adminLogin = async ({ email, password }) => {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        const result = await client.query(
-            'SELECT id, email, password_hash, full_name, role, status FROM users WHERE email = $1',
-            [email]
-        );
-        if (result.rows.length === 0) throw new Error('Invalid email or password');
-        
-        const user = result.rows[0];
-
-        if (user.role !== 'admin') throw new Error('Unauthorized: Admin access only');
-        if (user.status === 'banned') throw new Error('Account is banned');
-        
-        const isMatch = await bcrypt.compare(password, user.password_hash);
-        if (!isMatch) throw new Error('Invalid email or password');
-        
-        const token = generateToken(user);
-        const refreshToken = generateFreshToken();
-        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-        await client.query(
-            'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
-            [user.id, refreshToken, expiresAt]
-        );
-        await client.query('COMMIT');
-        return {
-            accessToken: token,
-            refreshToken,
-            user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role }
-        };
-    } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-    } finally {
-        client.release();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      'SELECT id, email, password_hash, full_name, role, status FROM users WHERE email = $1',
+      [email]
+    );
+    if (result.rows.length === 0) {
+      const error = new Error('Invalid email or password');
+      error.statusCode = 401;
+      throw error;
     }
+
+    const user = result.rows[0];
+
+    if (user.role !== 'admin') {
+      const error = new Error('Unauthorized: Admin access only');
+      error.statusCode = 403;
+      throw error;
+    }
+    if (user.status === 'banned') {
+      const error = new Error('Account is banned');
+      error.statusCode = 403;
+      throw error;
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password_hash);
+    if (!isMatch) {
+      const error = new Error('Invalid email or password');
+      error.statusCode = 401;
+      throw error;
+    }
+
+    const token = generateToken(user);
+    const refreshToken = generateFreshToken();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await client.query(
+      'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [user.id, refreshToken, expiresAt]
+    );
+    await client.query('COMMIT');
+    return {
+      accessToken: token,
+      refreshToken,
+      user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role }
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
 const refresh = async (refreshToken) => {
@@ -127,16 +143,21 @@ const refresh = async (refreshToken) => {
       'SELECT * FROM refresh_tokens WHERE token = $1 AND revoked = FALSE',
       [refreshToken]
     );
-    if (result.rows.length === 0) throw new Error('Invalid refresh token');
+    if (result.rows.length === 0) {
+      const error = new Error('Invalid refresh token');
+      error.statusCode = 401;
+      throw error;
+    }
     const tokenData = result.rows[0];
 
-    // Kiểm tra và cập nhật revoked nếu hết hạn
     if (tokenData.expires_at <= new Date()) {
       await client.query(
         'UPDATE refresh_tokens SET revoked = TRUE WHERE token = $1',
         [refreshToken]
       );
-      throw new Error('Refresh token has expired');
+      const error = new Error('Refresh token has expired');
+      error.statusCode = 401;
+      throw error;
     }
 
     const userResult = await client.query(
@@ -155,46 +176,44 @@ const refresh = async (refreshToken) => {
   }
 };
 
-const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString(); // 6 chữ số
+const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
 
 const sendOtp = async (email) => {
-    const otp = generateOtp();
-    const otpExpiry = new Date(Date.now() + parseInt(process.env.OTP_EXPIRY || '300') * 1000); // Mặc định 5 phút
+  const otp = generateOtp();
+  const otpExpiry = new Date(Date.now() + parseInt(process.env.OTP_EXPIRY || '300') * 1000);
 
-    const client = await pool.connect();
-    try {
-        //Kiểm tra lần gửi gần nhất
-        const lastOtp = await client.query('SELECT created_at FROM otp_verifications WHERE email = $1 ORDER BY created_at DESC LIMIT 1', [email]);
-        if (lastOtp.rows.length > 0) {
-            const lastSent = new Date(lastOtp.rows[0].created_at);
-            const now = new Date();
-            if ((now - lastSent) / 1000 < 60) { // Giới hạn 1 phút
-                throw new Error('OTP already sent recently. Please wait before requesting again.');
-            }
-        }
-
-        await client.query('BEGIN');
-
-        //Xóa OTP cũ (nếu có)
-        await client.query('DELETE FROM otp_verifications WHERE email = $1', [email]);
-
-        //Lưu OTP mới
-        await client.query(
-            'INSERT INTO otp_verifications (email, otp, expires_at) VALUES ($1, $2, $3)',
-            [email, otp, otpExpiry]
-        );
-        await client.query('COMMIT');
-
-        //Gửi email
-        const { sendOtpEmail } = require('../config/email');
-        await sendOtpEmail(email, otp);
-        return { message: 'OTP sent' };
-    } catch (error) {
-        await client.query('ROLLBACK');
+  const client = await pool.connect();
+  try {
+    const lastOtp = await client.query('SELECT created_at FROM otp_verifications WHERE email = $1 ORDER BY created_at DESC LIMIT 1', [email]);
+    if (lastOtp.rows.length > 0) {
+      const lastSent = new Date(lastOtp.rows[0].created_at);
+      const now = new Date();
+      if ((now - lastSent) / 1000 < 60) {
+        const error = new Error('OTP already sent recently. Please wait before requesting again.');
+        error.statusCode = 429;
         throw error;
-    } finally {
-        client.release();
+      }
     }
+
+    await client.query('BEGIN');
+
+    await client.query('DELETE FROM otp_verifications WHERE email = $1', [email]);
+
+    await client.query(
+      'INSERT INTO otp_verifications (email, otp, expires_at) VALUES ($1, $2, $3)',
+      [email, otp, otpExpiry]
+    );
+    await client.query('COMMIT');
+
+    const { sendOtpEmail } = require('../config/email');
+    await sendOtpEmail(email, otp);
+    return { message: 'OTP sent' };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
 const verifyOtpAndRegister = async ({ email, otp, password, full_name, phone }) => {
@@ -202,19 +221,18 @@ const verifyOtpAndRegister = async ({ email, otp, password, full_name, phone }) 
   try {
     await client.query('BEGIN');
 
-    // Kiểm tra OTP
     const result = await client.query(
       'SELECT otp FROM otp_verifications WHERE email = $1 AND expires_at > NOW()',
       [email]
     );
     if (result.rows.length === 0 || result.rows[0].otp !== otp) {
-      throw new Error('Invalid or expired OTP');
+      const error = new Error('Invalid or expired OTP');
+      error.statusCode = 400;
+      throw error;
     }
 
-    // Xóa OTP sau verify
     await client.query('DELETE FROM otp_verifications WHERE email = $1', [email]);
 
-    // Tiếp tục đăng ký như cũ
     const user = await register({ email, password, full_name, phone });
     await client.query('COMMIT');
     return user;
@@ -226,34 +244,34 @@ const verifyOtpAndRegister = async ({ email, otp, password, full_name, phone }) 
   }
 };
 
-const logout = async (refreshToken)=>{
-   const client = await pool.connect();
-   try {
+const logout = async (refreshToken) => {
+  const client = await pool.connect();
+  try {
     await client.query('BEGIN');
     const result = await client.query('UPDATE refresh_tokens SET revoked = TRUE WHERE token = $1 RETURNING *', [refreshToken]);
-    if(result.rows.length === 0){
-        throw new Error('Invalid refresh token');
+    if (result.rows.length === 0) {
+      const error = new Error('Invalid refresh token');
+      error.statusCode = 401;
+      throw error;
     }
     await client.query('COMMIT');
-   }catch(error){
+  } catch (error) {
     await client.query('ROLLBACK');
     throw error;
-   }finally{
+  } finally {
     client.release();
-   }
+  }
 };
-
 
 const googleLogin = async (user) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // Tạo token
     const token = generateToken(user);
 
     const refreshToken = generateFreshToken();
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 ngày
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     await client.query(
       'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
       [user.id, refreshToken, expiresAt]
@@ -273,47 +291,45 @@ const googleLogin = async (user) => {
   }
 };
 
-
 const requestPasswordReset = async (email) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    //Kiểm tra email tồn tại 
-    const userResult = await client.query('SELECT id FROM users WHERE email = $1', [email]);
+    const userResult = await client.query('SELECT id, status FROM users WHERE email = $1', [email]);
     if (userResult.rows.length === 0) {
-      // Trả về message chung để tránh lộ thông tin tài khoản
-      await client.query('ROLLBACK'); 
+      await client.query('ROLLBACK');
       return { message: 'If this email exists, an OTP has been sent.' };
     }
+
     const user = userResult.rows[0];
     if (user.status === 'banned') {
-      throw new Error('Account is banned');
+      const error = new Error('Account is banned');
+      error.statusCode = 403;
+      throw error;
     }
 
-    // CHỐNG SPAM: kiểm tra lần gửi gần nhất (tương tự sendOtp)
     const lastOtp = await client.query(`
       SELECT created_at FROM otp_verifications
       WHERE email = $1
       ORDER BY created_at DESC LIMIT 1
       `, [email]);
-    
-    if(lastOtp.rows.length > 0){
+
+    if (lastOtp.rows.length > 0) {
       const lastSent = new Date(lastOtp.rows[0].created_at);
       if ((Date.now() - lastSent.getTime()) / 1000 < 60) {
-        throw new Error('OTP already sent recently. Please wait before requesting again.');
+        const error = new Error('OTP already sent recently. Please wait before requesting again.');
+        error.statusCode = 429;
+        throw error;
       }
     }
-    
-    //Tạo OTP
+
     const otp = generateOtp();
-    const expireSeconds = parseInt(process.env.OTP_EXPIRY || '300'); // mặc định 5p
+    const expireSeconds = parseInt(process.env.OTP_EXPIRY || '300');
     const expiresAt = Math.floor(Date.now() / 1000) + expireSeconds;
 
-    //Xóa OTP cũ (nếu có)
     await client.query('DELETE FROM otp_verifications WHERE email = $1', [email]);
 
-    //Lưu OTP mới
     await client.query(
       'INSERT INTO otp_verifications (email, otp, expires_at) VALUES ($1, $2, to_timestamp($3))',
       [email, otp, expiresAt]
@@ -321,11 +337,10 @@ const requestPasswordReset = async (email) => {
 
     await client.query('COMMIT');
 
-    //Gửi email
     const { sendResetPasswordEmail } = require('../config/email');
     await sendResetPasswordEmail(email, otp);
     return { message: 'OTP sent to your email' };
-  }catch (error) {
+  } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
@@ -340,93 +355,105 @@ const verifyOtp = async (email, otp) => {
     await client.query('BEGIN');
 
     const res = await client.query(
-      ` SELECT id, otp, expires_at FROM otp_verifications
-        WHERE email = $1
-        ORDER BY created_at DESC
+      `SELECT id, otp, expires_at FROM otp_verifications
+       WHERE email = $1
+       ORDER BY created_at DESC
+       LIMIT 1
       `, [email]
     );
-    if(res.rows.length === 0){
-      throw new Error('Invalid or expired OTP');
+    // console.log("!!!");
+    // console.log(otp);
+    // console.log(email);
+    // console.table(res);
+    if (res.rows.length === 0) {
+      const error = new Error('Invalid or expired OTP');
+      error.statusCode = 400;
+      throw error;
     }
     const row = res.rows[0];
 
-    //Kiểm tra expire
-    if(!row.expires_at || new Date(row.expires_at) < new Date()){
-      throw new Error('Invalid or expired OTP');
+    if (!row.expires_at || new Date(row.expires_at) < new Date()) {
+      const error = new Error('Invalid or expired OTP');
+      error.statusCode = 400;
+      throw error;
     }
 
-    //So sánh otp
-    if(String(row.otp) !== String(otp)){
-      throw new Error('Invalid or expired OTP');
+    if (String(row.otp) !== String(otp)) {
+      const error = new Error('Invalid or expired OTP');
+      error.statusCode = 400;
+      throw error;
     }
 
-    //Xóa OTP sau khi verify (không dùng lại)
     await client.query('DELETE FROM otp_verifications WHERE email = $1', [email]);
-    
 
-    //Lấy user id để tạo reset token
     const userRes = await client.query('SELECT id FROM users WHERE email = $1', [email]);
-    if(userRes.rows.length === 0){
-      //Không tiết lộ thông tin; rollback và trả về lỗi chung
+    if (userRes.rows.length === 0) {
       await client.query('ROLLBACK');
-      return { message: 'If this email exists, an OTP has been sent.'}
+      return { message: 'If this email exists, an OTP has been sent.' }
     }
 
     const user = userRes.rows[0];
     await client.query('COMMIT');
 
-    //Tạo reset token ngắn hạn (ví dụ 15p) chứa purpose
-    const resetToken = generateToken({ user_id: user.id, purpose: 'password_reset'}, {expires_at: '15m'});
-    return { resetToken };
-  }catch (error){
+    const resetToken = generateToken({ user_id: user.id, purpose: 'password_reset' }, { expiresIn: '15m' });
+    return { message: 'OTP verified successfully', resetToken };
+  } catch (error) {
     await client.query('ROLLBACK');
-    throw error;  
-  }finally {
+    throw error;
+  } finally {
     client.release();
   }
 };
 
-//Reset password - dùng resetToken để xác thực rồi cập nhật mật khẩu
 const resetPasswordWithToken = async (resetToken, newPassword) => {
   const client = await pool.connect();
   try {
-    //verify token
-    const payload = verifyToken(resetToken);
-    if(!payload || payload.purpose !== 'password_reset'|| !payload.user_id){
-      throw new Error('Invalid or expired reset token');
+    let payload;
+    try {
+      payload = verifyToken(resetToken);
+    } catch (err) {
+      const error = new Error('Invalid or expired reset token');
+      error.statusCode = 401;
+      throw error;
+    }
+
+    if (!payload || payload.purpose !== 'password_reset' || !payload.user_id) {
+      const error = new Error('Invalid or expired reset token');
+      error.statusCode = 401;
+      throw error;
     }
     const userId = payload.user_id;
 
     await client.query('BEGIN');
 
-    //Lấy password hiện tại
     const userRes = await client.query('SELECT password_hash FROM users WHERE id = $1 FOR UPDATE', [userId]);
-    if(userRes.rows.length === 0){
-      throw new Error('User not found');
+    if (userRes.rows.length === 0) {
+      const error = new Error('User not found');
+      error.statusCode = 404;
+      throw error;
     }
-    const currentHash = user.rows[0].password_hash;
-
-    //So sánh mật khẩu với mật khẩu cũ
+    const currentHash = userRes.rows[0].password_hash;
+    console.table(newPassword);
     const isSame = await bcrypt.compare(newPassword, currentHash);
-    if(isSame){
-      throw new Error('New password must be different from the old password');
+    if (isSame) {
+      const error = new Error('New password must be different from the old password');
+      error.statusCode = 405;
+      throw error;
     }
 
-    //Hash mk mới và cập nhật
     const newHash = await bcrypt.hash(newPassword, 10);
     await client.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, userId]);
 
-    //Invalidate refresh tokens để logout các phiên cũ
     await client.query('UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1', [userId]);
 
     await client.query('COMMIT');
     return { message: 'Password has been reset successfully' };
-  }catch (error) {
+  } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
-  } 
+  }
 };
 
-module.exports = {register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister, googleLogin, requestPasswordReset, verifyOtp, resetPasswordWithToken};
+module.exports = { register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister, googleLogin, requestPasswordReset, verifyOtp, resetPasswordWithToken };
