@@ -6,102 +6,51 @@ const promotionService = require('./userPromotionService');
 // Chính sách áp voucher: áp cho 1 item đủ điều kiện có line_base cao nhất
 const APPLY_POLICY = 'all_eligible_items';
 exports.createOrder = async (userId, orderData) => {
-    // support both signatures:
-    //  - createOrder(orderData)
-    //  - createOrder(userId, orderData)
+    // support both signatures: createOrder(orderData) or createOrder(userId, orderData)
     if (!orderData && userId && typeof userId === 'object') {
         orderData = userId;
         userId = orderData.user_id || null;
     }
-
-    // guard
     orderData = orderData || {};
-
     const {
-        shipping_address_snapshot,  // json object or JSON string
-        payment_method, // 'cod' || 'online' || ...
-        items,  // [ {variant_id, quantity}, ... ]
+        shipping_address_snapshot,
+        payment_method,
+        items,
         promotion_code,
         shipping_fee = 0
     } = orderData;
-
     const user_id = userId || orderData.user_id || null;
 
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
 
-        // 1. Validate items
-        if (!Array.isArray(items) || items.length === 0){
-            throw new Error ('Cart is empty');
-        }
+        // validate basic payload
+        if (!Array.isArray(items) || items.length === 0) throw new Error('Cart is empty');
+        if (!payment_method || !['cod', 'online'].includes(payment_method)) throw new Error('payment_method is required and must be cod or online');
 
-        // Validate shipping address snapshot: accept object or JSON string
-        // normalize shipping_address_snapshot (it may be sent as JSON string)
-        // possible keys that client might send
-        const possibleKeys = [
-          'shipping_address_snapshot',
-          'shipping_address',
-          'shippingAddress',
-          'address_snapshot',
-          'address'
-        ];
-
-        let addr;
-        // try direct variable first (if destructured)
-        if (shipping_address_snapshot !== undefined && shipping_address_snapshot !== null) {
-          addr = shipping_address_snapshot;
-        } else {
-          // try to find in orderData under common keys
-          for (const k of possibleKeys) {
-            if (Object.prototype.hasOwnProperty.call(orderData, k)) {
-              addr = orderData[k];
-              break;
-            }
-          }
-        }
-
-        // if addr is string, try parse JSON
+        // normalize address (accept object or JSON string, common keys)
+        let addr = shipping_address_snapshot ?? orderData.shipping_address ?? orderData.shippingAddress ?? orderData.address;
         if (typeof addr === 'string') {
-          try {
-            addr = JSON.parse(addr);
-          } catch (err) {
-            console.log('createOrder - shipping address parse error:', err.message);
-            throw new Error('Invalid shipping address: cannot parse JSON');
-          }
+            try { addr = JSON.parse(addr); } catch { throw new Error('Invalid shipping address: cannot parse JSON'); }
         }
-
-        // debug log to help troubleshooting
-        console.log('createOrder - resolved shipping address snapshot:', addr, 'orderData keys:', Object.keys(orderData || {}));
-
-        // accept both snake_case and camelCase keys inside addr
         const fullName = addr && (addr.full_name || addr.fullName || addr.name);
         const phone = addr && (addr.phone || addr.telephone || addr.mobile);
         const addressLine = addr && (addr.address || addr.line1 || addr.address_line);
+        if (!fullName || !phone || !addressLine) throw new Error('Invalid shipping address');
+        addr = { ...addr, full_name: fullName, phone, address: addressLine };
 
-        if (!fullName || !phone || !addressLine) {
-          throw new Error('Invalid shipping address');
+        // normalize items -> qtyMap and variantIds
+        const variantIds = [];
+        const qtyMap = {};
+        for (const it of items) {
+            if (!it || !it.variant_id) throw new Error('Invalid item payload');
+            if (!Number.isInteger(it.quantity) || it.quantity <= 0) throw new Error('invalid quantity');
+            variantIds.push(it.variant_id);
+            qtyMap[it.variant_id] = it.quantity;
         }
-        // use normalized addr object from now on
-        addr = Object.assign({}, addr, { full_name: fullName, phone, address: addressLine });
 
-        if (!payment_method || !['cod', 'online'].includes(payment_method)) {
-            throw new Error('payment_method is required and must be cod or online');
-        }
-
-        // Chuẩn hóa input
-        const variantIds = items.map(item => item.variant_id); //-> lấy toàn bộ variant_id từ items thành 1 mảng
-        const qtyMap = items.reduce((acc, it)=>{
-            if(!Number.isInteger(it.quantity) || it.quantity <= 0){
-                throw new Error('invalid quantity');
-            }
-
-            acc[it.variant_id] = it.quantity;
-            return acc;
-        }, {}); //-> biến đổi mảng items thành object { variant_id: quantity, ...}
-
-        // 2. Lấy thông tin variants 
-
+        // fetch variants
         const stockRes = await client.query(`
             SELECT
                 pv.id AS variant_id,
@@ -114,32 +63,22 @@ exports.createOrder = async (userId, orderData) => {
             FROM product_variants pv
             JOIN products p ON pv.product_id = p.id
             WHERE pv.id = ANY($1::uuid[])
-            `, [variantIds]
-        );
+        `, [variantIds]);
 
-        if(stockRes.rowCount !== variantIds.length){
-            throw new Error('One or more product variants not found');
+        if (stockRes.rowCount !== variantIds.length) throw new Error('One or more product variants not found');
+
+        // stock check
+        for (const row of stockRes.rows) {
+            const qty = qtyMap[row.variant_id];
+            if (row.stock_qty == null || row.stock_qty < qty) throw new Error(`Out of stock for variant ID: ${row.variant_id}: ${row.stock_qty ?? 0} available`);
         }
 
-        //Kiểm tra tồn kho
-        //qtyMap = { variant_id: quantity, ...} -> qtyMap[row.variant_id] = quantity tương ứng cua variant_id
-        for (const row of stockRes.rows){
-            const qty = qtyMap[row.variant_id]; //qty[row.variant_id] -> được hiểu là lấy quantity của variant_id tương ứng (truy cập thuộc tính của object qtyMap)
-            if (row.stock_qty == null || row.stock_qty< qty){
-                throw new Error(`Out of stock for variant ID: ${row.variant_id}: ${row.stock_qty ?? 0} available`);
-            }
-        }
-
-        //Dùng map variant -> product để kiểm tra promotion và tính giảm giá
-        const variantToProduct = new Map(stockRes.rows.map(r => [r.variant_id, r.product_id]));
-
-        //3. Builder orderItems snapshot & tổng base (chưa trừ voucher)
+        // build order items and total
         let total_amount = 0;
-        const orderItems = stockRes.rows.map(r => { //r= row[0,1,2,...] -> ds chứa các variant product (từ fe gửi lên) -> ds mà user muốn mua
+        const orderItems = stockRes.rows.map(r => {
             const qty = qtyMap[r.variant_id];
-            const line_base = r.unit_price * qty; // tùy thuộc vào r thì sẽ có tương ứng line_base 
+            const line_base = r.unit_price * qty;
             total_amount += line_base;
-
             return {
                 variant_id: r.variant_id,
                 product_id: r.product_id,
@@ -148,142 +87,104 @@ exports.createOrder = async (userId, orderData) => {
                 final_price: r.unit_price,
                 promo_applied: false,
                 name_snapshot: r.product_name,
-                color_snapshot: r.color ?? null,
-                size_snapshot: r.size ?? null,
+                color_snapshot: r.variant_color ?? null,
+                size_snapshot: r.variant_size ?? null,
                 line_base
             };
         });
 
-        //4. Áp dụng promotion (nếu có) - all eligible items + ratio allocation
+        // apply promotion if provided
         let discount_amount = 0;
         let promotion_id = null;
         let promotion_code_final = null;
 
-        if (promotion_code){
-
-            //a. lấy promotion hợp lệ cho user
+        if (promotion_code) {
             const promo = await promotionService.getPromotionByCode(promotion_code);
-            if (!promo){
-                throw new Error('Invalid or expired promotion code');
-            }
-            //kiểm tra ngày áp dụng
+            if (!promo) throw new Error('Invalid or expired promotion code');
             const now = new Date();
-            if (now < new Date(promo.start_date) || now > new Date(promo.end_date)) {
-                throw new Error('Promotion not in valid date range');
-            }
+            if (now < new Date(promo.start_date) || now > new Date(promo.end_date)) throw new Error('Promotion not in valid date range');
 
             promotion_id = promo.id;
             promotion_code_final = promo.code;
 
-            //b. lấy danh sách product_id mà promo áp dụng
-            const promoProductIds = await promotionService.getPromotionProducts(promo.id); // trả về mảng sản phẩm mà vc áp dụng được
+            const promoProductIds = await promotionService.getPromotionProducts(promo.id);
             const appliesToAll = promoProductIds.length === 0;
-            
-            //c. Lọc danh sachsh product_id voucher áp dụng (mảng rỗng = áp toàn shop)
+
             let eligible = orderItems;
-            if(!appliesToAll){
+            if (!appliesToAll) {
                 const allowed = new Set(promoProductIds);
                 eligible = orderItems.filter(ot => allowed.has(ot.product_id));
-
-                if (eligible.length === 0){
-                    throw new Error('Promotion code not applicable to these items');
-                }
+                if (eligible.length === 0) throw new Error('Promotion code not applicable to these items');
             }
 
-            //d. kiểm tra min_order_Value/ usage_limit 
-            if(promo.min_order_value != null && total_amount < Number(promo.min_order_value)){
-                throw new Error('Order total not eligible for this promotion');
-            }
-            if(promo.usage_limit != null && promo.used_count != null && promo.used_count > promo.usage_limit){
-                throw new Error('Promotion usage limit reached');
-            }
+            if (promo.min_order_value != null && total_amount < Number(promo.min_order_value)) throw new Error('Order total not eligible for this promotion');
+            const usedCount = Number(promo.used_count) || 0;
+            if (promo.usage_limit != null && usedCount >= Number(promo.usage_limit)) throw new Error('Promotion usage limit reached');
 
-            //e. Tính tổng tiền các item hợp lệ
-            const eligibleSubtotal = eligible.reduce((sum, it) => sum +it.line_base, 0);
-            if (eligibleSubtotal <= 0){
-                throw new Error('Eligible subtotal is zero');
-            }
+            const eligibleSubtotal = eligible.reduce((s, it) => s + it.line_base, 0);
+            if (eligibleSubtotal <= 0) throw new Error('Eligible subtotal is zero');
 
-            //f. tính số tiền giảm theo loại voucher + CAP(giảm tối đa)
-            const type = (promo.type || '').toLowerCase();
+            const rawType = String((promo.type || '')).trim().toLowerCase();
+            const type = (rawType === 'percent') ? 'percentage' : rawType;
+            const promoValue = Number(promo.value);
+            if (!Number.isFinite(promoValue) || promoValue < 0) throw new Error('Invalid promotion value');
+
             let rawDiscount = 0;
-
-            if(type === 'percent' || type === 'percentage'){
-                rawDiscount = eligibleSubtotal * (Number(promo.value) / 100);
-            }else if (type === 'amount'){
-                rawDiscount = Number(promo.value);
-            }else{
-                throw new Error('Unknown promotion type');
-            }
+            if (type === 'percentage') rawDiscount = eligibleSubtotal * (promoValue / 100);
+            else if (type === 'amount') rawDiscount = promoValue;
+            else throw new Error('Unknown promotion type');
 
             const maxCap = promo.max_discount_value != null ? Number(promo.max_discount_value) : Infinity;
-            //Không vượt quá eligibleSubtotal & cap
-            discount_amount = Math.min(rawDiscount, eligibleSubtotal);
+            discount_amount = Math.min(rawDiscount, eligibleSubtotal, Number.isFinite(maxCap) ? maxCap : Infinity);
             discount_amount = round2(discount_amount);
 
-            //g. phân bổ discount xuống từng item theo tý lệ line_base
-            if (discount_amount > 0){
+            if (discount_amount > 0) {
                 const alloc = allocateByRatio(eligible, discount_amount);
-
-                //Áp phân bổ xuống final_price từng item
-                for(let i = 0; i < eligible.length; i++){
+                for (let i = 0; i < eligible.length; i++) {
                     const it = eligible[i];
                     const part = alloc[i];
                     const newLine = Math.max(0, it.line_base - part);
-
                     it.promo_applied = part > 0;
                     it.final_price = round2(newLine / it.qty);
                 }
             }
-            
         }
 
         const shipFee = Number(shipping_fee) || 0;
-
-        //5. Tính final_amount = sum(final_price * qty) + ship - discount_amount
-        const itemsSumAfter = orderItems.reduce((sum, it)=> sum + it.final_price * it.qty, 0);
+        const itemsSumAfter = orderItems.reduce((s, it) => s + it.final_price * it.qty, 0);
         const final_amount = round2(itemsSumAfter + shipFee);
-        if(final_amount < 0){
-            throw new Error('Computed final amount is negative');
-        }
+        if (final_amount < 0) throw new Error('Computed final amount is negative');
 
-        //6. Insert orders
-        const orderRes = await client.query(
-            `
-                INSERT INTO orders 
-                    (user_id, total_amount, discount_amount, shipping_fee, final_amount,
-                     shipping_address_snapshot, payment_method, payment_status, order_status,
-                     promotion_id, promotion_code, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5,
-                        $6, $7, 'unpaid', 'pending',
-                        $8, $9, NOW(), NOW())
-                RETURNING id
-            `, 
-            [
-                user_id,
-                round2(total_amount),
-                round2(discount_amount),
-                shipFee,
-                final_amount,
-                JSON.stringify(addr),
-                payment_method,
-                promotion_id,
-                promotion_code_final
-            ]
-        );
+        // insert order
+        const orderRes = await client.query(`
+            INSERT INTO orders 
+                (user_id, total_amount, discount_amount, shipping_fee, final_amount,
+                 shipping_address_snapshot, payment_method, payment_status, order_status,
+                 promotion_id, promotion_code, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5,
+                    $6, $7, 'unpaid', 'pending',
+                    $8, $9, NOW(), NOW())
+            RETURNING id
+        `, [
+            user_id,
+            round2(total_amount),
+            round2(discount_amount),
+            shipFee,
+            final_amount,
+            JSON.stringify(addr),
+            payment_method,
+            promotion_id,
+            promotion_code_final
+        ]);
 
         const order_id = orderRes.rows[0].id;
 
-        //7. Insert order_items
+        // insert order_items bulk
         const oiValues = [];
         const oiParams = [];
         let idx = 1;
-
-        for(const it of orderItems){
-            oiValues.push(
-            `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`
-        );
-
+        for (const it of orderItems) {
+            oiValues.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`);
             oiParams.push(
                 order_id,
                 it.variant_id,
@@ -296,40 +197,37 @@ exports.createOrder = async (userId, orderData) => {
                 it.size_snapshot
             );
         }
-
-        await client.query(
-            `INSERT INTO order_items
+        await client.query(`
+            INSERT INTO order_items
                 (order_id, variant_id, qty, unit_price, final_price, promo_applied, name_snapshot, color_snapshot, size_snapshot)
-             VALUES ${oiValues.join(', ')}
-            `,
-            oiParams
-        );
+            VALUES ${oiValues.join(', ')}
+        `, oiParams);
 
-        //8. Trừ tồn kho
-        for (const it of orderItems){
-            const res = await client.query(
-                `UPDATE product_variants
-                 SET stock_qty = stock_qty - $1, sold_qty = COALESCE(sold_qty, 0) + $1
-                 WHERE id = $2 AND stock_qty >= $1`,
-                 [it.qty, it.variant_id]
-            );
-            if (res.rowCount === 0){
-                throw new Error(`Stock update failed for variant ${it.variant_id}`);
-            }
+        // decrement stock
+        for (const it of orderItems) {
+            const res = await client.query(`
+                UPDATE product_variants
+                SET stock_qty = stock_qty - $1, sold_qty = COALESCE(sold_qty, 0) + $1
+                WHERE id = $2 AND stock_qty >= $1
+            `, [it.qty, it.variant_id]);
+            if (res.rowCount === 0) throw new Error(`Stock update failed for variant ${it.variant_id}`);
         }
 
-        //9. Tăng used_count của promotion
-        if(promotion_id){
-            await client.query(
-                `UPDATE promotions
-                 SET used_count = COALESCE(used_count, 0) + 1, updated_at = NOW()
-                 WHERE id = $1`,
-                 [promotion_id]
+        // increment promotion used_count (if applicable) with row lock
+        if (promotion_id) {
+            const promoLock = await client.query(
+                `SELECT id, used_count, usage_limit FROM promotions WHERE id = $1 FOR UPDATE`,
+                [promotion_id]
             );
-            await client.query('COMMIT');
+            if (promoLock.rowCount === 0) throw new Error('Promotion not found when finalizing order');
+            const currentUsed = Number(promoLock.rows[0].used_count) || 0;
+            const usageLimit = promoLock.rows[0].usage_limit != null ? Number(promoLock.rows[0].usage_limit) : null;
+            if (usageLimit != null && currentUsed + 1 > usageLimit) throw new Error('Promotion usage limit reached (concurrent update)');
+            await client.query(`UPDATE promotions SET used_count = COALESCE(used_count,0) + 1, updated_at = NOW() WHERE id = $1`, [promotion_id]);
         }
 
-        //10. Trả về kết quả
+        await client.query('COMMIT');
+
         return {
             order_id,
             total_amount: round2(total_amount),
@@ -349,31 +247,35 @@ exports.createOrder = async (userId, orderData) => {
                 size_snapshot: it.size_snapshot
             }))
         };
-    }catch (error){
+    } catch (error) {
         await client.query('ROLLBACK');
-        throw error;    
-    }finally{
+        throw error;
+    } finally {
         client.release();
     }
 };
 
 function allocateByRatio(items, totalDiscount){
     const subtotal = items.reduce((sum, it) => sum + it.line_base, 0);
-    if (subtotal <= 0) return items.map(()=>0); //nếu subtotal <=0 thì trả về mảng toàn số 0 có độ dài bằng items.length
+    if (subtotal <= 0) return items.map(()=>0);
 
-    const alloc = [];  //-> mảng chứa số tiền giảm tương ứng từng item
-    let used = 0; // -> biến lưu tổng số tiền đã phân bổ
+    // Work in cents to avoid float precision loss, distribute remainder to last item
+    const totalCents = Math.round(totalDiscount * 100);
+    let usedCents = 0;
+    const alloc = [];
 
-    for ( let i = 0; i < items.length; i++){
-        if ( i < items.length -1){
-            const part = Math.floor(totalDiscount * (items[i].line_base / subtotal));
-            alloc.push(part);
-            used += part;
-        }else{
-            alloc.push(totalDiscount - used); // dồn phần dư vào item cuối
+    for (let i = 0; i < items.length; i++){
+        if (i < items.length - 1){
+            const partCents = Math.round((items[i].line_base / subtotal) * totalCents);
+            alloc.push(partCents / 100);
+            usedCents += partCents;
+        } else {
+            // last item gets the remainder
+            const lastCents = totalCents - usedCents;
+            alloc.push(lastCents / 100);
         }
     }
-    return alloc;  // mảng số tiền giảm tương ứng từng item
+    return alloc;
 }
 
 function round2(n){

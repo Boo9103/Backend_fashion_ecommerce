@@ -8,6 +8,7 @@ const errorHandler = require('./utils/errorHandler');
 const passport = require('./config/passport');
 const cron = require('node-cron');
 const promotionService = require('./services/promotionServices');
+const { cleanupExpiredRefreshTokens } = require('./cleanupRefreshTokens');
 
 
 const app = express();
@@ -32,7 +33,15 @@ app.use('/user', userRoutes);
 app.use(errorHandler);
 
 cron.schedule('0 0 * * *', () => {
-  require('./scripts/cleanupRefreshTokens');
+  // Chạy job dọn refresh token hết hạn hàng ngày lúc 00:00
+  (async () => {
+    try {
+      const n = await cleanupExpiredRefreshTokens();
+      if (typeof n === 'number') console.log(`Cleaned up ${n} expired refresh tokens`);
+    } catch (err) {
+      console.error('cron cleanupExpiredRefreshTokens error:', err && err.stack ? err.stack : err);
+    }
+  })();
 }); // Chạy hàng ngày lúc 00:00
 
 // chạy mỗi 5 phút để hết hạn khuyến mãi

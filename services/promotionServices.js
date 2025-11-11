@@ -91,7 +91,7 @@
 const pool = require('../config/db');
 
 exports.createPromotion = async (data) => {
-  const {
+  let {
     code,
     name,
     description,
@@ -109,6 +109,17 @@ exports.createPromotion = async (data) => {
     // - [1,2,3]          → áp dụng CHO CÁC SP NÀY
     product_ids = null
   } = data;
+
+  if (type !== undefined && type !== null) {
+    const t = String(type).trim().toLowerCase();
+    if (t === 'percent') type = 'percentage';
+    else type = t;
+  }
+
+  const ALLOWED_TYPES = ['percentage', 'amount'];
+  if (type && !ALLOWED_TYPES.includes(type)) {
+    throw new Error(`Invalid promotion type. Allowed: ${ALLOWED_TYPES.join(', ')}`);
+  }
 
   const client = await pool.connect();
 
@@ -237,19 +248,22 @@ exports.getPromotions = async ({ status, type, code, page, limit })=> {
     let hasWhere = false;
 
     if(status){
-        query += hasWhere ? ` AND P.status = $${params.length + 1}` : `WHERE p.status = $1`;
+        query += hasWhere ? ` AND p.status = $${params.length + 1}` : `WHERE p.status = $1`;
         params.push(status);
         hasWhere = true;
     }
 
     if(type){
+        // normalize incoming type like in createPromotion
+        let t = String(type).trim().toLowerCase();
+        if (t === 'percent') t = 'percentage';
         query += hasWhere ? ` AND p.type = $${params.length + 1}` : `WHERE p.type = $1`;
-        params.push(type);
+        params.push(t);
         hasWhere = true;
     }
 
     if(code){
-        query += hasWhere ? ` AND p.code == $${params.length + 1}` : `WHERE p.code = $1`;
+        query += hasWhere ? ` AND p.code = $${params.length + 1}` : `WHERE p.code = $1`;
         params.push(code);
         hasWhere = true;    
     }
@@ -332,6 +346,7 @@ exports.updatePromotion = async (id, data)=>{
     try{
         await client.query('BEGIN');
 
+        
         //Kiểm tra tồn tại
         const existCheck = await client.query('SELECT id FROM promotions WHERE id = $1', [id]);
         if(existCheck.rowCount === 0){
@@ -355,6 +370,24 @@ exports.updatePromotion = async (id, data)=>{
         const values = [];
         let idx = 1;
 
+        // Normalize incoming type (if provided)
+        let incomingType = type;
+        if (incomingType !== undefined && incomingType !== null) {
+            const t = String(incomingType).trim().toLowerCase();
+            if (t === 'percent') incomingType = 'percentage';
+            else incomingType = t;
+            const ALLOWED_TYPES = ['percentage', 'amount'];
+            if (!ALLOWED_TYPES.includes(incomingType)) {
+                throw new Error(`Invalid promotion type. Allowed: ${ALLOWED_TYPES.join(', ')}`);
+            }
+        }
+
+        if (incomingType !== undefined){
+            fields.push(`type = $${idx ++}`);
+            values.push(incomingType);
+        }
+
+
         if (name !== undefined){
             fields.push(`name = $${idx ++}`);
             values.push(name.trim());
@@ -363,11 +396,6 @@ exports.updatePromotion = async (id, data)=>{
         if(description !== undefined){
             fields.push(`description = $${idx ++}`);
             values.push(description);
-        }
-
-        if(type !== undefined){
-            fields.push(`type = $${idx ++}`);
-            values.push(type);
         }
 
         if(value !== undefined){
@@ -477,7 +505,7 @@ exports.deletePromotion = async(id)=>{
         );
 
         await client.query('COMMIT');       
-        return deleteRes.rowCount[0]; //Trả về thong tin đã xóa
+        return deleteRes.rows //Trả về thong tin đã xóa
     }
     catch (error){
         await client.query('ROLLBACK');

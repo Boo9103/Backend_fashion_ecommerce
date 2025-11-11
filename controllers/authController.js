@@ -162,13 +162,15 @@ const checkLoginStatus = (req, res) => {
       return res.status(200).json({ loggedIn: false, user: null });
     }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    // console.table(decoded);
     return res.status(200).json({
       loggedIn: true,
       user: {
         id: decoded.id,
         role: decoded.role,
         email: decoded.email || null, // Thêm email nếu có trong payload
-        full_name: decoded.full_name || null // thêm nếu có
+        full_name: decoded.full_name || null, // thêm nếu có
+        name: decoded.name || null,
       }
     });
   } catch (error) {
@@ -191,17 +193,17 @@ const requestPasswordReset = async (req, res, next) => {
 };
 
 const verifyResetOtp = async (req, res, next) => {
-  const { email, otp, newPassword } = req.body;
+  const { email, otp } = req.body;
 
   try {
-    if (!email || !otp || !newPassword) {
+    if (!email || !otp) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    const result = await authService.verifyOtpAndResetPassword({ email, otp, newPassword });
+    const result = await authService.verifyOtp({ email, otp });
     res.status(200).json(result);
   } catch (error) {
     return next(error);
   }
 };
 
-module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController, logout, googleAuth, googleCallback, checkLoginStatus, requestPasswordReset, verifyResetOtp};
+module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController, logout, googleAuth, googleCallback, checkLoginStatus, requestPasswordReset, verifyResetOtp };

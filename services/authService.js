@@ -2,7 +2,7 @@ const bcrypt = require('bcrypt');
 const pool = require('../config/db');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
-const { generateToken, generateFreshToken } = require('../config/jwt');
+const { generateToken, generateFreshToken, verifyToken } = require('../config/jwt');
 
 const register = async ({ email, password, full_name, phone}) => {
     const client = await pool.connect();
@@ -333,55 +333,100 @@ const requestPasswordReset = async (email) => {
   }
 };
 
-const verifyOtpAndResetPassword = async ({ email, otp, newPassword }) => {
-  const  client = await pool.connect();
+const verifyOtp = async (email, otp) => {
+  const client = await pool.connect();
+
   try {
     await client.query('BEGIN');
 
-    //Kiểm tra otp còn hạn và khớp
-    const result = await client.query(
-      `SELECT otp FROM otp_verifications WHERE email = $1 AND expires_at > NOW()`,
-      [email]
+    const res = await client.query(
+      ` SELECT id, otp, expires_at FROM otp_verifications
+        WHERE email = $1
+        ORDER BY created_at DESC
+      `, [email]
     );
+    if(res.rows.length === 0){
+      throw new Error('Invalid or expired OTP');
+    }
+    const row = res.rows[0];
 
-    if(result.rows.length === 0 || result.rows[0].otp !== otp){ 
+    //Kiểm tra expire
+    if(!row.expires_at || new Date(row.expires_at) < new Date()){
       throw new Error('Invalid or expired OTP');
     }
 
-    //Kiểm tra user tồn tại
-    const userResult = await client.query('SELECT id FROM users WHERE email = $1', [email]);
-
-    if(userResult.rows.length === 0){
-      throw new Error('User not found');
+    //So sánh otp
+    if(String(row.otp) !== String(otp)){
+      throw new Error('Invalid or expired OTP');
     }
 
-    const user = userResult.rows[0];
-
-    //Băm mật khẩu mới
-    const password_hash = await bcrypt.hash(newPassword, 10);
-
-    //Cập nhật mật khẩu
-    await client.query(`
-      UPDATE users SET password_hash = $1 WHERE id = $2
-      `, [password_hash, user.id]);
-
-    //Xóa OTP sau khi dùng
+    //Xóa OTP sau khi verify (không dùng lại)
     await client.query('DELETE FROM otp_verifications WHERE email = $1', [email]);
+    
 
-    //revoke tất cả refresh token hiện tại của user
-    await client.query(
-      'UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1 AND revoked = FALSE',
-      [user.id]
-    );
+    //Lấy user id để tạo reset token
+    const userRes = await client.query('SELECT id FROM users WHERE email = $1', [email]);
+    if(userRes.rows.length === 0){
+      //Không tiết lộ thông tin; rollback và trả về lỗi chung
+      await client.query('ROLLBACK');
+      return { message: 'If this email exists, an OTP has been sent.'}
+    }
 
+    const user = userRes.rows[0];
     await client.query('COMMIT');
-    return { message: 'Password has been reset successfully' };
-  }catch(error){
+
+    //Tạo reset token ngắn hạn (ví dụ 15p) chứa purpose
+    const resetToken = generateToken({ user_id: user.id, purpose: 'password_reset'}, {expires_at: '15m'});
+    return { resetToken };
+  }catch (error){
     await client.query('ROLLBACK');
     throw error;  
-  }finally{
+  }finally {
     client.release();
   }
 };
 
-module.exports = {register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister, googleLogin, requestPasswordReset, verifyOtpAndResetPassword};
+//Reset password - dùng resetToken để xác thực rồi cập nhật mật khẩu
+const resetPasswordWithToken = async (resetToken, newPassword) => {
+  const client = await pool.connect();
+  try {
+    //verify token
+    const payload = verifyToken(resetToken);
+    if(!payload || payload.purpose !== 'password_reset'|| !payload.user_id){
+      throw new Error('Invalid or expired reset token');
+    }
+    const userId = payload.user_id;
+
+    await client.query('BEGIN');
+
+    //Lấy password hiện tại
+    const userRes = await client.query('SELECT password_hash FROM users WHERE id = $1 FOR UPDATE', [userId]);
+    if(userRes.rows.length === 0){
+      throw new Error('User not found');
+    }
+    const currentHash = user.rows[0].password_hash;
+
+    //So sánh mật khẩu với mật khẩu cũ
+    const isSame = await bcrypt.compare(newPassword, currentHash);
+    if(isSame){
+      throw new Error('New password must be different from the old password');
+    }
+
+    //Hash mk mới và cập nhật
+    const newHash = await bcrypt.hash(newPassword, 10);
+    await client.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, userId]);
+
+    //Invalidate refresh tokens để logout các phiên cũ
+    await client.query('UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1', [userId]);
+
+    await client.query('COMMIT');
+    return { message: 'Password has been reset successfully' };
+  }catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  } 
+};
+
+module.exports = {register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister, googleLogin, requestPasswordReset, verifyOtp, resetPasswordWithToken};

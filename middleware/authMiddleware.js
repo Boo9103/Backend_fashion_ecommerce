@@ -35,13 +35,17 @@ const authMiddleware = (roles = []) => {
       }
       next();
     } catch (error) {
-      return res.status(401).json({ error: 'Invalid token' });
+      if (error.name === 'TokenExpiredError') return res.status(200).json({
+        expired: true,
+        error: { message: 'jwt expired' }
+      })
+      return res.status(401).json({ error });
     }
   };
 };
 
 const requireAdmin = authMiddleware(['admin']);
-const requireUser = authMiddleware(['customer', 'admin']);
+const requireUser = authMiddleware(['customer']);
 
 module.exports = {
   authMiddleware,

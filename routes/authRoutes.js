@@ -12,11 +12,12 @@ router.post('/logout', requireUser, authController.logout);
 router.post('/admin/login', authController.adminLogin);
 
 router.post('/reset-password', authController.requestPasswordReset);//gửi otp đổi mk
-router.post('/reset-password/verify', authController.verifyResetOtp); //xác thực otp đổi mk
+router.post('/reset-password/verify', authController.verifyResetOtp); // verify OTP -> trả resetToken
+router.post('/reset-password/confirm', authController.resetPassword); //dùng resettoken đổi mật khẩu
 
-router.get('/me', requireUser, (req, res) => {
-    res.json({ user: req.user });
-});
+// router.get('/me', requireUser, (req, res) => {
+//     res.json({ user: req.user });
+// });
 
 router.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 router.get(

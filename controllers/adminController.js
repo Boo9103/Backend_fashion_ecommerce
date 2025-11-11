@@ -172,3 +172,19 @@ exports.hardDeleteUser = async (req, res) => {
     return res.status(500).json({ message: 'Server error', error: process.env.NODE_ENV === 'development' ? error.message : {} });
   }
 };
+
+exports.updateUserEmail = async (req, res) => {
+  try {
+    //đảm bảo caller là admin
+    if(!req.user || req.user.role !== 'admin'){
+      return res.status(403).json({ message: 'Forbidden: Admins only' });
+    }
+    const targetUserId = req.params.id;
+    const newEmail = req.body.email;
+    const updated = await adminService.updateUserEmail(targetUserId, newEmail);
+    return res.json({ user: updated });
+  } catch (error) {
+    console.error('updateUserEmail error:', error);
+    return res.status(500).json({ message: 'Server error', error: process.env.NODE_ENV === 'development' ? error.message : {} });
+  }
+};
