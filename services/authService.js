@@ -34,7 +34,6 @@ const register = async ({ email, password, full_name, phone}) => {
     }finally{
         client.release();
     }
-    
 };
 
 const login = async ({email, password}) => {
@@ -388,45 +387,49 @@ const verifyOtp = async (email, otp) => {
 
 //Reset password - dùng resetToken để xác thực rồi cập nhật mật khẩu
 const resetPasswordWithToken = async (resetToken, newPassword) => {
-  const client = await pool.connect();
-  try {
-    //verify token
     const payload = verifyToken(resetToken);
-    if(!payload || payload.purpose !== 'password_reset'|| !payload.user_id){
-      throw new Error('Invalid or expired reset token');
-    }
-    const userId = payload.user_id;
-
-    await client.query('BEGIN');
-
-    //Lấy password hiện tại
-    const userRes = await client.query('SELECT password_hash FROM users WHERE id = $1 FOR UPDATE', [userId]);
-    if(userRes.rows.length === 0){
-      throw new Error('User not found');
-    }
-    const currentHash = user.rows[0].password_hash;
-
-    //So sánh mật khẩu với mật khẩu cũ
-    const isSame = await bcrypt.compare(newPassword, currentHash);
-    if(isSame){
-      throw new Error('New password must be different from the old password');
+    if (!payload || payload.purpose !== 'password_reset' || !payload.user_id) {
+        const e = new Error('Invalid or expired reset token');
+        e.status = 400;
+        throw e;
     }
 
-    //Hash mk mới và cập nhật
-    const newHash = await bcrypt.hash(newPassword, 10);
-    await client.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, userId]);
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
 
-    //Invalidate refresh tokens để logout các phiên cũ
-    await client.query('UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1', [userId]);
+        // lock the user row and get current password hash
+        const userRes = await client.query(
+            'SELECT id, password_hash FROM users WHERE id = $1 FOR UPDATE',
+            [payload.user_id]
+        );
+        if (userRes.rowCount === 0) {
+            const e = new Error('User not found');
+            e.status = 404;
+            await client.query('ROLLBACK');
+            throw e;
+        }
 
-    await client.query('COMMIT');
-    return { message: 'Password has been reset successfully' };
-  }catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  } 
+        // hash new password and update
+        const hashed = await bcrypt.hash(String(newPassword), 10);
+        await client.query(
+            `UPDATE users
+             SET password_hash = $1, updated_at = NOW()
+             WHERE id = $2`,
+            [hashed, payload.user_id]
+        );
+
+        // revoke refresh tokens so user must re-login
+        await client.query('DELETE FROM refresh_tokens WHERE user_id = $1', [payload.user_id]);
+
+        await client.query('COMMIT');
+        return { ok: true, message: 'Password updated' };
+    } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        client.release();
+    }
 };
 
 module.exports = {register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister, googleLogin, requestPasswordReset, verifyOtp, resetPasswordWithToken};
