@@ -192,6 +192,8 @@ const requestPasswordReset = async (req, res, next) => {
   }
 };
 
+// return { message: 'OTP sent to your email' };
+
 const verifyResetOtp = async (req, res, next) => {
   const { email, otp } = req.body;
 
@@ -206,18 +208,20 @@ const verifyResetOtp = async (req, res, next) => {
   }
 };
 
-const resetPassword = async (req, res, next) => {
-  const { refreshToken, newPassword } = req.body;
+// return { resetToken };
 
-  try{Ơ
-    if (!refreshToken || !newPassword) {
+const resetPassword = async (req, res, next) => {
+  const { resetToken, newPassword } = req.body;
+
+  try{
+    if (!resetToken || !newPassword) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    const result = await authService.resetPassword({ refreshToken, newPassword});
+    const result = await authService.resetPasswordWithToken({ resetToken, newPassword});
     return res.status(200).json(result);
   } catch (error) {
     return next(error); 
   }
 }
-
+//     return { message: 'Password has been reset successfully' };
 module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController, logout, googleAuth, googleCallback, checkLoginStatus, requestPasswordReset, verifyResetOtp, resetPassword};
