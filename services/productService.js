@@ -6,8 +6,7 @@ const {
   validateSoldQuantity
 } = require('../utils/validate');
 
-// Returns products. Default behavior: only return products with status = 'active' unless
-// caller passes `status` explicitly. To return all statuses, pass status = 'all'.
+
 exports.getProducts = async ( {search_key, category_id, supplier_id, is_flash_sale, min_price, max_price, status, limit = 10, page = 1})=>{
   const offset = (page-1)*limit;
   let query = `SELECT * FROM v_product_full p`;

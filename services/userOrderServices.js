@@ -45,9 +45,12 @@ exports.createOrder = async (userId, orderData) => {
         const qtyMap = {};
         for (const it of items) {
             if (!it || !it.variant_id) throw new Error('Invalid item payload');
-            if (!Number.isInteger(it.quantity) || it.quantity <= 0) throw new Error('invalid quantity');
+            // accept either { quantity } or { qty } from client
+            const rawQty = it.quantity ?? it.qty;
+            const qty = Number.isFinite(Number(rawQty)) ? Number(rawQty) : NaN;
+            if (!Number.isInteger(qty) || qty <= 0) throw new Error('invalid quantity');
             variantIds.push(it.variant_id);
-            qtyMap[it.variant_id] = it.quantity;
+            qtyMap[it.variant_id] = qty;
         }
 
         // fetch variants
@@ -226,6 +229,15 @@ exports.createOrder = async (userId, orderData) => {
             await client.query(`UPDATE promotions SET used_count = COALESCE(used_count,0) + 1, updated_at = NOW() WHERE id = $1`, [promotion_id]);
         }
 
+        // clear user's cart items after order created (so FE sees empty cart)
+        if (user_id) {
+            await client.query(
+                `DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1)`,
+                [user_id]
+            );
+            await client.query(`UPDATE carts SET updated_at = NOW() WHERE user_id = $1`, [user_id]);
+        }
+
         await client.query('COMMIT');
 
         return {
@@ -343,7 +355,7 @@ exports.getOrders = async ({ userId, role, page = 1, limit = 20, status, from, t
         FROM orders o
         ${whereClauses}
     `;
-    const countParams = params.slice(0, -2); // ✅ bỏ 2 phần tử CUỐI (limit, offset)
+    const countParams = params.slice(0, -2);
     const countRes = await pool.query(countQuery, countParams);
     const total = parseInt(countRes.rows[0].total, 10);
 
@@ -450,7 +462,8 @@ exports.cancelOrder = async ({ userId, role, orderId, reason }) => {
         await client.query('BEGIN');
 
         // Kiểm tra vai trò
-        if (role !== 'user') {
+        // role string used elsewhere is 'customer' for normal users
+        if (role !== 'customer') {
             throw new Error('Access denied: Only users can cancel orders');
         }
 
@@ -483,10 +496,11 @@ exports.cancelOrder = async ({ userId, role, orderId, reason }) => {
         for (const item of items.rows) {
             await client.query(
                 `UPDATE product_variants 
-                SET stock_qty = stock_qty + $1, sold_qty = COALESCE(sold_qty, 0) - $1
-                WHERE id = $2`,
+                 SET stock_qty = stock_qty + $1,
+                     sold_qty = GREATEST(COALESCE(sold_qty, 0) - $1, 0)
+                 WHERE id = $2`,
                 [item.qty, item.variant_id]
-        );
+            );
         }
 
         // Cập nhật trạng thái

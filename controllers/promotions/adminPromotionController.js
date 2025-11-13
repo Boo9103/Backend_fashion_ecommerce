@@ -23,7 +23,7 @@ exports.createPromotion = async (req, res)=>{
         }
 
         if(!['percentage', 'amount'].includes(type)){
-            return res.status(400).json({ error: 'type must be percentage / fixed' });
+            return res.status(400).json({ error: 'type must be percentage or amount' });
         }
 
         if(value <= 0){

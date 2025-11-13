@@ -200,7 +200,7 @@ const verifyResetOtp = async (req, res, next) => {
     if (!email || !otp) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    const result = await authService.verifyOtp(email, otp);
+    const result = await authService.verifyOtp( email, otp );
     res.status(200).json(result);
   } catch (error) {
     return next(error);
@@ -211,7 +211,8 @@ const verifyResetOtp = async (req, res, next) => {
 
 const resetPassword = async (req, res, next) => {
   const { resetToken, newPassword } = req.body;
-  try {
+
+  try{
     if (!resetToken || !newPassword) {
       return res.status(400).json({ error: 'Missing required fields' });
     }

@@ -25,14 +25,14 @@ const register = async ({ email, password, full_name, phone }) => {
       [email, password_hash, full_name, phone, 'customer', 'active']
     );
 
-    await client.query('COMMIT');
-    return result.rows[0];
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
+        await client.query('COMMIT');
+        return result.rows[0];
+    }catch(error){
+        await client.query('ROLLBACK');
+        throw error;
+    }finally{
+        client.release();
+    }
 };
 
 const login = async ({ email, password }) => {
@@ -406,54 +406,49 @@ const verifyOtp = async (email, otp) => {
 };
 
 const resetPasswordWithToken = async (resetToken, newPassword) => {
-  const client = await pool.connect();
-  try {
-    let payload;
-    try {
-      payload = verifyToken(resetToken);
-    } catch (err) {
-      const error = new Error('Invalid or expired reset token');
-      error.statusCode = 401;
-      throw error;
-    }
-
+    const payload = verifyToken(resetToken);
     if (!payload || payload.purpose !== 'password_reset' || !payload.user_id) {
-      const error = new Error('Invalid or expired reset token');
-      error.statusCode = 401;
-      throw error;
-    }
-    const userId = payload.user_id;
-
-    await client.query('BEGIN');
-
-    const userRes = await client.query('SELECT password_hash FROM users WHERE id = $1 FOR UPDATE', [userId]);
-    if (userRes.rows.length === 0) {
-      const error = new Error('User not found');
-      error.statusCode = 404;
-      throw error;
-    }
-    const currentHash = userRes.rows[0].password_hash;
-    console.table(newPassword);
-    const isSame = await bcrypt.compare(newPassword, currentHash);
-    if (isSame) {
-      const error = new Error('New password must be different from the old password');
-      error.statusCode = 405;
-      throw error;
+        const e = new Error('Invalid or expired reset token');
+        e.status = 400;
+        throw e;
     }
 
-    const newHash = await bcrypt.hash(newPassword, 10);
-    await client.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, userId]);
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
 
-    await client.query('UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1', [userId]);
+        // lock the user row and get current password hash
+        const userRes = await client.query(
+            'SELECT id, password_hash FROM users WHERE id = $1 FOR UPDATE',
+            [payload.user_id]
+        );
+        if (userRes.rowCount === 0) {
+            const e = new Error('User not found');
+            e.status = 404;
+            await client.query('ROLLBACK');
+            throw e;
+        }
 
-    await client.query('COMMIT');
-    return { message: 'Password has been reset successfully' };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
+        // hash new password and update
+        const hashed = await bcrypt.hash(String(newPassword), 10);
+        await client.query(
+            `UPDATE users
+             SET password_hash = $1, updated_at = NOW()
+             WHERE id = $2`,
+            [hashed, payload.user_id]
+        );
+
+        // revoke refresh tokens so user must re-login
+        await client.query('DELETE FROM refresh_tokens WHERE user_id = $1', [payload.user_id]);
+
+        await client.query('COMMIT');
+        return { ok: true, message: 'Password updated' };
+    } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        client.release();
+    }
 };
 
 module.exports = { register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister, googleLogin, requestPasswordReset, verifyOtp, resetPasswordWithToken };

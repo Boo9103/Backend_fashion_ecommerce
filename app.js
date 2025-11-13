@@ -28,6 +28,7 @@ app.use(passport.initialize());
 app.use('/api', authRoutes);
 app.use('/admin', adminRoutes);
 app.use('/user', userRoutes);
+app.use('/public', require('./routes/publicRoutes'));
 
 // Error handling (last)
 app.use(errorHandler);
