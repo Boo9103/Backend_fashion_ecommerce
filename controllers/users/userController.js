@@ -130,3 +130,4 @@ exports.deactivateAccount = async(req, res, next) => {
         next(error);
     }
 };
+

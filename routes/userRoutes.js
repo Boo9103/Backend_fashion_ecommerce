@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/users/userController');
 const orderController = require('../controllers/orders/orderController');
+const promotionController = require('../controllers/promotions/promotionController');
+const cartController = require('../controllers/cart/cartController');
 const { authMiddleware, requireUser } = require('../middleware/authMiddleware');
 
 router.post('/orders', requireUser, orderController.createOrder);
@@ -25,6 +27,30 @@ router.patch('/addresses/:id/set-default', requireUser, userController.setDefaul
 
 //user: deactive
 router.patch('/profile/deactive', requireUser, userController.deactivateAccount);
+
+
+// Promotions (public)
+router.get('/promotions/home',requireUser, promotionController.listForHome);   // trang chủ / widget promotions (public)
+
+
+//promotions
+router.post('/promotions/:id/collect', requireUser, promotionController.collect);
+router.get('/promotions/:id', promotionController.getPromotionById); // detail promotion
+router.post('/promotions/check-code', requireUser, promotionController.checkCode);//dùng lúc checkout
+router.post('/promotions/collect-by-code', requireUser, promotionController.collectByCode);
+
+//user-promotions
+router.get('/user-promotions', requireUser, promotionController.getUserPromotions);
+
+//cart
+router.get('/cart', requireUser, cartController.getCart);
+router.post('/cart/items', requireUser, cartController.addItem);
+router.patch('/cart/items/:id', requireUser, cartController.updateItem);
+router.delete('/cart/items/:id', requireUser, cartController.removeItem);
+router.delete('/cart/clear', requireUser, cartController.clearCart);
+
+//chi tiết product từ variant trong giỏ hàng
+router.get('/products/detail/:variantId', cartController.getProductFromVariant);
 
 module.exports = router;
 
@@ -64,3 +90,43 @@ module.exports = router;
 // }
 
 //get address by id: http://localhost:3000/user/addresses/417b8d65-7b4f-4d1a-85f4-e2acae48f32a
+
+//promotion
+//http://localhost:3000/user/promotions/home
+
+//collect
+//http://localhost:3000/user/promotions/c236bb28-d919-4ffb-bfdf-9538c623635c/collect
+// kq: {
+//     "collected": true,
+//     "created": true
+// }
+
+//collect by code lần 1 oke -> lần 2 trùng báo lỗi -- body {"code": "SUMMER25" }
+//http://localhost:3000/user/promotions/collect-by-code
+
+
+//Check code sử dụng khi checkout cần truyền body { "eligibleSubtotal": 250000 } 
+//Th1: no code chỉ truyền { "eligibleSubtotal": 250000 } -> sẽ trả về những promo active và thỏa điều kiện mà user đã collect
+//Th2: có code truyền {
+//      "code": "WINTER2025",
+//      "eligibleSubtotal": 250000
+// } -> trả về chi tiết promo nếu thỏa điều kiện -> lấy thông tin trả về của promo này để hiển thị lên fe (đang chọn) mã này không lưu vào db nhé
+//th3: {
+//     "code": "WINTER2025",
+//     "eligibleSubtotal": 250000,
+//     "save": true
+// } -> tương tự th2 nhưng nếu thỏa điều kiện sẽ lưu mã này vào user_promotion (giống như collect)
+
+//CART
+//add items to cart (post)
+//{
+//   "variant_id": "3dd1a91f-14ef-44a7-a1d8-7f40f2770684",
+//   "qty": 1
+// }
+//update -->http://localhost:3000/user/cart/items/eefe9cf1-0f78-4d7d-9245-fb7a96d4b3fe
+//->eefe9cf1-0f78-4d7d-9245-fb7a96d4b3fe là cart_item id (cột id trong bảng cart_items)
+//clear sẽ xóa items trong giỏ hàng còn cart vẫn giữ nguyên
+
+//lấy chi tiết từ variant
+//http://localhost:3000/user/products/detail/050e9020-4e08-4493-a987-6f62bd3f7adc 
+// phần cart đã test xong
