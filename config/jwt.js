@@ -9,10 +9,11 @@ const generateToken = (user)=> {
             email: user.email, 
             role: user.role,
             full_name: user.full_name,
-            name: user.name
+            name: user.name,
+            phone: user.phone,
         },
         process.env.JWT_SECRET,
-        { expiresIn: '1h'}
+        { expiresIn: '15s'}
     );
 };
 

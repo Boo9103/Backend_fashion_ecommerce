@@ -22,8 +22,8 @@ exports.createPromotion = async (req, res)=>{
             return res.status(400).json({ error: 'start_date must be before end_date' });
         }
 
-        if(!['percentage', 'fixed', 'free_ship'].includes(type)){
-            return res.status(400).json({ error: 'type must be percentage, fixed, or free_ship' });
+        if(!['percentage', 'amount'].includes(type)){
+            return res.status(400).json({ error: 'type must be percentage / fixed' });
         }
 
         if(value <= 0){
@@ -50,6 +50,7 @@ exports.createPromotion = async (req, res)=>{
         if (error.message.includes('already exists')) {
             return res.status(400).json({ message: error.message });
         }
+        // console.table(error);
         return res.status(500).json({ message: 'Server error', error: error.message });
     }
 };
