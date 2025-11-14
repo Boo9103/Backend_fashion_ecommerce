@@ -1,3 +1,4 @@
+const e = require('express');
 const orderService = require('../../services/userOrderServices');
 
 exports.createOrder = async(req, res)=> {
@@ -103,4 +104,55 @@ exports.cancelOrder = async(req, res)=>{
         }
         return res.status(500).json({ message: 'Server error', error: error.message });
     }
+};
+
+exports.addReview = async(req, res, next) => {
+    try {
+        const userId = req.user?.id;
+        const orderId = req.params.orderId;
+        const reviews = req.body.reviews;
+        const inserted = await orderService.addReviewForOrder(userId, orderId, reviews);
+        return res.status(201).json({ message: 'Reviews added successfully',
+            inserted: inserted.length,
+            reviews: inserted
+        });
+    }catch(error){
+        next(error);
+    }
+};
+
+exports.editReview = async(req, res, next) => {
+    try {
+        const userId = req.user?.id;
+        const reviewId = req.params.id;
+        const { rating, comment, images } = req.body || {};
+        const updated = await orderService.updateReview(userId, reviewId, { rating, comment, images });
+        return res.status(200).json({ message: 'Review updated', review: updated });
+    }catch(error){
+        next(error);
+    }
+};
+
+exports.deleteReview = async(req, res, next) => {
+    try{
+        const userId = req.user?.id;
+        const reviewId = req.params.id;
+        const r = await orderService.deleteReview(userId, reviewId);
+        return res.status(200).json({ message: 'Review deleted successfully', ...r });
+        
+    }catch(error){
+        next(error);
+    }
+};
+
+exports.getReviewById = async (req, res, next) => {
+  try {
+    const reviewId = req.params.id;
+    const userId = req.user?.id;
+    const role = req.user?.role || null;
+    const review = await orderService.getReviewById(reviewId, { userId, role });
+    return res.json({ review });
+  } catch (err) {
+    next(err);
+  }
 };

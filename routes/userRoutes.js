@@ -52,6 +52,11 @@ router.delete('/cart/clear', requireUser, cartController.clearCart);
 //chi tiết product từ variant trong giỏ hàng
 router.get('/products/detail/:variantId', cartController.getProductFromVariant);
 
+//reviews
+router.post('/orders/:orderId/reviews', requireUser, orderController.addReview);
+router.get('/reviews/:id', requireUser, orderController.getReviewById);
+router.patch('/reviews/:id', requireUser, orderController.editReview);
+router.delete('/reviews/:id', requireUser, orderController.deleteReview);
 module.exports = router;
 
 
@@ -77,7 +82,7 @@ module.exports = router;
 //get: http://localhost:3000/user/orders?07e961f5-8001-4c42-9e2e-09f7513f356b?page=1?limit=10
 //http://localhost:3000/user/orders?07e961f5-8001-4c42-9e2e-09f7513f356b?from=2025-10-14?to=2025-12-14?page=1?limit=10
 
-//get by it: http://localhost:3000/user/orders/931718f6-1ba1-499e-9f48-44bf4cef13fe
+//get by id: http://localhost:3000/user/orders/931718f6-1ba1-499e-9f48-44bf4cef13fe
 //post cancel: http://localhost:3000/user/orders/931718f6-1ba1-499e-9f48-44bf4cef13fe/cancel
 
 //post address
@@ -130,3 +135,78 @@ module.exports = router;
 //lấy chi tiết từ variant
 //http://localhost:3000/user/products/detail/050e9020-4e08-4493-a987-6f62bd3f7adc 
 // phần cart đã test xong
+
+
+
+
+
+
+//reviews 
+//post review
+// {
+//   "reviews": [
+//     {
+//       "variant_id": "050e9020-4e08-4493-a987-6f62bd3f7adc",
+//       "rating": 5,
+//       "comment": "Áo rất đẹp, giao nhanh",
+//       "images": ["https://.../img1.jpg", "https://.../img2.jpg"]
+//     },
+//     {
+//       "product_id": "16946115-7ed9-48d2-b38d-5a5441bd7b77",
+//       "rating": 4,
+//       "comment": "Quần ok",
+//       "images": []
+//     }
+//   ]
+// }
+
+//--> respone: 
+// {
+//     "message": "Reviews added successfully",
+//     "inserted": 2,
+//     "reviews": [
+//         {
+//             "id": "156caccb-6b0e-4035-bb9a-069f31b5df55",
+//             "user_id": "07e961f5-8001-4c42-9e2e-09f7513f356b",
+//             "product_id": "3432a738-5409-482a-9016-ee117f20f6d4",
+//             "rating": 5,
+//             "comment": "Áo rất đẹp, giao nhanh",
+//             "created_at": "2025-11-14T07:00:16.068Z",
+//             "images": [
+//                 "https://.../img1.jpg",
+//                 "https://.../img2.jpg"
+//             ]
+//         },
+//         {
+//             "id": "1ee41a26-6c2c-43c8-ab94-7a8d5f21ff97",
+//             "user_id": "07e961f5-8001-4c42-9e2e-09f7513f356b",
+//             "product_id": "16946115-7ed9-48d2-b38d-5a5441bd7b77",
+//             "rating": 4,
+//             "comment": "Quần ok",
+//             "created_at": "2025-11-14T07:00:16.068Z",
+//             "images": []
+//         }
+//     ]
+// }
+
+//update reivew: 
+// {
+//   "rating": 4,
+//   "comment": "Mình nhận hàng hàng nhưng giao sai mẫu sau đó shop đã hổ trợ đổi rất nhiệt tình."
+// }
+// respone: 
+// {
+//     "message": "Review updated",
+//     "review": {
+//         "id": "156caccb-6b0e-4035-bb9a-069f31b5df55",
+//         "user_id": "07e961f5-8001-4c42-9e2e-09f7513f356b",
+//         "product_id": "3432a738-5409-482a-9016-ee117f20f6d4",
+//         "rating": 4,
+//         "comment": "Mình nhận hàng hàng nhưng giao sai mẫu sau đó shop đã hổ trợ đổi rất nhiệt tình.",
+//         "images": [
+//             "https://.../img1.jpg",
+//             "https://.../img2.jpg"
+//         ],
+//         "created_at": "2025-11-14T07:00:16.068Z"
+//     }
+// }

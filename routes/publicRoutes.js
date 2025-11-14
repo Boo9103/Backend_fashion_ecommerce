@@ -7,11 +7,18 @@ router.get('/home-meta', publicController.getHomeMeta);
 
 // GET /public/home-products?type=all|supplier|flash|newest&suppliers=id1,id2&limit=8&page=1
 router.get('/home-products', publicController.getHomeProducts);
+router.get('/products', publicController.getProductsSimple); // lấy sp hiển thị ở trang home
 
 module.exports = router;
 
-//lấy sp
-// Supplier group: GET /public/home-products?type=supplier&suppliers=id1,id2&limit=8&page=1
-// Flash sale: GET /public/home-products?type=flash&limit=8&page=1
-// Newest: GET /public/home-products?type=newest&limit=12&page=1
+//lấy sp supplier dùng offset pagination (page, limit)
+// Supplier group: GET http://localhost:3000/public/home-products?type=supplier&suppliers=f561e254-2c00-44f9-bd01-b851beec9b06&limit=5&page=1
+// Flash sale: GET /public/home-products?type=flash&limit=8&cursor=xxx, (lần đầu k cần truyền), sau lần đầu có nextCursor = Y, gắn y = xxx cho lần thứ 2 trở đi
+//respone -->
+//         "total": 4,
+//         "perPage": 2,
+//         "nextCursor": null,
+//         "hasMore": false (nếu hết sp thì nó là false)
+// Newest: GET /public/home-products?type=newest ... tương tự flash sale dùng cursor
+//có thể thêm order để sắp xếp asc|desc theo sequence_id
 // All groups: GET /public/home-products?type=all&limit=8&page=1
