@@ -26,8 +26,12 @@ exports.updateUserProfile = async (req, res, next) => {
 
 exports.getAddresses = async (req, res, next) => {
     try {
-        const addrs = await userService.getUserAddresses(req.user.id);
-        return res.json({ addresses: addrs });
+        const userId = req.user?.id;
+        const addrs = await userService.getUserAddresses(userId);
+        return res.json({
+            success: true,
+            data: addrs,    
+            message: addrs.length ? 'Addresses retrieved successfully' : 'No addresses found' });
     } catch (error) {
         next(error);
     }
@@ -82,7 +86,7 @@ exports.deleteAddress = async(req, res, next) => {
 exports.getAddressById = async (req, res, next) => {
     try {
         const addressId = req.params.id;
-        const addr = await userService.getUserAddress(req.user.id, addressId);
+        const addr = await userService.getUserAddressById(req.user.id, addressId);
         if(!addr) return res.status(404).json({ message: 'Address not found' });
         return res.status(200).json({ address: addr });
     } catch (error) {

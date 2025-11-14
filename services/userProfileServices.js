@@ -72,7 +72,7 @@ exports.getUserAddresses = async (userId) => {
     const client = await pool.connect();
     try {
         const q = `
-            SELECT id, receive_name, phone, address, is_default, created_at, updated_at
+            SELECT *
             FROM user_addresses
             WHERE user_id = $1
             ORDER BY is_default DESC, created_at DESC`;
@@ -102,7 +102,7 @@ exports.addUserAddress = async (userId, data)=>{
             INSERT INTO user_addresses
             (id, user_id, receive_name, phone, address, tag, is_default, created_at, updated_at)
             VALUES (public.uuid_generate_v4(), $1, $2, $3, $4, $5, $6, NOW(), NOW())
-            RETURNING id, receive_name, phone, address, is_default, created_at, updated_at`;
+            RETURNING id, receive_name, phone, address, tag, is_default, created_at, updated_at`;
 
         const params = [
             userId,
@@ -177,7 +177,7 @@ exports.updateUserAddress = async (userId, addressId, data)=>{
             UPDATE user_addresses
             SET ${fields.join(', ')}, updated_at = NOW()
             WHERE user_id = $${idx++} AND id = $${idx}
-            RETURNING id, receive_name, phone, address, is_default, created_at, updated_at`;
+            RETURNING id, receive_name, phone, address, tag, is_default, created_at, updated_at`;
         
         const { rows } = await client.query(q, params);
         await client.query('COMMIT');
@@ -205,11 +205,11 @@ exports.deleteUserAddress = async (userId, addressId) => {
     }
 };
 
-exports.getUserAddress = async (userId, addressId) => {
+exports.getUserAddressById = async (userId, addressId) => {
     const client = await pool.connect();
     try {
         const q = `
-            SELECT id, receive_name, phone, address, is_default, created_at, updated_at
+            SELECT id, receive_name, phone, address, tag, is_default, created_at, updated_at
             FROM user_addresses
             WHERE user_id = $1 AND id = $2
             LIMIT 1`;

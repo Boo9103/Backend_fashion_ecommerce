@@ -6,73 +6,116 @@ const {
   validateSoldQuantity
 } = require('../utils/validate');
 
-
-exports.getProducts = async ( {search_key, category_id, supplier_id, is_flash_sale, min_price, max_price, status, limit = 10, page = 1})=>{
-  const offset = (page-1)*limit;
-  let query = `SELECT * FROM v_product_full p`;
-  const conditions = [];
+exports.getProducts = async ({
+  search_key,
+  category_id,
+  supplier_id,
+  is_flash_sale,
+  min_price,
+  max_price,
+  status,
+  limit = 10,
+  page = 1,
+  cursor = null,    // sequence_id cursor for keyset paging (optional)
+  order = 'asc'     // 'asc' or 'desc' when using cursor
+} = {}) => {
   const params = [];
+  let idx = 1;
+  const where = [];
 
-  // 0. Lọc theo key search (tên sản phẩm)
-  if (search_key) {
-    // Postgres uses ILIKE for case-insensitive pattern matching
-    conditions.push(`p.name ILIKE $${params.length + 1}`);
-    params.push(`%${search_key}%`);
-  }
-  // 1. Lọc category
-  if (category_id) {
-    conditions.push(`p.category_id = $${params.length + 1}`);
-    params.push(category_id);
-  }
-  // 2. Lọc supplier
-  if (supplier_id) {
-    conditions.push(`p.supplier_id = $${params.length + 1}`);
-    params.push(supplier_id);
-  }
-  // 2.5 Lọc theo trạng thái sản phẩm
-  // Nếu caller không truyền `status` thì mặc định chỉ lấy 'active'.
-  if (typeof status === 'undefined') {
-    conditions.push(`p.status = $${params.length + 1}`);
+  // normalize order once for both cursor and offset branches
+  const ord = String(order).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+
+  // status (default active)
+  if (typeof status === 'undefined' || status === null) {
+    where.push(`p.status = $${idx++}`);
     params.push('active');
   } else if (status !== 'all') {
-    // Nếu status = 'all' thì không lọc theo status
-    conditions.push(`p.status = $${params.length + 1}`);
+    where.push(`p.status = $${idx++}`);
     params.push(status);
   }
-  // 3. Lọc flash sale
-  if (is_flash_sale !== undefined) {
-    conditions.push(`p.is_flash_sale = $${params.length + 1}`);
-    params.push(is_flash_sale);
+
+  if (search_key && String(search_key).trim()) {
+    const sk = `%${String(search_key).trim()}%`;
+    where.push(`(v.name ILIKE $${idx} OR v.description ILIKE $${idx + 1})`);
+    params.push(sk, sk);
+    idx += 2;
   }
-  // 4. Lọc theo giá (final_price)
-  if (min_price !== undefined) {
-    conditions.push(`p.final_price >= $${params.length + 1}`);
+
+  if (category_id) {
+    where.push(`p.category_id = $${idx++}`);
+    params.push(category_id);
+  }
+
+  if (supplier_id) {
+    where.push(`p.supplier_id = $${idx++}`);
+    params.push(supplier_id);
+  }
+
+  if (is_flash_sale !== undefined && is_flash_sale !== null) {
+    where.push(`p.is_flash_sale = $${idx++}`);
+    params.push(Boolean(is_flash_sale));
+  }
+
+  if (min_price !== undefined && min_price !== null) {
+    where.push(`v.final_price >= $${idx++}`);
     params.push(min_price);
   }
-  if (max_price !== undefined) {
-    conditions.push(`p.final_price <= $${params.length + 1}`);
+  if (max_price !== undefined && max_price !== null) {
+    where.push(`v.final_price <= $${idx++}`);
     params.push(max_price);
   }
 
-  if (conditions.length > 0) {
-    query += ' WHERE ' + conditions.join(' AND ');
+  // Build base FROM (use v_product_full as v and products as p for sequence_id)
+  let sql = `SELECT v.*, p.sequence_id
+             FROM v_product_full v
+             JOIN public.products p ON p.id = v.id`;
+
+  if (where.length) {
+    sql += ' WHERE ' + where.join(' AND ');
   }
 
-  // 5. Phân trang
-  query += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-  params.push(limit, offset);
+  const useCursor = cursor !== undefined && cursor !== null && String(cursor).trim() !== '';
 
-  // Debug log
-  console.log('[getProducts] Query:', query);
-  console.log('[getProducts] Params:', params);
+  if (useCursor) {
+    const curVal = Number(cursor);
+    const curParam = Number.isFinite(curVal) ? curVal : 0;
 
-  try {
-    const result = await pool.query(query, params);
-    return result.rows;
-  } catch (err) {
-    console.error('[getProducts] ERROR:', err && err.stack ? err.stack : err);
-    throw err;
+    sql += ` AND p.sequence_id::bigint ${ord === 'ASC' ? '>' : '<'} $${idx}`;
+    params.push(curParam);
+    idx++;
+
+    // fetch one extra row to determine hasMore
+    const fetchLimit = Number(limit) + 1;
+    sql += ` ORDER BY p.sequence_id::bigint ${ord} LIMIT $${idx}`;
+    params.push(fetchLimit);
+    idx++;
+  } else {
+    // classic offset pagination
+    const pageNum = Math.max(1, Number(page) || 1);
+    const perPage = Math.max(1, Number(limit) || 10);
+    const offset = (pageNum - 1) * perPage;
+    // use ord for offset too
+    sql += ` ORDER BY p.sequence_id::bigint ${ord} LIMIT $${idx++} OFFSET $${idx++}`;
+    params.push(perPage, offset);
   }
+
+  // after query
+  const r = await pool.query(sql, params);
+  const rows = r.rows || [];
+
+  if (!useCursor) return rows;
+
+  // cursor mode: decide hasMore by presence of extra row
+  const hasMore = rows.length > Number(limit);
+  const products = hasMore ? rows.slice(0, Number(limit)) : rows;
+  const nextCursor = products.length > 0 && hasMore
+    ? Number(products[products.length - 1].sequence_id)
+    : (products.length > 0 ? Number(products[products.length - 1].sequence_id) : null);
+
+  // if no extra row -> no more pages => nextCursor could be null to indicate end
+  const finalNextCursor = hasMore ? nextCursor : null;
+  return { products, nextCursor: finalNextCursor, hasMore };
 };
 
 exports.createProduct = async (productData) => {

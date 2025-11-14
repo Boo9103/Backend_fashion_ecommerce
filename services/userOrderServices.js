@@ -522,3 +522,207 @@ exports.cancelOrder = async ({ userId, role, orderId, reason }) => {
         client.release();
     }
 };
+
+exports.addReviewForOrder = async(userId, orderId, reviews = []) => {
+    if(!userId) throw Object.assign(new Error('Unauthorized'), { status: 401 });
+    if(!orderId) throw new Error('orderId is required');
+    if(!Array.isArray(reviews) || reviews.length === 0) throw new Error('reviews must be a non-empty array');
+
+    const client = await pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        //kiểm tra đơn hàng có thuộc về user không và đã giao hàng
+        const oRes = await client.query(
+            'SELECT id, user_id, order_status FROM orders WHERE id = $1',
+            [orderId]
+        );
+        if(oRes.rowCount === 0) throw new Error('Order not found');
+        const order = oRes.rows[0];
+        if(order.user_id !== userId) throw new Error('Access denied');
+        if(order.order_status !== 'delivered') throw new Error('Order not delivered yet');
+
+        //kiểm tra sản phẩm được đánh giá có thuộc đơn hàng không
+        const piRes = await client.query(`
+            SELECT oi.variant_id, pv.product_id
+            FROM order_items oi
+            JOIN product_variants pv ON oi.variant_id = pv.id
+            WHERE oi.order_id = $1
+        `,[orderId]);
+
+        const variantToProduct = {};
+        const productSet = new Set(); // lưu trữ các product_id thuộc đơn hàng
+        for(const row of piRes.rows){
+            variantToProduct[row.variant_id] = row.product_id;
+            productSet.add(row.product_id);
+        }
+
+        //kiểm tra và chèn đánh giá
+        const normalizedReviews = reviews.map((r, idx) => {
+            const rating = Number.isFinite(Number(r.rating)) ? Number(r.rating) : NaN;
+            if(!Number.isInteger(rating) || rating < 1 || rating > 5) throw new Error(`Invalid rating for review at index ${idx}`);
+
+            let product_id = null;
+            if(r.product_id) product_id = r.product_id;
+            else if(r.variant_id && variantToProduct[r.variant_id]) product_id = variantToProduct[r.variant_id];
+            if(!product_id) throw new Error(`product_id or valid variant_id is required for review at index ${idx}`);
+
+            if(!productSet.has(product_id)) throw new Error(`Product ID ${product_id} in review at index ${idx} not found in order`);
+
+            const comment = r.comment ? String(r.comment).trim() : null;
+            const images = Array.isArray(r.images) ? r.images.map(i => String(i).trim()) : [];
+            return {
+                product_id,
+                rating,
+                comment,
+                images
+            };
+        });
+
+        // Chèn đánh giá
+        const vals = [];
+        const params = [];
+        let pIdx = 1;
+        for(const it of normalizedReviews){
+            vals.push(`(public.uuid_generate_v4(), $${pIdx++}, $${pIdx++}, $${pIdx++}, $${pIdx++}, NOW())`);
+            params.push(userId, it.product_id, it.rating, it.comment);
+        }
+
+        const inserRv = `
+            INSERT INTO reviews (id, user_id, product_id, rating, comment, created_at)
+            VALUES ${vals.join(', ')}
+            RETURNING id, user_id, product_id, rating, comment, created_at
+            `;
+        const insertRes = await client.query(inserRv, params);
+
+        //cập nhật hình ảnh đánh giá
+        for(let i = 0; i< normalizedReviews.length; i++){
+            const images = normalizedReviews[i].images || [];
+            if(images.length > 0) {
+                await client.query(`
+                    UPDATE reviews SET images = $1 WHERE id = $2`,
+                    [JSON.stringify(images), insertRes.rows[i].id]);
+                
+                //đính kèm hình ảnh vào bản ghi trả về
+                insertRes.rows[i].images = images;
+            }else{
+                insertRes.rows[i].images = [];
+            }
+        }
+
+        await client.query('COMMIT');
+        return insertRes.rows;
+    }catch (error){
+        await client.query('ROLLBACK');
+        throw error;
+    }finally {
+        client.release();
+    }
+};
+
+exports.updateReview = async (userId, reviewId,  { rating, comment, images } = {}) => {
+    if (!userId) throw Object.assign(new Error('Unauthorized'), { status: 401 });
+    if (!reviewId) throw Object.assign(new Error('reviewId is required'), { status: 400 });
+
+    const client = await pool.connect();
+    try{
+        await client.query('BEGIN');
+
+        const { rows } = await client.query(`
+            SELECT id, user_id, rating, comment,
+                COALESCE(images, '[]'::jsonb) AS images
+            FROM reviews WHERE id = $1`,[reviewId]);
+        
+        if(!rows || rows.length === 0){
+            throw Object.assign(new Error('Review not found'), { status: 404 });
+        }
+
+        const existing = rows[0];
+        if(String(existing.user_id) !== String(userId)) throw Object.assign(new Error('Unauthorized'), { status: 403 });
+
+        const newRating = rating !== undefined ? Number(rating) : existing.rating;
+        if(newRating !== null && (!Number.isInteger(newRating) || newRating < 1 || newRating > 5)){
+            throw Object.assign(new Error('Invalid rating'), { status: 400 });
+        }
+
+        const newComment = comment !== undefined ? String(comment).trim() : existing.comment;
+        const newImages = images !== undefined ? (Array.isArray(images) ? images : []) : existing.images;
+
+        const updSql = `
+            UPDATE reviews 
+            SET rating = $1, comment = $2, images = $3
+            WHERE id = $4
+            RETURNING id, user_id, product_id, rating, comment, images, created_at
+            `;
+        const updParams = [newRating, newComment, JSON.stringify(newImages), reviewId];
+        const updRes = await client.query(updSql, updParams);
+
+        await client.query('COMMIT');
+        return updRes.rows[0];
+    }catch(error){
+        await client.query('ROLLBACK');
+        throw error;
+    }finally {
+        client.release();
+    }
+};
+
+//Xóa review chỉ cho user xóa review của mình
+exports.deleteReview = async ( userId, reviewId ) => {
+    if (!userId) throw Object.assign(new Error('Unauthorized'), { status: 401 });
+    if (!reviewId) throw Object.assign(new Error('reviewId is required'), { status: 400 });
+
+    const client = await pool.connect();
+    try{
+        await client.query('BEGIN');
+
+        const { rows } = await client.query(`
+            SELECT id, user_id FROM reviews WHERE id = $1 FOR UPDATE`, [reviewId]);
+        if(!rows || rows.length === 0) {
+            throw Object.assign(new Error('Review not found'), { status: 404 });
+        }
+        const existing = rows[0];
+        if(String(existing.user_id) !== String(userId)){
+            throw Object.assign(new Error('Unauthorized'), { status: 403 });
+        }
+
+        await client.query('DELETE FROM reviews WHERE id = $1', [reviewId]);
+        await client.query('COMMIT');
+        return { deleted: true };
+    }catch(error){
+        await client.query('ROLLBACK');
+        throw error;
+    }finally {
+        client.release();
+    }
+};
+
+exports.getReviewById = async (reviewId, { userId = null, role = null } = {}) => {
+  if (!reviewId) throw Object.assign(new Error('reviewId is required'), { status: 400 });
+  const client = await pool.connect();
+  try {
+    const q = `
+      SELECT id, user_id, product_id, rating, comment, COALESCE(images, '[]'::jsonb) AS images, created_at, updated_at
+      FROM reviews
+      WHERE id = $1
+      LIMIT 1
+    `;
+    const { rows } = await client.query(q, [reviewId]);
+    if (!rows || rows.length === 0) {
+      throw Object.assign(new Error('Review not found'), { status: 404 });
+    }
+    const review = rows[0];
+
+    // if caller is customer, enforce ownership
+    if (role === 'customer' && userId) {
+      if (String(review.user_id) !== String(userId)) {
+        throw Object.assign(new Error('Access denied'), { status: 403 });
+      }
+    }
+
+    return review;
+  } finally {
+    client.release();
+  }
+};
