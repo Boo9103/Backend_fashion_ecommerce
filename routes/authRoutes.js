@@ -15,7 +15,7 @@ router.post('/reset-password', authController.requestPasswordReset);//gửi otp 
 router.post('/reset-password/verify', authController.verifyResetOtp); // verify OTP -> trả resetToken
 router.post('/reset-password/confirm', authController.resetPassword); //dùng resettoken đổi mật khẩu
 
-router.get('/me', requireUser, authController.getProfile);
+router.get('/me', authController.getProfile);
 
 router.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 router.get(
