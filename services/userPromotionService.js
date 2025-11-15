@@ -311,3 +311,105 @@ exports.getCollectedPromotionMap = async (userId, promotionIds = []) => {
     }
     return map;
 };
+
+
+exports.getPreviewPromotionApplication = async ({ userId= null, items = [], shipping_fee = 0, promotion_code }) => {
+    if(!promotion_code) throw Object.assign(new Error('promotion_code is required'), { status: 400 });
+
+    //dùng lại hàm checkPromotionByCode để kiểm tra và lấy thông tin promotion
+    const promo = await exports.getPromotionByCode(promotion_code);
+    if(!promo){
+        return { valid: false, reason: 'Invalid or not found promotion code' };
+    }
+
+    const now = new Date();
+    if(now < new Date(promo.start_date) || now > new Date(promo.end_date)){
+        return { valid: false, reason: 'Promotion code is not active' };
+    }
+
+    //chuẩn hóa danh sách sản phẩm
+    const normalizedItems = items.map(it => ({
+        variant_id: it.variant_id,
+        qty: Number(it.quantity ?? it.qty ?? 0),
+        unit_price: Number(it.unit_price ?? it.price ?? 0),
+        line_base: Number(it.quantity ?? it.qty ?? 0) * Number(it.unit_price ?? it.price ?? 0)
+    })).filter(it => it.variant_id && it.qty > 0); 
+
+    if(normalizedItems.length === 0 ){
+        return { valid: false, reason: 'No valid items provided' };
+    }//trả về mảng các item hợp lệ
+
+    //kiểm tra xem promotion áp dụng cho sản phẩm nào
+    const promoProductIds = await exports.getPromotionProducts(promo.id);
+    //nếu promoProductIds rỗng thì áp dụng cho tất cả sản phẩm
+    const appliesToAll = promoProductIds.length === 0;
+    let eligible = normalizedItems;
+    //ngược lại lọc ra các sản phẩm hợp lệ
+    if (!appliesToAll) {
+        const allowed = new Set(promoProductIds);
+        eligible = normalizedItems.filter(it => allowed.has(it.product_id) || allowed.has(it.variant_product_id) || allowed.has(it.variant_id) || allowed.has(String(it.product_id)));
+    }
+    if (eligible.length === 0) return { valid: false, reason: 'Promotion not applicable to selected items' };
+
+
+    const subtotal = normalizedItems.reduce((s, it) => s + it.line_base, 0); //lặp qua từng phần từ lấy line_base cộng dồn vào s, ban đầu s = 0
+    if (promo.min_order_value != null && subtotal < Number(promo.min_order_value)) {
+        return { valid: false, reason: `Minimum order value ${promo.min_order_value} not reached` };
+    }
+
+    const rawType = String((promo.type || '')).trim().toLowerCase();
+    const type = (rawType === 'percent') ? 'percentage' : rawType;
+    const promoValue = Number(promo.value);
+    if (!Number.isFinite(promoValue) || promoValue < 0) return { valid: false, reason: 'Invalid promotion value' };
+
+    const eligibleSubtotal = eligible.reduce((s, it) => s + it.line_base, 0); //reduce là hàm lặp qua mảng, s là biến tích trữ, it là phần tử hiện tại
+    let rawDiscount = 0;
+    if (type === 'percentage') rawDiscount = eligibleSubtotal * (promoValue / 100);
+    else if (type === 'amount') rawDiscount = promoValue;
+    else return { valid: false, reason: 'Unknown promotion type' };
+
+    const maxCap = promo.max_discount_value != null ? Number(promo.max_discount_value) : Infinity;
+    const discount_amount = Math.min(rawDiscount, eligibleSubtotal, Number.isFinite(maxCap) ? maxCap : Infinity);
+
+    // phân bổ giảm giá theo tỷ lệ
+    const allocateByRatioLocal = (itemsList, totalDiscount) => {
+        const s = itemsList.reduce((sum, it) => sum + it.line_base, 0);
+        if (s <= 0) return itemsList.map(()=>0);
+        const cents = Math.round(totalDiscount * 100);
+        let used = 0;
+        const alloc = [];
+        for (let i=0;i<itemsList.length;i++){
+          if (i < itemsList.length - 1){
+            const part = Math.round((itemsList[i].line_base / s) * cents);
+            alloc.push(part/100);
+            used += part;
+          } else {
+            alloc.push((cents - used)/100);
+          }
+        }
+        return alloc;
+      };
+
+    const alloc = allocateByRatioLocal(normalizedItems, discount_amount);
+    const breakdown = normalizedItems.map((it, idx) => ({ variant_id: it.variant_id, qty: it.qty, line_base: it.line_base, discount: alloc[idx] }));
+
+    const itemsAfter = normalizedItems.map(it => {
+        const found = breakdown.find(b => String(b.variant_id) === String(it.variant_id));
+        const disc = found ? found.discount : 0;
+        return { ...it, discount: disc, final_line: it.line_base - disc };
+    });
+
+    const itemsSumAfter = itemsAfter.reduce((s, it) => s + it.final_line, 0);
+    const final_total = Math.round((itemsSumAfter + Number(shipping_fee) + Number.EPSILON) * 100) / 100;
+
+    return {
+        valid: true,
+        promotion: { id: promo.id, code: promo.code, type, value: promoValue, max_discount_value: promo.max_discount_value || null },
+        subtotal: eligible,
+        shipping_fee: Number(shipping_fee) || 0,
+        discount: Math.round((discount_amount + Number.EPSILON) * 100) / 100,
+        discount_breakdown: breakdown,
+        items: itemsAfter,
+        final_total
+      };
+};

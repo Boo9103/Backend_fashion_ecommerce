@@ -115,3 +115,81 @@ exports.getHomeProducts = async ({ type = 'all', suppliers = [], limit = 8, curs
 
   return result;
 };
+
+exports.getReviewsByProduct = async (productId, {page = 1, limit = 10} = {}) => {
+  if(!productId) throw Object.assign(new Error('ProductId is required'), { status: 400 });
+  const offset = Math.max(0, (Number(page) - 1)) * Number(limit);
+  const client = await pool.connect();
+  try {
+    //list reviews
+    const q = `
+      SELECT p.name AS product_name, r.id as review_id, r.user_id, r.rating, r.comment, COALESCE(r.images, '[]'::jsonb) AS images, r.created_at
+      FROM reviews r
+      JOIN products p On p.id = r.product_id
+      WHERE product_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3        
+    `;
+    const { rows } = await client.query(q, [productId, limit, offset]);
+    //summary: totla count and avg rating
+    const summary = `SELECT COUNT(*)::int AS total_count, COALESCE(AVG(rating)::numeric, 0) AS avg_rating FROM reviews WHERE product_id = $1`;
+    const sres = await client.query(summary, [productId]);
+    const total = sres.rows[0] ? Number(sres.rows[0].total_count) : 0;
+    const avg_rating = sres.rows[0] ? Number(sres.rows[0].avg_rating) : 0;
+
+    return { reviews: rows, total, avg_rating, page: Number(page), perPage: Number(limit)};
+  }finally{
+    client.release();
+  }
+};
+
+exports.getCategoriesWithProducts = async (perChildLimit = 10) => {
+    const client = await pool.connect();
+    try {
+        // lấy category cha (parent_id IS NULL)
+        const parentsRes = await client.query(
+            `SELECT id, name, image FROM categories WHERE parent_id IS NULL ORDER BY name`
+        );
+        const parents = parentsRes.rows || [];
+
+        const result = [];
+        for (const p of parents) {
+            // lấy category con
+            const childrenRes = await client.query(
+                `SELECT id, name, image FROM categories WHERE parent_id = $1 ORDER BY name`,
+                [p.id]
+            );
+            const children = [];
+
+            for (const c of (childrenRes.rows || [])) {
+                // lấy tối đa perChildLimit sản phẩm active trong category con
+                const prodRes = await client.query(
+                    `SELECT id, name, description, price, sale_percent, final_price, category_id, supplier_id, category_name, supplier_name, product_images, variants, sequence_id
+                     FROM v_product_full
+                     WHERE category_id = $1 AND status = 'active'
+                     ORDER BY created_at DESC
+                     LIMIT $2`,
+                    [c.id, Number(perChildLimit) || 10]
+                );
+
+                children.push({
+                    id: c.id,
+                    name: c.name,
+                    image: c.image || null,
+                    products: prodRes.rows || []
+                });
+            }
+
+            result.push({
+                id: p.id,
+                name: p.name,
+                image: p.image || null,
+                children
+            });
+        }
+
+        return result;
+    } finally {
+        client.release();
+    }
+};

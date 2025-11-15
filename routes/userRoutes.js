@@ -38,6 +38,7 @@ router.post('/promotions/:id/collect', requireUser, promotionController.collect)
 router.get('/promotions/:id', promotionController.getPromotionById); // detail promotion
 router.post('/promotions/check-code', requireUser, promotionController.checkCode);//dùng lúc checkout
 router.post('/promotions/collect-by-code', requireUser, promotionController.collectByCode);
+router.post('/promotions/preview', requireUser, promotionController.preview); // user chọn mã km để xem chi tiết trước khi lưu vào user_promotion
 
 //user-promotions
 router.get('/user-promotions', requireUser, promotionController.getUserPromotions);
@@ -57,6 +58,7 @@ router.post('/orders/:orderId/reviews', requireUser, orderController.addReview);
 router.get('/reviews/:id', requireUser, orderController.getReviewById);
 router.patch('/reviews/:id', requireUser, orderController.editReview);
 router.delete('/reviews/:id', requireUser, orderController.deleteReview);
+//thiếu get reviews trên public
 module.exports = router;
 
 
@@ -209,4 +211,76 @@ module.exports = router;
 //         ],
 //         "created_at": "2025-11-14T07:00:16.068Z"
 //     }
+// }
+
+
+//preview promotion
+// {
+//     "items": [
+//       { "variant_id": "3dd1a91f-14ef-44a7-a1d8-7f40f2770684", "quantity": 1, "unit_price": 899000 },
+//       { "variant_id": "cea6a951-6e75-4b85-9c3b-02443473e23b", "quantity": 2, "unit_price": 194350 }
+//     ],
+//     "shipping_fee": 35000,
+//     "promotion_code": "WINTER2025"
+//   }
+
+//respone: 
+// {
+//     "valid": true,
+//     "promotion": {
+//         "id": "c236bb28-d919-4ffb-bfdf-9538c623635c",
+//         "code": "WINTER2025",
+//         "type": "percentage",
+//         "value": 20,
+//         "max_discount_value": "50000.00"
+//     },
+//     "subtotal": [
+//         {
+//             "variant_id": "3dd1a91f-14ef-44a7-a1d8-7f40f2770684",
+//             "qty": 1,
+//             "unit_price": 899000,
+//             "line_base": 899000
+//         },
+//         {
+//             "variant_id": "cea6a951-6e75-4b85-9c3b-02443473e23b",
+//             "qty": 2,
+//             "unit_price": 194350,
+//             "line_base": 388700
+//         }
+//     ],
+//     "shipping_fee": 35000,
+//     "discount": 50000,
+//     "discount_breakdown": [
+//         {
+//             "variant_id": "3dd1a91f-14ef-44a7-a1d8-7f40f2770684",
+//             "qty": 1,
+//             "line_base": 899000,
+//             "discount": 34907.2
+//         },
+//         {
+//             "variant_id": "cea6a951-6e75-4b85-9c3b-02443473e23b",
+//             "qty": 2,
+//             "line_base": 388700,
+//             "discount": 15092.8
+//         }
+//     ],
+//     "items": [
+//         {
+//             "variant_id": "3dd1a91f-14ef-44a7-a1d8-7f40f2770684",
+//             "qty": 1,
+//             "unit_price": 899000,
+//             "line_base": 899000,
+//             "discount": 34907.2,
+//             "final_line": 864092.8
+//         },
+//         {
+//             "variant_id": "cea6a951-6e75-4b85-9c3b-02443473e23b",
+//             "qty": 2,
+//             "unit_price": 194350,
+//             "line_base": 388700,
+//             "discount": 15092.8,
+//             "final_line": 373607.2
+//         }
+//     ],
+//     "final_total": 1272700
 // }
