@@ -18,10 +18,31 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.use(cors({
-  origin: process.env.FE_URL || 'http://localhost:5000',
+// CORS: allow FE origin, support credentials and preflight
+const FE_ORIGIN = process.env.FE_URL || 'http://localhost:5000';
+const corsOptions = {
+  origin: (origin, callback) => {
+    // allow no-origin (curl / server-to-server) or specific FE origin
+    if (!origin || origin === FE_ORIGIN) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
-}));
+  methods: ['GET','HEAD','PUT','PATCH','POST','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','X-Requested-With','Accept'],
+  optionsSuccessStatus: 204
+};
+// register preflight explicit
+app.options('*', require('cors')(corsOptions));
+app.use(require('cors')(corsOptions));
+
+// small middleware to ensure headers present for all responses (helps in some reverse-proxy cases)
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  if (!res.getHeader('Access-Control-Allow-Origin')) {
+    res.setHeader('Access-Control-Allow-Origin', FE_ORIGIN);
+  }
+  next();
+});
 
 app.use(passport.initialize());
 
