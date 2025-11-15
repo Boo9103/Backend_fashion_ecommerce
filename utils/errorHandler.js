@@ -1,81 +1,30 @@
 const util = require('util');
 
-const errorHandler = (err, req, res, next) => {
-    // If headers already sent, delegate to default Express handler
-    if (res.headersSent) {
-        return next(err);
-    }
-
+module.exports = (err, req, res, next) => {
     try {
-        const isProd = process.env.NODE_ENV === 'production';
+        console.error('[errorHandler] failure', err && (err.stack || err.message || err));
 
-        // Normalize non-Error throws (strings, objects, etc.)
-        if (!(err instanceof Error)) {
-            try {
-                err = new Error(typeof err === 'string' ? err : JSON.stringify(err));
-            } catch (e) {
-                err = new Error(String(err));
-            }
+        // If headers already sent, do not attempt to set headers / send response again.
+        if (res.headersSent) {
+            // log and terminate silently (Express will handle)
+            console.error('[errorHandler] headers already sent, cannot send error response');
+            return;
         }
 
-        // Generate a lightweight error id to help tracing in logs + responses
-        const errorId = `${Date.now().toString(36)}-${Math.floor(Math.random() * 100000)}`;
-
-        // Log full details in dev, minimal in prod
-        if (isProd) {
-            console.error(`[error:${errorId}]`, err.message);
-        } else {
-            console.error(`[error:${errorId}]`, err && err.stack ? err.stack : util.inspect(err));
-        }
-
-        // Map to HTTP status codes
-        let status = 500;
-        if (err.status && Number.isInteger(err.status)) status = err.status;
-        else if (err.name === 'ValidationError' || err instanceof SyntaxError) status = 400;
-        else if (err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError') status = 401;
-        else if (err.code === '23505') status = 409; // postgres unique_violation
-        else if (err.code === '23503') status = 400; // foreign key violation
-
-        // Response payload
+        const status = err.status || 500;
         const payload = {
-            message: err.message || 'Internal server error',
-            errorId
+            success: false,
+            message: err.message || 'Internal Server Error'
         };
 
-        // Attach debug info only when not in production
-        if (!isProd) {
-            payload.error = {
-                name: err.name,
-                message: err.message,
-                stack: err.stack,
-                code: err.code,
-                detail: err.detail,
-                hint: err.hint
-            };
+        // include more debug info in non-production
+        if (process.env.NODE_ENV !== 'production') {
+            payload.error = err.stack || err;
         }
-
-        console.error('Error Handler:', {
-            message: err.message,
-            stack: err.stack,
-            path: req.path,
-            method: req.method,
-            timestamp: new Date().toISOString(),
-        });
-        res.status(500).json({
-            message: 'Internal server error',
-            errorId: require('crypto').randomBytes(8).toString('hex'),
-        });
 
         res.status(status).json(payload);
     } catch (handlerErr) {
-        // If error handler itself fails, fallback safe response
-        console.error('[errorHandler] failure', handlerErr && handlerErr.stack ? handlerErr.stack : handlerErr);
-        try {
-            res.status(500).json({ message: 'Internal server error' });
-        } catch (e) {
-            // give up if response cannot be sent
-        }
+        // last resort - avoid crashing the process
+        console.error('[errorHandler] failed to send error response', handlerErr);
     }
 };
-
-module.exports = errorHandler;

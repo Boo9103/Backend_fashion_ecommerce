@@ -177,16 +177,20 @@ const checkLoginStatus = (req, res) => {
 };
 
 
-const requestPasswordReset = async (req, res, next) => {
-  const { email } = req.body;
+exports.requestPasswordReset = async (req, res, next) => {
   try {
-    if (!email) {
-      return res.status(400).json({ error: 'Tài khoản chưa tồn tại' });
+    const { phoneOrEmail } = req.body;
+    await authService.requestPasswordReset(phoneOrEmail);
+    return res.json({ success: true, message: 'OTP sent' });
+  } catch (err) {
+    // handle known rate-limit error from service
+    if (err && /OTP already sent recently/i.test(err.message)) {
+      const retryAfter = err.retryAfter || 60; // seconds
+      res.set('Retry-After', String(retryAfter));
+      return res.status(429).json({ success: false, message: err.message });
     }
-    const result = await authService.requestPasswordReset(email);
-    res.status(200).json(result);
-  } catch (error) {
-    return next(error);
+    // Pass unexpected errors to centralized handler
+    return next(err);
   }
 };
 
