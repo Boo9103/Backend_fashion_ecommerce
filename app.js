@@ -30,7 +30,6 @@ app.use('/api', authRoutes);
 app.use('/admin', adminRoutes);
 app.use('/user', userRoutes);
 app.use('/public', require('./routes/publicRoutes'));
-app.use('/health', require('./routes/healthRoutes'));
 
 // Error handling (last)
 app.use(errorHandler);
