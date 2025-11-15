@@ -60,14 +60,14 @@ app.use(errorHandler);
 //     await new Promise((r) => setTimeout(r, delayMs));
 //   }
 
-  if (!ok) {
-    console.error('[startup] Database not reachable after retries. Exiting with details:', {
-      maxAttempts,
-      delayMs,
-      databaseUrl: process.env.DATABASE_URL,
-    });
-    process.exit(1);
-  }
+  // if (!ok) {
+  //   console.error('[startup] Database not reachable after retries. Exiting with details:', {
+  //     maxAttempts,
+  //     delayMs,
+  //     databaseUrl: process.env.DATABASE_URL,
+  //   });
+  //   process.exit(1);
+  // }
 
   // Register cron jobs only after DB ready
   cron.schedule('0 0 * * *', async () => {
