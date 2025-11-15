@@ -31,8 +31,8 @@ const corsOptions = {
   allowedHeaders: ['Content-Type','Authorization','X-Requested-With','Accept'],
   optionsSuccessStatus: 204
 };
-// register preflight explicit
-app.options('*', require('cors')(corsOptions));
+// register preflight explicitly using '/*' instead of '*'
+app.options('/*', require('cors')(corsOptions));
 app.use(require('cors')(corsOptions));
 
 // small middleware to ensure headers present for all responses (helps in some reverse-proxy cases)
