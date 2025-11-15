@@ -177,7 +177,7 @@ const checkLoginStatus = (req, res) => {
 };
 
 
-exports.requestPasswordReset = async (req, res, next) => {
+const requestPasswordReset = async (req, res, next) => {
   try {
     const { phoneOrEmail } = req.body;
     await authService.requestPasswordReset(phoneOrEmail);
