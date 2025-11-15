@@ -222,4 +222,11 @@ const resetPassword = async (req, res, next) => {
   }
 }
 
+exports.getProfile = async (req, res, next) => {
+  try {
+    const { password, refresh_token, ...userSafe } = req.user || {};
+    return res.json({ success: true, user: userSafe });
+  } catch (err) { next(err); }
+};
+
 module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController, logout, googleAuth, googleCallback, checkLoginStatus, requestPasswordReset, verifyResetOtp, resetPassword};
