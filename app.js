@@ -34,31 +34,31 @@ app.use('/public', require('./routes/publicRoutes'));
 // Error handling (last)
 app.use(errorHandler);
 
-const startServerWhenDbReady = async () => {
-  const maxAttempts = Number(process.env.DB_STARTUP_RETRIES) || 5;
-  const delayMs = Number(process.env.DB_STARTUP_RETRY_DELAY_MS) || 5000;
-  let attempt = 0;
-  let ok = false;
+// const startServerWhenDbReady = async () => {
+//   const maxAttempts = Number(process.env.DB_STARTUP_RETRIES) || 5;
+//   const delayMs = Number(process.env.DB_STARTUP_RETRY_DELAY_MS) || 5000;
+//   let attempt = 0;
+//   let ok = false;
 
-  while (attempt < maxAttempts && !ok) {
-    attempt++;
-    try {
-      const result = await pool.query('SELECT 1');
-      ok = result.rows.length > 0;
-      if (ok) {
-        console.log(`[startup] DB test succeeded at attempt ${attempt}`);
-        break;
-      }
-      console.error(`[startup] DB test failed (attempt ${attempt}/${maxAttempts}). Retrying in ${delayMs}ms...`);
-    } catch (err) {
-      console.error(`[startup] DB test error (attempt ${attempt}):`, {
-        message: err.message,
-        stack: err.stack,
-        databaseUrl: process.env.DATABASE_URL, // Log để debug
-      });
-    }
-    await new Promise((r) => setTimeout(r, delayMs));
-  }
+//   while (attempt < maxAttempts && !ok) {
+//     attempt++;
+//     try {
+//       const result = await pool.query('SELECT 1');
+//       ok = result.rows.length > 0;
+//       if (ok) {
+//         console.log(`[startup] DB test succeeded at attempt ${attempt}`);
+//         break;
+//       }
+//       console.error(`[startup] DB test failed (attempt ${attempt}/${maxAttempts}). Retrying in ${delayMs}ms...`);
+//     } catch (err) {
+//       console.error(`[startup] DB test error (attempt ${attempt}):`, {
+//         message: err.message,
+//         stack: err.stack,
+//         databaseUrl: process.env.DATABASE_URL, // Log để debug
+//       });
+//     }
+//     await new Promise((r) => setTimeout(r, delayMs));
+//   }
 
   if (!ok) {
     console.error('[startup] Database not reachable after retries. Exiting with details:', {
@@ -92,4 +92,3 @@ const startServerWhenDbReady = async () => {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
   });
-};
