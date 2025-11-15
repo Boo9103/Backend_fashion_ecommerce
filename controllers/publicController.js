@@ -96,3 +96,35 @@ exports.getProductsSimple = async (req, res, next) => {
         next(err);
     }
 };
+
+exports.listReviewsByProductId = async (req, res, next) => {
+  try {
+    const productId = req.params.productId;
+    const limt = req.query.limit ? Number(req.query.limit) : 10;
+    const page = req.query.page ? Number(req.query.page): 1;
+
+    const data = await publicService.getReviewsByProduct(
+      productId, { page, limt}
+    );
+    return res.json({
+      success: true,
+      product_id: productId,
+      reviews: data.reviews,
+      total: data.total,
+      page: data.page,
+      limit: data.limit
+    });
+  } catch (err) {
+    next(err);  
+  }
+};
+
+exports.getCategoriesWithProducts = async (req, res, next) => {
+  try{
+    const limit = Number(req.query.limit) || 10;
+    const data = await publicService.getCategoriesWithProducts(limit);
+    return res.json({ categories: data });
+  } catch (err) {
+    next(err);
+  }
+};

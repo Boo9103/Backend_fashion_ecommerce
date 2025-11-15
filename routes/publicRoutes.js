@@ -8,6 +8,9 @@ router.get('/home-meta', publicController.getHomeMeta);
 // GET /public/home-products?type=all|supplier|flash|newest&suppliers=id1,id2&limit=8&page=1
 router.get('/home-products', publicController.getHomeProducts);
 router.get('/products', publicController.getProductsSimple); // lấy sp hiển thị ở trang home
+router.get('/reviews/:productId', publicController.listReviewsByProductId);
+
+router.get('/categories-with-products', publicController.getCategoriesWithProducts);
 
 module.exports = router;
 
