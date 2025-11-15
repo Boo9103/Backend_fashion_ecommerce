@@ -552,15 +552,27 @@ exports.updatePromotionStatus = async (id, data)=>{
 
 
 exports.expirePromotions = async function(){
-    const q =`
-        UPDATE promotions 
-        SET status = 'inactive',
-            updated_at = NOW()
-        WHERE end_date < NOW()
-            AND status != 'inactive'
-        RETURNING id
-    `;
+    // const q =`
+    //     UPDATE promotions 
+    //     SET status = 'inactive',
+    //         updated_at = NOW()
+    //     WHERE end_date < NOW()
+    //         AND status != 'inactive'
+    //     RETURNING id
+    // `;
 
-    const res = await pool.query(q);
-    return res.rowCount;
+    // const res = await pool.query(q);
+    // return res.rowCount;
+
+    try {
+        console.log('Running expirePromotions');
+        const result = await pool.query(
+        'UPDATE promotions SET is_active = false WHERE end_date < NOW() AND is_active = true'
+        );
+        console.log(`Expired ${result.rowCount} promotions`);
+        return result.rowCount;
+    } catch (err) {
+        console.error('expirePromotions error:', err.message, err.stack);
+        return 0; // Không crash server
+    }
 };

@@ -54,6 +54,18 @@ const errorHandler = (err, req, res, next) => {
             };
         }
 
+        console.error('Error Handler:', {
+            message: err.message,
+            stack: err.stack,
+            path: req.path,
+            method: req.method,
+            timestamp: new Date().toISOString(),
+        });
+        res.status(500).json({
+            message: 'Internal server error',
+            errorId: require('crypto').randomBytes(8).toString('hex'),
+        });
+
         res.status(status).json(payload);
     } catch (handlerErr) {
         // If error handler itself fails, fallback safe response

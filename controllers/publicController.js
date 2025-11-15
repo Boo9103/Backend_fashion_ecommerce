@@ -62,9 +62,6 @@ exports.getProductsSimple = async (req, res, next) => {
             }
         }
 
-        // If client didn't provide cursor -> enable keyset:
-        // - asc: start from 0
-        // - desc: start from max(sequence_id)
         if (!cursorProvided) {
             if (order === 'asc') {
                 cursor = 0;
