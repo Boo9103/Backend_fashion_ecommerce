@@ -49,7 +49,7 @@ router.patch('/users/:id/email', requireAdmin, adminController.updateUserEmail);
 //Product management
 router.get('/products', requireAdmin, adminProductController.getFlashSaleProducts);
 router.post('/products', requireAdmin, adminProductController.createProduct);
-router.get('/products/:id', requireAdmin, adminProductController.getProductById);
+router.get('/products/:id', adminProductController.getProductById);
 router.patch('/products/:id', requireAdmin, adminProductController.updateFlashSale);
 router.put('/products/:id', requireAdmin, adminProductController.updateProduct);
 router.delete('/products/:id', requireAdmin, adminProductController.deleteProduct);

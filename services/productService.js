@@ -1,7 +1,7 @@
 const pool = require('../config/db');
 const {
   validatePrice,
-  validateStockQty,
+  validateStockQuantity,
   validateSalePercent,
   validateSoldQuantity
 } = require('../utils/validate');
@@ -129,7 +129,7 @@ exports.createProduct = async (productData) => {
   productData.sale_percent = validateSalePercent(sale_percent);
 
   for(const v of variants){
-    v.stock_qty = validateStockQty(v.stock_qty);
+    v.stock_qty = validateStockQuantity(v.stock_qty);
 
     if(v.sold_qty !== undefined){
       v.sold_qty = validateSoldQuantity(v.sold_qty);
