@@ -1,13 +1,12 @@
 const { Pool } = require('pg');
-
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) {
-  throw new Error('DATABASE_URL is not set in environment variables');
-}
+require('dotenv').config();
 
 const pool = new Pool({
-  connectionString,
-  ssl: { rejectUnauthorized: false } // Bắt buộc cho Render
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME
 });
 
 module.exports = pool;
