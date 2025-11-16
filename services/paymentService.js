@@ -5,9 +5,10 @@ exports.createPaypalOrder = async ({ orderId, amount, currency = 'VND', returnUr
   // Validate order ownership / final amount BEFORE calling PayPal outside this function.
   const request = new paypalSdk.orders.OrdersCreateRequest();
   request.prefer('return=representation');
+  const usdAmount = (amount / 23000).toFixed(2); // Convert VND to USD assuming 1 USD = 23000 VND
   request.requestBody({
     intent: 'CAPTURE',
-    purchase_units: [{ amount: { currency_code: currency, value: String(amount.toFixed ? amount.toFixed(2) : amount) } }],
+    purchase_units: [{ amount: { currency_code: 'USD', value: usdAmount } }],
     application_context: { return_url: returnUrl, cancel_url: cancelUrl }
   });
 

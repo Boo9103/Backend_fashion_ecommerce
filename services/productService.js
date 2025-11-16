@@ -37,9 +37,13 @@ exports.getProducts = async ({
 
   if (search_key && String(search_key).trim()) {
     const sk = `%${String(search_key).trim()}%`;
-    where.push(`(v.name ILIKE $${idx} OR v.description ILIKE $${idx + 1})`);
-    params.push(sk, sk);
-    idx += 2;
+    where.push(`(
+      v.name ILIKE $${idx} OR 
+      v.description ILIKE $${idx + 1} OR 
+      COALESCE(v.supplier_name, '') ILIKE $${idx + 2} OR
+      COALESCE(v.category_name,'') ILIKE $${idx + 3})`);
+    params.push(sk, sk, sk, sk);
+    idx += 4;
   }
 
   if (category_id) {

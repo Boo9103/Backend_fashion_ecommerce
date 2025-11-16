@@ -78,7 +78,30 @@ exports.getProductsSimple = async (req, res, next) => {
             }
         }
 
-        const callArgs = { limit, order, ...(cursor !== undefined ? { cursor } : {}) };
+        // parse filter params to pass to service
+        const search_key = req.query.search_key || req.query.q || null;
+        const category_id = req.query.category_id || null;
+        const supplier_id = req.query.supplier_id || null; // supplier == brand
+        const min_price = req.query.min_price !== undefined ? Number(req.query.min_price) : undefined;
+        const max_price = req.query.max_price !== undefined ? Number(req.query.max_price) : undefined;
+        const is_flash_sale = req.query.is_flash_sale !== undefined ? (req.query.is_flash_sale === 'true' || req.query.is_flash_sale === '1') : undefined;
+        const status = req.query.status || undefined;
+        const page = req.query.page ? Number(req.query.page) : undefined;
+
+
+        const callArgs = {
+            limit,
+            order,
+            ...(cursor !== undefined ? { cursor } : {}),
+            ...(search_key ? { search_key } : {}),
+            ...(category_id ? { category_id } : {}),
+            ...(supplier_id ? { supplier_id } : {}),
+            ...(min_price !== undefined ? { min_price } : {}),
+            ...(max_price !== undefined ? { max_price } : {}),
+            ...(typeof is_flash_sale !== 'undefined' ? { is_flash_sale } : {}),
+            ...(status ? { status } : {}),
+            ...(page ? { page } : {})
+        };
         const resp = await productService.getProducts(callArgs);
 
         // normalize both return shapes (array or { products,... })
