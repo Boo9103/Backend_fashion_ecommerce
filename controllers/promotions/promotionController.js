@@ -156,14 +156,3 @@ exports.getUserPromotions = async (req, res, next) => {
     next(err);
   }
 };
-
-exports.preview = async (req, res, next) => {
-  try {
-    const userId = req.user?.id || null;
-    const { items, shipping_fee = 0, promotion_code } = req.body;
-    const preview = await userPromotionService.getPreviewPromotionApplication({ userId, items, shipping_fee, promotion_code });
-    return res.json(preview);
-  } catch (err) {
-    next(err);
-  }
-};
