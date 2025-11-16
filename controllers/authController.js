@@ -162,13 +162,15 @@ const checkLoginStatus = (req, res) => {
       return res.status(200).json({ loggedIn: false, user: null });
     }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    // console.table(decoded);
     return res.status(200).json({
       loggedIn: true,
       user: {
         id: decoded.id,
         role: decoded.role,
         email: decoded.email || null, // Thêm email nếu có trong payload
-        full_name: decoded.full_name || null // thêm nếu có
+        full_name: decoded.full_name || null, // thêm nếu có
+        name: decoded.name || null,
       }
     });
   } catch (error) {
@@ -176,23 +178,20 @@ const checkLoginStatus = (req, res) => {
   }
 };
 
-
 const requestPasswordReset = async (req, res, next) => {
+  const { email } = req.body;
   try {
-    const { phoneOrEmail } = req.body;
-    await authService.requestPasswordReset(phoneOrEmail);
-    return res.json({ success: true, message: 'OTP sent' });
-  } catch (err) {
-    // handle known rate-limit error from service
-    if (err && /OTP already sent recently/i.test(err.message)) {
-      const retryAfter = err.retryAfter || 60; // seconds
-      res.set('Retry-After', String(retryAfter));
-      return res.status(429).json({ success: false, message: err.message });
+    if (!email) {
+      return res.status(400).json({ error: 'Tài khoản chưa tồn tại' });
     }
-    // Pass unexpected errors to centralized handler
-    return next(err);
+    const result = await authService.requestPasswordReset(email);
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
   }
 };
+
+// return { message: 'OTP sent to your email' };
 
 const verifyResetOtp = async (req, res, next) => {
   const { email, otp } = req.body;
@@ -208,6 +207,8 @@ const verifyResetOtp = async (req, res, next) => {
   }
 };
 
+// return { resetToken };
+
 const resetPassword = async (req, res, next) => {
   const { resetToken, newPassword } = req.body;
 
@@ -218,15 +219,8 @@ const resetPassword = async (req, res, next) => {
     const result = await authService.resetPasswordWithToken(resetToken, newPassword);
     return res.status(200).json(result);
   } catch (error) {
-    return next(error); 
+    return next(error);
   }
 }
-
-const getProfile = async (req, res, next) => {
-  try {
-    const { password, refresh_token, ...userSafe } = req.user || {};
-    return res.json({ success: true, user: userSafe });
-  } catch (err) { next(err); }
-};
-
-module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController, logout, googleAuth, googleCallback, checkLoginStatus, requestPasswordReset, verifyResetOtp, resetPassword, getProfile};
+//     return { message: 'Password has been reset successfully' };
+module.exports = { register, login, adminLogin, refresh, sendOtpController, verifyOtpController, logout, googleAuth, googleCallback, checkLoginStatus, requestPasswordReset, verifyResetOtp, resetPassword };
