@@ -4,6 +4,7 @@ const cors = require('cors');
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const userRoutes = require('./routes/userRoutes');
+const paymentsRoutes = require('./routes/paymentsRoutes');
 const errorHandler = require('./utils/errorHandler');
 const passport = require('./config/passport');
 const cron = require('node-cron');
@@ -29,6 +30,7 @@ app.use('/api', authRoutes);
 app.use('/admin', adminRoutes);
 app.use('/user', userRoutes);
 app.use('/public', require('./routes/publicRoutes'));
+app.use('/payments', paymentsRoutes);
 
 // Error handling (last)
 app.use(errorHandler);
