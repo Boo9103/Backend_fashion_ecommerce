@@ -9,6 +9,7 @@ router.get('/home-meta', publicController.getHomeMeta);
 router.get('/home-products', publicController.getHomeProducts);
 router.get('/products', publicController.getProductsSimple); // lấy sp hiển thị ở trang home
 router.get('/reviews/:productId', publicController.listReviewsByProductId);
+router.get('/products/:id', publicController.getProductById);
 
 router.get('/categories-with-products', publicController.getCategoriesWithProducts);
 
