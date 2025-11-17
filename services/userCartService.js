@@ -183,11 +183,11 @@ exports.addItem = async (userId, variantId, qty = 1, size = null) => {
 
     // get price & sale snapshot from product/variant
     const pvRes = await client.query(
-        `SELECT p.price, COALESCE(p.sale_percent, 0) AS sale_percent
-        FROM product_variants pv
-        JOIN products p ON p.id = pv.product_id
-        WHERE pv.id = $1
-        LIMIT 1`,
+        `SELECT p.price, COALESCE(p.sale_percent, 0) AS sale_percent, p.is_flash_sale, p.final_price
+         FROM product_variants pv
+         JOIN products p ON p.id = pv.product_id
+         WHERE pv.id = $1
+         LIMIT 1`,
         [variantId]
     );
     if (pvRes.rows.length === 0) {
@@ -197,8 +197,17 @@ exports.addItem = async (userId, variantId, qty = 1, size = null) => {
     }
 
     const price = Number(pvRes.rows[0].price) || 0;
-    const sale = Number(pvRes.rows[0].sale_percent) || 0;
-    const unitPrice = Math.round((price * (1 - sale / 100)) * 100) / 100;
+    const salePercent = Number(pvRes.rows[0].sale_percent) || 0;
+    const isFlash = !!pvRes.rows[0].is_flash_sale;
+    const finalPrice = pvRes.rows[0].final_price != null ? Number(pvRes.rows[0].final_price) : null;
+    // per requirement: if flash sale active use current flash price, otherwise use product.price (not sale_percent)
+    let unitPrice;
+    if (isFlash && finalPrice !== null) {
+      unitPrice = finalPrice;
+    } else {
+      unitPrice = price;
+    }
+    unitPrice = Math.round(unitPrice * 100) / 100;
 
     // check existing cart item for same variant + size
     const exist = await client.query(
@@ -208,9 +217,10 @@ exports.addItem = async (userId, variantId, qty = 1, size = null) => {
 
     if (exist.rows.length) {
         const newQty = Number(exist.rows[0].qty) + qty;
+        // update qty and refresh price_snapshot to current unitPrice (reflect flash price if any)
         await client.query(
-            `UPDATE cart_items SET qty = $1 WHERE id = $2`,
-            [newQty, exist.rows[0].id]
+            `UPDATE cart_items SET qty = $1, price_snapshot = $2, updated_at = NOW() WHERE id = $3`,
+            [newQty, unitPrice, exist.rows[0].id]
         );
     } else {
         await client.query(
