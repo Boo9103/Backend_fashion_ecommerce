@@ -58,14 +58,26 @@ exports.getCart = async (userId) => {
 
         const cartId = cRes.rows[0].id;
         const q = `
-            SELECT ci.id, ci.variant_id, ci.qty, ci.price_snapshot, ci.size_snapshot, 
-                    pv.sku, pv.color_name, pv.sizes,
-                    p.id AS product_id, p.name AS product_name,
-                    p.price AS product_price, p.sale_percent,
-                    p.is_flash_sale, p.final_price
+            SELECT
+                ci.id,
+                ci.variant_id,
+                ci.qty,
+                ci.price_snapshot,
+                ci.size_snapshot,
+                pv.sku,
+                pv.color_name,
+                pv.sizes,
+                p.id AS product_id,
+                p.name AS product_name,
+                p.price AS product_price,
+                p.sale_percent,
+                p.is_flash_sale,
+                p.final_price,
+                s.name AS supplier_name
             FROM cart_items ci
             LEFT JOIN product_variants pv ON ci.variant_id = pv.id
             LEFT JOIN products p ON p.id = pv.product_id
+            LEFT JOIN suppliers s ON s.id = p.supplier_id
             WHERE ci.cart_id = $1
             ORDER BY ci.created_at DESC
         `;
@@ -90,9 +102,11 @@ exports.getCart = async (userId) => {
                 id: r.id,
                 variant_id: r.variant_id,
                 sku: r.sku,
-                size: r.size_snapshot,
+                color_name: r.color_name || null,
+                size: r.size_snapshot || null,
                 product_id: r.product_id,
                 product_name: r.product_name,
+                supplier_name: (r.supplier_name && r.supplier_name.trim()) ? r.supplier_name.trim() : null,
                 qty: qty,
                 unit_price: unitPriceSnapshot,
                 line_total: lineTotal,
@@ -108,7 +122,40 @@ exports.getCart = async (userId) => {
             return line;
         });
 
-        return { id: cartId, items, totalQty, subtotal: Number(subtotal.toFixed(2)) };
+        // sort flat items by supplier_name asc, product_name asc
+        items.sort((a, b) => {
+            const sa = (a.supplier_name || '').toLowerCase();
+            const sb = (b.supplier_name || '').toLowerCase();
+            if (sa === sb) {
+                return String(a.product_name || '').localeCompare(String(b.product_name || ''));
+            }
+            if (!sa) return 1;
+            if (!sb) return -1;
+            return sa.localeCompare(sb);
+        });
+
+        // group items by supplier_name and compute per-group totals
+        const groupedMap = {};
+        for (const it of items) {
+            const key = it.supplier_name || 'Others';
+            if (!groupedMap[key]) {
+                groupedMap[key] = { supplier_name: key, items: [], total_qty: 0, subtotal: 0 };
+            }
+            groupedMap[key].items.push(it);
+            groupedMap[key].total_qty += it.qty;
+            groupedMap[key].subtotal += it.line_total;
+        }
+
+        const grouped = Object.values(groupedMap);
+
+        // sort groups alphabetically, keep 'Others' last
+        grouped.sort((a, b) => {
+            if (a.supplier_name === 'Others') return 1;
+            if (b.supplier_name === 'Others') return -1;
+            return a.supplier_name.toLowerCase().localeCompare(b.supplier_name.toLowerCase());
+        });
+
+        return { id: cartId, items, grouped, totalQty, subtotal: Number(subtotal.toFixed(2)) };
     }finally{
         client.release();
     }
