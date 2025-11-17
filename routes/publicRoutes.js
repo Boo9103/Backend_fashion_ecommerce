@@ -13,6 +13,10 @@ router.get('/products/:id', publicController.getProductById);
 
 router.get('/categories-with-products', publicController.getCategoriesWithProducts);
 
+//news
+router.get('/news', publicController.getNewList);
+router.get('/news/:id', publicController.getNewsById);
+
 module.exports = router;
 
 //lấy sp supplier dùng offset pagination (page, limit)

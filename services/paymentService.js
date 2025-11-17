@@ -27,7 +27,7 @@ exports.createPaypalOrder = async ({ orderId, amount, currency = 'VND', returnUr
 
 exports.capturePaypalOrder = async ({ orderId, paypalOrderId, userId }) => {
   // call capture
-  const req = new paypalSdk.orders.OrdersCaptureRequest(paypalOrderId);
+  const req = new paypalSdk.orders.OrdersCaptureRequest(paypalOrderId); //capture tiền
   req.requestBody({});
   const resp = await paypalClient.execute(req);
 

@@ -17,9 +17,15 @@ exports.getCart = async (req, res, next) => {
 exports.addItem = async (req, res, next) => {
     try {
         const userId = req.user && req.user.id;
-        const { variant_id, qty } = req.body || {};
+        const { variant_id, qty, size } = req.body || {};
         if(!variant_id) return res.status(400).json({ message: 'variant_id is required' });
-        const cart = await cartService.addItem(userId, variant_id, qty);
+        if(qty !== undefined && isNaN(Number(qty))) {
+            return res.status(400).json({ message: 'qty must be a number' });
+        }
+        if(size !== undefined && size !== null && typeof size !== 'string') {
+            return res.status(400).json({ message: 'size must be a string' });
+        }
+        const cart = await cartService.addItem(userId, variant_id, qty, size);
         return res.status(200).json(cart);
     } catch (error) {
         next(error);

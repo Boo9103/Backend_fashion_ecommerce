@@ -6,20 +6,10 @@ const adminCategoryController = require('../controllers/categories/adminCategory
 const adminSupplierController = require('../controllers/suppliers/adminSupplierController');
 const adminProductController = require('../controllers/products/adminProductController');
 const promotionController = require('../controllers/promotions/adminPromotionController');
-const userOrderController = require('../controllers/orders/orderController')
+const userOrderController = require('../controllers/orders/orderController');
+const adminNewsController = require('../controllers/news/adminNewsController');
 const adminOrderController = require('../controllers/orders/adminOrderController');
 const { authMiddleware, requireAdmin, requireUser } = require('../middleware/authMiddleware');
-
-// debug: in type của mọi handler/middleware
-// console.log('typeof adminController =', typeof adminController);
-// console.log('typeof adminController.getUsers =', typeof adminController.getUsers);
-// console.log('typeof adminCategoryController =', typeof adminCategoryController);
-// console.log('typeof adminSupplierController =', typeof adminSupplierController);
-// console.log('typeof adminProductController =', typeof adminProductController);
-// console.log('typeof promotionController =', typeof promotionController);
-// console.log('typeof authMiddleware =', typeof authMiddleware);
-// console.log('typeof requireAdmin =', typeof requireAdmin);
-// console.log('typeof requireUser =', typeof requireUser);
 
 //Category management (admin routes require admin)
 router.get('/categories', requireAdmin, adminCategoryController.getCategories);
@@ -72,6 +62,13 @@ router.get('/orders', requireAdmin, userOrderController.getOrders);
 router.get('/orders/:id', requireAdmin, userOrderController.getOrderById);
 router.patch('/orders/:id/status', requireAdmin, adminOrderController.updateOrderStatus);
 
+
+//news
+router.post('/news', requireAdmin, adminNewsController.createNews);
+router.get('/news', requireAdmin, adminNewsController.listNewsAdmin);
+router.get('/news/:id', requireAdmin, adminNewsController.getNewsById);
+router.put('/news/:id', requireAdmin, adminNewsController.updateNews);
+router.delete('/news/:id', requireAdmin, adminNewsController.removeNews);
 module.exports = router;
 
 

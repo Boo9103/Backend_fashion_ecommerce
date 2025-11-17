@@ -58,9 +58,11 @@ exports.getCart = async (userId) => {
 
         const cartId = cRes.rows[0].id;
         const q = `
-            SELECT ci.id, ci.variant_id, ci.qty, ci.price_snapshot,
+            SELECT ci.id, ci.variant_id, ci.qty, ci.price_snapshot, ci.size_snapshot, 
                     pv.sku, pv.color_name, pv.sizes,
-                    p.id AS product_id, p.name AS product_name, p.price AS product_price, p.sale_percent
+                    p.id AS product_id, p.name AS product_name,
+                    p.price AS product_price, p.sale_percent,
+                    p.is_flash_sale, p.final_price
             FROM cart_items ci
             LEFT JOIN product_variants pv ON ci.variant_id = pv.id
             LEFT JOIN products p ON p.id = pv.product_id
@@ -72,18 +74,36 @@ exports.getCart = async (userId) => {
         let subtotal = 0;
         let totalQty = 0;
         const items = rows.map(r => {
+            const unitPriceSnapshot = Number(r.price_snapshot);
+            const qty = Number(r.qty);
+            const lineTotal = Number((unitPriceSnapshot * qty).toFixed(2));
+
+            const productPrice = Number(r.product_price || 0);
+            const salePercent = Number(r.sale_percent || 0);
+            const isFlash = !!r.is_flash_sale;
+            const flashPrice = (r.final_price != null) ? Number(r.final_price) : null;
+            const salePriceComputed = isFlash && flashPrice !== null
+              ? flashPrice
+              : (salePercent > 0 ? Math.round(productPrice * (1 - salePercent / 100) * 100) / 100 : null);
+
             const line = {
                 id: r.id,
                 variant_id: r.variant_id,
                 sku: r.sku,
+                size: r.size_snapshot,
                 product_id: r.product_id,
                 product_name: r.product_name,
-                qty: Number(r.qty),
-                unit_price: Number(r.price_snapshot),
-                lint_total: Number((Number(r.price_snapshot) * Number(r.qty)).toFixed(2))
+                qty: qty,
+                unit_price: unitPriceSnapshot,
+                line_total: lineTotal,
+
+                //flash sale / sale info
+                is_flash_sale: isFlash,
+                sale_percent: salePercent, // percentage
+                sale_price: salePriceComputed // current sale price (flash or percentage), null if none
             };
 
-            subtotal += line.lint_total;
+            subtotal += line.line_total;
             totalQty += line.qty;
             return line;
         });
@@ -94,7 +114,7 @@ exports.getCart = async (userId) => {
     }
 };
 
-exports.addItem = async (userId, variantId, qty = 1) => {
+exports.addItem = async (userId, variantId, qty = 1, size = null) => {
     if (!userId) {
         const e = new Error('Unauthorized');
         e.status = 401;
@@ -133,10 +153,10 @@ exports.addItem = async (userId, variantId, qty = 1) => {
     const sale = Number(pvRes.rows[0].sale_percent) || 0;
     const unitPrice = Math.round((price * (1 - sale / 100)) * 100) / 100;
 
-    // check existing cart item for same variant
+    // check existing cart item for same variant + size
     const exist = await client.query(
-        `SELECT id, qty FROM cart_items WHERE cart_id = $1 AND variant_id = $2 LIMIT 1`,
-        [cartId, variantId]
+        `SELECT id, qty FROM cart_items WHERE cart_id = $1 AND variant_id = $2 AND (size_snapshot IS NOT DISTINCT FROM $3) LIMIT 1`,
+        [cartId, variantId, size]
     );
 
     if (exist.rows.length) {
@@ -147,9 +167,9 @@ exports.addItem = async (userId, variantId, qty = 1) => {
         );
     } else {
         await client.query(
-            `INSERT INTO cart_items (id, cart_id, variant_id, qty, price_snapshot, created_at)
-            VALUES (public.uuid_generate_v4(), $1, $2, $3, $4, NOW())`,
-            [cartId, variantId, qty, unitPrice]
+            `INSERT INTO cart_items (id, cart_id, variant_id, qty, price_snapshot, size_snapshot, created_at)
+            VALUES (public.uuid_generate_v4(), $1, $2, $3, $4, $5, NOW())`,
+            [cartId, variantId, qty, unitPrice, size]
         );
     }
 

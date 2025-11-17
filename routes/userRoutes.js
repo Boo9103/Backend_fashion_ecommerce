@@ -128,7 +128,8 @@ module.exports = router;
 //add items to cart (post)
 //{
 //   "variant_id": "3dd1a91f-14ef-44a7-a1d8-7f40f2770684",
-//   "qty": 1
+//   "qty": 1,
+//   "size": "M"
 // }
 //update -->http://localhost:3000/user/cart/items/eefe9cf1-0f78-4d7d-9245-fb7a96d4b3fe
 //->eefe9cf1-0f78-4d7d-9245-fb7a96d4b3fe là cart_item id (cột id trong bảng cart_items)

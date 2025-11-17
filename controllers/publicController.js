@@ -1,5 +1,6 @@
 const publicService = require('../services/publicService');
 const productService = require('../services/productService');
+const newsService = require('../services/newsService');
 const pool = require('../config/db'); // add this line near top with other requires
 
 exports.getHomeMeta = async (req, res, next) => {
@@ -162,4 +163,43 @@ exports.getProductById = async (req, res)=> {
         console.error('getProduct error:', error && error.stack ? error.stack : error);
         return res.status(500).json({ message: 'Server error' });
     }
+};
+
+exports.getNewList = async (req, res, next) => {
+  try {
+    const page = Number(req.query.page) || 1;
+    const limit = Math.min(50, Number(req.query.limit) || 10);
+    const q = req.query.q || null;
+    const items = await newsService.getNewsList({ q, page, limit });
+
+    const transformed = items.map(it => {
+      const cb = it.content_blocks || [];
+      const firstText = cb.find(b => b.type === 'text')?.text || null;
+      const firstImage = (cb.find(b => b.type === 'image' && Array.isArray(b.urls))?.urls?.[0]?.url) || it.image || null;
+      return {
+        id: it.id,
+        title: it.title,
+        preview_text: firstText ? firstText.slice(0, 300) : null,
+        preview_image: firstImage,
+        created_at: it.created_at
+      };
+    });
+
+    return res.json({ success: true, items: transformed, page, perPage: limit });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.getNewsById = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const item = await newsService.getNewsById(id);
+    if (!item) return res.status(404).json({ error: 'Not found' });
+
+    // ensure content_blocks parsed as JSON (pg returns jsonb already)
+    return res.json({ success: true, news: item });
+  } catch (err) {
+    next(err);
+  }
 };
