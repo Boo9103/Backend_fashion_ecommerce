@@ -64,7 +64,7 @@ module.exports = router;
 
 
 //create order
-//{
+// {
 //   "shipping_address_snapshot": {
 //     "full_name": "Nguyễn Văn A",
 //     "phone": "0987654321",
@@ -72,12 +72,57 @@ module.exports = router;
 //   },
 //   "payment_method": "cod",
 //   "items": [
-//     { "variant_id": "3dd1a91f-14ef-44a7-a1d8-7f40f2770684", "quantity": 1 },
-//     { "variant_id": "050e9020-4e08-4493-a987-6f62bd3f7adc", "quantity": 2 },
-//     { "variant_id": "8b0e65b4-3de9-4fd7-a3b8-eb45f598d41a", "quantity": 4}
+//     { "variant_id": "3dd1a91f-14ef-44a7-a1d8-7f40f2770684", "quantity": 1, "size": "M" },
+//     { "variant_id": "050e9020-4e08-4493-a987-6f62bd3f7adc", "quantity": 2, "size": "L" },
+//     { "variant_id": "8b0e65b4-3de9-4fd7-a3b8-eb45f598d41a", "quantity": 4, "size": "L"}
 //   ],
-//   "promotion_code": "SALE20",
+//   "promotion_code": "FLASH2025",
 //   "shipping_fee": 30000
+// }
+//response:
+// {
+//     "message": "Order created successfully",
+//     "order": {
+//         "order_id": "ab7ff395-0096-4927-a5e5-5dd1a8838087",
+//         "total_amount": 2893000,
+//         "discount_amount": 500000,
+//         "shipping_fee": 30000,
+//         "final_amount": 2423000,
+//         "payment_status": "unpaid",
+//         "order_status": "pending",
+//         "items": [
+//             {
+//                 "variant_id": "8b0e65b4-3de9-4fd7-a3b8-eb45f598d41a",
+//                 "qty": 4,
+//                 "unit_price": "399000.00",
+//                 "final_price": 330040.44,
+//                 "promo_applied": true,
+//                 "name_snapshot": "Áo Polo Xanh Navy",
+//                 "color_snapshot": "Xanh Navy",
+//                 "size_snapshot": "L"
+//             },
+//             {
+//                 "variant_id": "3dd1a91f-14ef-44a7-a1d8-7f40f2770684",
+//                 "qty": 1,
+//                 "unit_price": "899000.00",
+//                 "final_price": 743624.96,
+//                 "promo_applied": true,
+//                 "name_snapshot": "Quần Jean Ống Suông",
+//                 "color_snapshot": "Đen",
+//                 "size_snapshot": "M"
+//             },
+//             {
+//                 "variant_id": "050e9020-4e08-4493-a987-6f62bd3f7adc",
+//                 "qty": 2,
+//                 "unit_price": "199000.00",
+//                 "final_price": 164606.64,
+//                 "promo_applied": true,
+//                 "name_snapshot": "Áo Thun Flash Sale",
+//                 "color_snapshot": "Trắng",
+//                 "size_snapshot": "L"
+//             }
+//         ]
+//     }
 // }
 
 
@@ -138,9 +183,6 @@ module.exports = router;
 //lấy chi tiết từ variant
 //http://localhost:3000/user/products/detail/050e9020-4e08-4493-a987-6f62bd3f7adc 
 // phần cart đã test xong
-
-
-
 
 
 

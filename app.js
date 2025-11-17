@@ -10,6 +10,7 @@ const passport = require('./config/passport');
 const cron = require('node-cron');
 const promotionService = require('./services/promotionServices');
 const { cleanupExpiredRefreshTokens } = require('./cleanupRefreshTokens');
+const rateLimit = require('express-rate-limit');
 
 
 const app = express();
@@ -31,6 +32,23 @@ app.use('/admin', adminRoutes);
 app.use('/user', userRoutes);
 app.use('/public', require('./routes/publicRoutes'));
 app.use('/payments', paymentsRoutes);
+
+//rate limiter
+const globalLimiter = rateLimit({
+  windowMs: 60*1000, //1 phút
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: 'Quá nhiều yêu cầu từ địa chỉ IP này, vui lòng thử lại sau một phút.'
+})
+app.use(globalLimiter);
+
+const userLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => (req.user && req.user.id) ? `user:${req.user.id}` : req.ip
+});
+app.use('/user', userLimiter);
 
 // Error handling (last)
 app.use(errorHandler);

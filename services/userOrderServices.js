@@ -17,7 +17,8 @@ exports.createOrder = async (userId, orderData) => {
         payment_method,
         items,
         promotion_code,
-        shipping_fee = 0
+        shipping_fee = 0,
+        size = null
     } = orderData;
     const user_id = userId || orderData.user_id || null;
 
@@ -43,6 +44,7 @@ exports.createOrder = async (userId, orderData) => {
         // normalize items -> qtyMap and variantIds
         const variantIds = [];
         const qtyMap = {};
+        const sizeMap = {}; // map variant_id -> requested size (optional)
         for (const it of items) {
             if (!it || !it.variant_id) throw new Error('Invalid item payload');
             // accept either { quantity } or { qty } from client
@@ -51,6 +53,11 @@ exports.createOrder = async (userId, orderData) => {
             if (!Number.isInteger(qty) || qty <= 0) throw new Error('invalid quantity');
             variantIds.push(it.variant_id);
             qtyMap[it.variant_id] = qty;
+            // accept optional size from client payload (string)
+            const requestedSize = (it.size ?? it.size_snapshot ?? null);
+            if (requestedSize !== null && requestedSize !== undefined) {
+                sizeMap[it.variant_id] = String(requestedSize).trim();
+            }
         }
 
         // fetch variants
@@ -82,6 +89,25 @@ exports.createOrder = async (userId, orderData) => {
             const qty = qtyMap[r.variant_id];
             const line_base = r.unit_price * qty;
             total_amount += line_base;
+            // determine size snapshot: prefer client-provided size, otherwise null or first available
+            let sizeSnapshot = null;
+            if (sizeMap[r.variant_id]) {
+                // validate provided size exists in variant sizes when available
+                try {
+                    const avail = Array.isArray(r.variant_size) ? r.variant_size : (r.variant_size ? JSON.parse(r.variant_size) : []);
+                    if (Array.isArray(avail) && avail.length && !avail.includes(sizeMap[r.variant_id])) {
+                        throw new Error(`Requested size "${sizeMap[r.variant_id]}" not available for variant ${r.variant_id}`);
+                    }
+                } catch (e) {
+                    // if JSON parse fails, proceed but still set given size
+                }
+                sizeSnapshot = sizeMap[r.variant_id];
+            } else {
+                // fallback: if variant_size is an array, take first element; else null
+                const avail = Array.isArray(r.variant_size) ? r.variant_size : (r.variant_size ? JSON.parse(String(r.variant_size)) : []);
+                sizeSnapshot = Array.isArray(avail) && avail.length ? String(avail[0]) : null;
+            }
+
             return {
                 variant_id: r.variant_id,
                 product_id: r.product_id,
@@ -91,7 +117,7 @@ exports.createOrder = async (userId, orderData) => {
                 promo_applied: false,
                 name_snapshot: r.product_name,
                 color_snapshot: r.variant_color ?? null,
-                size_snapshot: r.variant_size ?? null,
+                size_snapshot: sizeSnapshot,
                 line_base
             };
         });
