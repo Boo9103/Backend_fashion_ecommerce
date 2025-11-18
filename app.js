@@ -12,22 +12,58 @@ const promotionService = require('./services/promotionServices');
 const orderNotificationService = require('./services/orderNotificationService');
 const { cleanupExpiredRefreshTokens } = require('./cleanupRefreshTokens');
 const rateLimit = require('express-rate-limit');
-// lấy helper để xử lý IP an toàn với IPv6
-const { keyGeneratorIpFallback } = require('express-rate-limit');
 
 const pool = require('./config/db');
 const app = express();
 
-// Middleware
-app.use(express.json());
+// chỉ dùng express.json once, giới hạn body size
+app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// CORS
 app.use(cors({
   origin: process.env.FE_URL || 'http://localhost:5000',
   credentials: true,
 }));
 
 app.use(passport.initialize());
+
+// normalize client ip safely (handles ::ffff: and %zone)
+function getClientIp(req) {
+  const xf = req.headers['x-forwarded-for'];
+  if (xf && typeof xf === 'string') {
+    const first = xf.split(',')[0].trim();
+    if (first) return first;
+  }
+  return req.ip || (req.connection && req.connection.remoteAddress) || '';
+}
+
+function normalizeIp(ip) {
+  if (!ip) return '';
+  const pct = ip.indexOf('%');
+  if (pct !== -1) ip = ip.substring(0, pct);
+  if (ip.startsWith('::ffff:')) ip = ip.substring(7);
+  return ip;
+}
+
+// set trust proxy based on env (safe default: false)
+// If you are behind a trusted reverse proxy (nginx, LB), set TRUST_PROXY='true' or a specific value in .env
+const trustProxyEnabled = process.env.TRUST_PROXY === 'true' || false;
+app.set('trust proxy', trustProxyEnabled);
+
+// single /user limiter (uses user id when available, else normalize ip safely)
+const userLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => {
+    if (req.user && req.user.id) return `user:${req.user.id}`;
+    // use existing helpers to get and normalize client IP (handles ::ffff: and %zone)
+    return normalizeIp(getClientIp(req));
+  },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use('/user', userLimiter);
 
 // Routes
 app.use('/api', authRoutes);
@@ -36,34 +72,21 @@ app.use('/user', userRoutes);
 app.use('/public', require('./routes/publicRoutes'));
 app.use('/payments', paymentsRoutes);
 
-//rate limiter
+// global rate limiter
 const globalLimiter = rateLimit({
-  windowMs: 60*1000, //1 phút
+  windowMs: 60*1000,
   max: 200,
   standardHeaders: true,
   legacyHeaders: false,
   message: 'Quá nhiều yêu cầu từ địa chỉ IP này, vui lòng thử lại sau một phút.'
-})
-app.use(globalLimiter);
-
-const userLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,
-  // nếu user đã auth thì dùng user id, ngược lại dùng helper của thư viện để lấy IP an toàn
-  keyGenerator: (req) => {
-    if (req.user && req.user.id) return `user:${req.user.id}`;
-    return keyGeneratorIpFallback(req);
-  },
-  standardHeaders: true,
-  legacyHeaders: false
 });
-app.use('/user', userLimiter);
+app.use(globalLimiter);
 
 // Error handling (last)
 app.use(errorHandler);
 
+// Cron jobs
 cron.schedule('0 0 * * *', () => {
-  // Chạy job dọn refresh token hết hạn hàng ngày lúc 00:00
   (async () => {
     try {
       const n = await cleanupExpiredRefreshTokens();
@@ -72,9 +95,8 @@ cron.schedule('0 0 * * *', () => {
       console.error('cron cleanupExpiredRefreshTokens error:', err && err.stack ? err.stack : err);
     }
   })();
-}); // Chạy hàng ngày lúc 00:00
+});
 
-// chạy mỗi 5 phút để hết hạn khuyến mãi
 cron.schedule('*/5 * * * *', async () => {
   try {
     const n = await promotionService.expirePromotions();
@@ -84,12 +106,11 @@ cron.schedule('*/5 * * * *', async () => {
   }
 });
 
-cron.schedule('0 */1 * * *', async () => { // mỗi giờ
+cron.schedule('0 */1 * * *', async () => {
   try { await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_revenue_by_week'); }
   catch (e) { console.error('refresh mv_revenue_by_week failed', e); }
 });
 
-// chạy check mỗi 5 phút
 cron.schedule('*/5 * * * *', async () => {
   try {
     console.log('[cron] checkAndSendForDeliveredOrders start');
