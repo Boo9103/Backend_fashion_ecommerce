@@ -7,6 +7,7 @@ const adminSupplierController = require('../controllers/suppliers/adminSupplierC
 const adminProductController = require('../controllers/products/adminProductController');
 const promotionController = require('../controllers/promotions/adminPromotionController');
 const userOrderController = require('../controllers/orders/orderController');
+const orderNotificationController = require('../controllers/orders/adminNotificationController');
 const adminNewsController = require('../controllers/news/adminNewsController');
 const adminOrderController = require('../controllers/orders/adminOrderController');
 const adminRevenueController = require('../controllers/revenue/adminRevenueController');
@@ -63,6 +64,8 @@ router.get('/orders', requireAdmin, userOrderController.getOrders);
 router.get('/orders/:id', requireAdmin, userOrderController.getOrderById);
 router.patch('/orders/:id/status', requireAdmin, adminOrderController.updateOrderStatus);
 
+//order notification
+router.post('/orders/:id/send-delivered-email', requireAdmin, orderNotificationController.sendDeliveredEmail);
 
 //news
 router.post('/news', requireAdmin, adminNewsController.createNews);

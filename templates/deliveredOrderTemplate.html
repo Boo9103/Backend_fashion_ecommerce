@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Đơn hàng đã được giao — HS Fashion</title>
+  <style>
+    :root{--brand:#ff7b00;--bg:#f6f7f9;--card:#ffffff;--muted:#6b6b6b}
+    body{margin:0;background:var(--bg);font-family:Inter, Arial, Helvetica, sans-serif;color:#222}
+    .container{max-width:720px;margin:28px auto;padding:18px}
+    .card{background:var(--card);border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(16,24,40,0.08)}
+    .header{display:flex;align-items:center;gap:14px;padding:18px 20px;background:linear-gradient(90deg,rgba(255,123,0,0.06),transparent)}
+    .logo{width:56px;height:56px;border-radius:10px;background:var(--brand);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:18px}
+    .title{font-size:16px;margin:0;color:var(--brand)}
+    .subtitle{margin:2px 0 0;color:var(--muted);font-size:13px}
+    .body{padding:20px}
+    .greet{font-size:15px;margin:0 0 6px}
+    .info{font-size:14px;color:var(--muted);margin:0 0 16px}
+    .items{border-top:1px solid #f0f0f0;padding-top:12px}
+    .item{display:flex;gap:12px;padding:12px 0;border-bottom:1px dashed #f3f3f3;align-items:center}
+    .thumb{width:72px;height:72px;border-radius:8px;object-fit:cover;background:#fafafa}
+    .meta{flex:1}
+    .name{font-size:14px;color:#111;margin:0}
+    .meta-small{font-size:12px;color:var(--muted);margin-top:6px}
+    .price{min-width:120px;text-align:right;font-weight:600}
+
+    /* UPDATED: keep totals on the right and align label to baseline of amount */
+    .totals{
+      width:100%;
+      display:flex;
+      justify-content:flex-end;
+      align-items:baseline; /* align label and amount on the same baseline */
+      gap:12px;
+      padding-top:12px;
+      margin-top:6px;
+    }
+    .label{
+      color:var(--muted);
+      font-size:13px;
+      white-space:nowrap;
+      /* slightly lower the label to sit visually on the same line as big amount */
+      transform: translateY(4px);
+    }
+    .amount{
+      font-size:18px;
+      font-weight:800;
+      margin-left:6px;
+    }
+
+    .cta{display:inline-block;margin-top:14px;padding:10px 16px;background:var(--brand);color:#fff;border-radius:10px;text-decoration:none;font-weight:700}
+    .footer{padding:14px 20px;border-top:1px solid #f0f0f0;background:#fff;text-align:center;color:var(--muted);font-size:13px}
+    @media (max-width:520px){
+      .item{gap:10px}
+      .thumb{width:56px;height:56px}
+      .price{min-width:86px}
+      .totals{justify-content:flex-end;gap:8px}
+      .label{transform: translateY(2px);font-size:12px}
+      .amount{font-size:16px}
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="header">
+        <div class="logo">HS</div>
+        <div>
+          <h1 class="title">Đơn hàng <span style="color:var(--brand)">{{ORDER_ID}}</span> — Đã giao</h1>
+          <div class="subtitle">Cảm ơn bạn đã mua sắm tại HS Fashion</div>
+        </div>
+      </div>
+
+      <div class="body">
+        <p class="greet">Xin chào {{USER_NAME}},</p>
+        <p class="info">Đơn hàng của bạn đã được giao vào <strong>{{DELIVERY_DATE}}</strong>. Dưới đây là chi tiết đơn hàng:</p>
+
+        <div class="items">
+          {{ORDER_SUMMARY}}
+        </div>
+
+        <!-- UPDATED totals: label sits down to align with amount on same line at the right -->
+        <div class="totals" aria-hidden="true">
+          <div class="label">Tổng thanh toán:</div>
+          <div class="amount">{{ORDER_TOTAL}}</div>
+        </div>
+
+        <a class="cta" href="{{FE_ORDER_URL}}">Xem chi tiết đơn hàng</a>
+        <p style="margin-top:12px;color:var(--muted);font-size:13px">
+          Nếu có thắc mắc, vui lòng trả lời email này hoặc liên hệ hotline để được hỗ trợ.
+        </p>
+      </div>
+
+      <div class="footer">
+        HS Fashion — Thời trang chất lượng • <a href="{{FE_URL}}" style="color:var(--brand);text-decoration:none">Truy cập website</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

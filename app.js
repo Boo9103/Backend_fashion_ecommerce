@@ -9,6 +9,7 @@ const errorHandler = require('./utils/errorHandler');
 const passport = require('./config/passport');
 const cron = require('node-cron');
 const promotionService = require('./services/promotionServices');
+const orderNotificationService = require('./services/orderNotificationService');
 const { cleanupExpiredRefreshTokens } = require('./cleanupRefreshTokens');
 const rateLimit = require('express-rate-limit');
 // lấy helper để xử lý IP an toàn với IPv6
@@ -86,6 +87,17 @@ cron.schedule('*/5 * * * *', async () => {
 cron.schedule('0 */1 * * *', async () => { // mỗi giờ
   try { await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_revenue_by_week'); }
   catch (e) { console.error('refresh mv_revenue_by_week failed', e); }
+});
+
+// chạy check mỗi 5 phút
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    console.log('[cron] checkAndSendForDeliveredOrders start');
+    await orderNotificationService.checkAndSendForDeliveredOrders(100);
+    console.log('[cron] checkAndSendForDeliveredOrders done');
+  } catch (e) {
+    console.error('[cron] checkAndSendForDeliveredOrders error', e && e.stack ? e.stack : e);
+  }
 });
 
 const PORT = process.env.PORT || 3000;

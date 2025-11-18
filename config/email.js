@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
@@ -37,4 +39,48 @@ const sendResetPasswordEmail = async (to, otp) => {
   });
 };
 
-module.exports = { sendOtpEmail, sendResetPasswordEmail };
+// ensure path points to repo templates folder
+const TEMPLATE_PATH = path.join(__dirname, '..', 'templates', 'deliveredOrderTemplate.html');
+
+const sendDeliveredOrderEmail = async (to, orderDetails) => {
+  try {
+    let html;
+    if (fs.existsSync(TEMPLATE_PATH)) {
+      let tpl = fs.readFileSync(TEMPLATE_PATH, 'utf8');
+
+      // replace common placeholders (support both triple and double braces)
+      tpl = tpl.replace(/{{\s*ORDER_ID\s*}}/g, orderDetails.id || '')
+               .replace(/{{\s*USER_NAME\s*}}/g, orderDetails.user_name || '')
+               .replace(/{{\s*DELIVERY_DATE\s*}}/g, orderDetails.updated_at ? new Date(orderDetails.updated_at).toLocaleString('vi-VN') : '')
+               // handle both {{{ORDER_SUMMARY}}} and {{ORDER_SUMMARY}}
+               .replace(/{{{\s*ORDER_SUMMARY\s*}}}/g, orderDetails.order_summary_html || '')
+               .replace(/{{\s*ORDER_SUMMARY\s*}}/g, orderDetails.order_summary_html || '')
+               .replace(/{{\s*ORDER_TOTAL\s*}}/g, orderDetails.total_display || '')
+               .replace(/{{\s*FE_ORDER_URL\s*}}/g, orderDetails.fe_order_url || process.env.FE_URL || '')
+               .replace(/{{\s*FE_URL\s*}}/g, process.env.FE_URL || '');
+
+      html = tpl;
+    } else {
+      console.warn('[email] deliveredOrderTemplate.html not found, using fallback:', TEMPLATE_PATH);
+      html = `<p>Xin chào ${orderDetails.user_name || ''},</p>
+              <p>Đơn hàng <strong>${orderDetails.id}</strong> đã được giao vào <strong>${orderDetails.updated_at || ''}</strong>.</p>
+              ${orderDetails.order_summary_html || ''}
+              <p><strong>Tổng: ${orderDetails.total_display || ''}</strong></p>`;
+    }
+
+    const mailOptions = {
+      from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
+      to,
+      subject: `Đơn hàng ${orderDetails.id} đã được giao`,
+      html
+    };
+
+    await transporter.sendMail(mailOptions);
+    return true;
+  } catch (err) {
+    console.error('[email.sendDeliveredOrderEmail] error', err && err.stack ? err.stack : err);
+    throw err;
+  }
+};
+
+module.exports = { sendOtpEmail, sendResetPasswordEmail, sendDeliveredOrderEmail };

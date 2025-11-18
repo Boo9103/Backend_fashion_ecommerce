@@ -1,6 +1,8 @@
 const orderService = require('../../services/orderService');
+const emailer = require('../../config/email'); 
+const fs = require('fs');
 
-exports.updateOrderStatus = async (req, res) => {
+exports.updateOrderStatus = async (req, res, next) => {
   const userId = req.user?.id;
   const role = req.user?.role;
   const orderId = req.params.id;
