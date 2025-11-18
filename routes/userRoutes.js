@@ -4,6 +4,7 @@ const userController = require('../controllers/users/userController');
 const orderController = require('../controllers/orders/orderController');
 const promotionController = require('../controllers/promotions/promotionController');
 const cartController = require('../controllers/cart/cartController');
+const favoriteController = require('../controllers/favorite/favoriteController');
 const { authMiddleware, requireUser } = require('../middleware/authMiddleware');
 
 router.post('/orders', requireUser, orderController.createOrder);
@@ -58,7 +59,13 @@ router.post('/orders/:orderId/reviews', requireUser, orderController.addReview);
 router.get('/reviews/:id', requireUser, orderController.getReviewById);
 router.patch('/reviews/:id', requireUser, orderController.editReview);
 router.delete('/reviews/:id', requireUser, orderController.deleteReview);
-//thiếu get reviews trên public
+
+//favorites
+router.post('/favorites', requireUser, favoriteController.addFavorite);
+router.delete('/favorites/:productId', requireUser, favoriteController.removeFavorite);
+router.get('/favorites/productIds', requireUser, favoriteController.getListIdsFavorite);
+router.get('/favorites/:productId/check', requireUser, favoriteController.checkFavorite);
+router.get('/favorites/list', requireUser, favoriteController.getListFavorite);
 module.exports = router;
 
 

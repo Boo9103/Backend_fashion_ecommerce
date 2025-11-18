@@ -21,14 +21,14 @@ exports.createOrder = async (userId, orderData) => {
         size = null
     } = orderData;
     const user_id = userId || orderData.user_id || null;
-
+ 
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
 
         // validate basic payload
         if (!Array.isArray(items) || items.length === 0) throw new Error('Cart is empty');
-        if (!payment_method || !['cod', 'online'].includes(payment_method)) throw new Error('payment_method is required and must be cod or online');
+        if (!payment_method || !['cod', 'paypal', 'momo'].includes(payment_method)) throw new Error('payment_method is required and must be cod or online');
 
         // normalize address (accept object or JSON string, common keys)
         let addr = shipping_address_snapshot ?? orderData.shipping_address ?? orderData.shippingAddress ?? orderData.address;
@@ -362,6 +362,7 @@ exports.getOrders = async ({ userId, role, page = 1, limit = 20, status, from, t
             o.shipping_fee,
             o.final_amount,
             o.order_status,
+            o.payment_method,
             o.payment_status,
             o.created_at,
             json_agg(oi.*) FILTER (WHERE oi.order_id IS NOT NULL) AS items

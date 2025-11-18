@@ -11,8 +11,10 @@ const cron = require('node-cron');
 const promotionService = require('./services/promotionServices');
 const { cleanupExpiredRefreshTokens } = require('./cleanupRefreshTokens');
 const rateLimit = require('express-rate-limit');
+// lấy helper để xử lý IP an toàn với IPv6
+const { keyGeneratorIpFallback } = require('express-rate-limit');
 
-
+const pool = require('./config/db');
 const app = express();
 
 // Middleware
@@ -46,7 +48,13 @@ app.use(globalLimiter);
 const userLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
-  keyGenerator: (req) => (req.user && req.user.id) ? `user:${req.user.id}` : req.ip
+  // nếu user đã auth thì dùng user id, ngược lại dùng helper của thư viện để lấy IP an toàn
+  keyGenerator: (req) => {
+    if (req.user && req.user.id) return `user:${req.user.id}`;
+    return keyGeneratorIpFallback(req);
+  },
+  standardHeaders: true,
+  legacyHeaders: false
 });
 app.use('/user', userLimiter);
 
@@ -73,6 +81,11 @@ cron.schedule('*/5 * * * *', async () => {
   } catch (err) {
     console.error('cron expirePromotions error:', err && err.stack ? err.stack : err);
   }
+});
+
+cron.schedule('0 */1 * * *', async () => { // mỗi giờ
+  try { await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_revenue_by_week'); }
+  catch (e) { console.error('refresh mv_revenue_by_week failed', e); }
 });
 
 const PORT = process.env.PORT || 3000;

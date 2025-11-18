@@ -9,6 +9,7 @@ const promotionController = require('../controllers/promotions/adminPromotionCon
 const userOrderController = require('../controllers/orders/orderController');
 const adminNewsController = require('../controllers/news/adminNewsController');
 const adminOrderController = require('../controllers/orders/adminOrderController');
+const adminRevenueController = require('../controllers/revenue/adminRevenueController');
 const { authMiddleware, requireAdmin, requireUser } = require('../middleware/authMiddleware');
 
 //Category management (admin routes require admin)
@@ -69,8 +70,12 @@ router.get('/news', requireAdmin, adminNewsController.listNewsAdmin);
 router.get('/news/:id', requireAdmin, adminNewsController.getNewsById);
 router.put('/news/:id', requireAdmin, adminNewsController.updateNews);
 router.delete('/news/:id', requireAdmin, adminNewsController.removeNews);
-module.exports = router;
 
+//revenue report
+router.get('/stats/revenue', requireAdmin, adminRevenueController.revenue);
+router.get('/stats/top-products', requireAdmin, adminRevenueController.topProducts);
+
+module.exports = router;
 
 //vd get order by id: http://localhost:3000/admin/orders/698dafa5-c7b2-4388-8bd7-36dec041ad82
 // patch update order status: http://localhost:3000/admin/orders/931718f6-1ba1-499e-9f48-44bf4cef13fe/status
