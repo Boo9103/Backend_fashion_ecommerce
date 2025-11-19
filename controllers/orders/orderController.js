@@ -1,12 +1,19 @@
 const e = require('express');
-const userOrderServices = require('../../services/userOrderServices');
+const orderService = require('../../services/userOrderServices');
 
 exports.createOrder = async (req, res, next) => {
   try {
     const userId = req.user?.id;
-    console.error('[orderController.createOrder] userId=%s, body=%s', userId, JSON.stringify(req.body || {}, null, 2));
-    const order = await userOrderServices.createOrder(userId, req.body);
-    return res.status(201).json({ message: 'Order created successfully', order });
+    const itemsCount = Array.isArray(req.body?.items) ? req.body.items.length : 0;
+    console.info('[orderController.createOrder] user=%s items=%d payment_method=%s', userId, itemsCount, req.body?.payment_method || 'unknown');
+    const order = await orderService.createOrder(userId, req.body);
+    
+    const orderId = order && (order.id || order.order_id || order.orderId || null);
+    if (!orderId) {
+      console.error('[orderController.createOrder] order created but missing id');
+      return res.status(500).json({ error: 'Order created but missing orderId' });
+    }
+    return res.status(201).json({ message: 'Order created successfully', orderId, order });
   } catch (err) {
     console.error('[orderController.createOrder] caught error', err && err.stack ? err.stack : err);
     next(err);

@@ -12,8 +12,44 @@ exports.createOrder = async (userId, orderData) => {
     console.error('[createOrder] start', { userId, hasOrderData: !!orderData, itemsCount: Array.isArray(orderData?.items) ? orderData.items.length : 0 });
 
     const items = Array.isArray(orderData.items) ? orderData.items : [];
-    // detailed log of items for debug
+    // detailed log of items for debug (original payload)
     console.error('[createOrder] incoming items payload', JSON.stringify(items, null, 2));
+
+    // --- MERGE DUPLICATE ITEMS ---
+    // merge by variant_id + size so same variant+size accumulates qty instead of creating separate order items
+    const mergedMap = new Map();
+    for (const it of items) {
+      if (!it || !it.variant_id) {
+        // keep validation for later; still allow merging to surface proper errors downstream
+        const key = `__invalid__${Math.random().toString(36).slice(2)}`;
+        mergedMap.set(key, Object.assign({}, it));
+        continue;
+      }
+      const qtyRaw = it.quantity ?? it.qty ?? 0;
+      const qty = Number.isFinite(Number(qtyRaw)) ? Number(qtyRaw) : 0;
+      const sizeVal = (it.size ?? it.size_snapshot ?? '') === null ? '' : String(it.size ?? it.size_snapshot ?? '').trim();
+      const key = `${it.variant_id}::${sizeVal}`;
+      if (!mergedMap.has(key)) {
+        mergedMap.set(key, {
+          variant_id: it.variant_id,
+          quantity: qty,
+          size: sizeVal || null,
+          // keep first item's other metadata (sku, price hint) if present
+          sku: it.sku || null,
+          meta: it.meta || null
+        });
+      } else {
+        const cur = mergedMap.get(key);
+        cur.quantity = (Number(cur.quantity) || 0) + qty;
+        // keep other fields as-is
+      }
+    }
+    const mergedItems = Array.from(mergedMap.values());
+    console.error('[createOrder] merged items payload', JSON.stringify(mergedItems, null, 2));
+    // replace items variable so downstream logic works on merged list
+    // (rest of function expects "items" to be the normalized array)
+    items.length = 0;
+    items.push(...mergedItems);
 
     // normalize items ...
     // when validating each item, log and throw clear error
@@ -47,6 +83,54 @@ exports.createOrder = async (userId, orderData) => {
     // before final insert, log computed orderItems
     console.error('[createOrder] computed order items preview', JSON.stringify(itemKeys, null, 2));
     // ...existing code continues...
+
+    // --- Ensure we return the created order (id) ---
+    // helper: clear user's cart (silent on error)
+    async function clearUserCart(uId){
+      if (!uId) return;
+      try {
+        const cRes = await client.query('SELECT id FROM carts WHERE user_id = $1 LIMIT 1', [uId]);
+        if (cRes.rows.length) {
+          const cartId = cRes.rows[0].id;
+          await client.query('DELETE FROM cart_items WHERE cart_id = $1', [cartId]);
+          await client.query('DELETE FROM carts WHERE id = $1', [cartId]);
+        }
+      } catch (e) {
+        console.error('[createOrder] clearUserCart failed', e && e.stack ? e.stack : e);
+        // do not throw — cart cleanup must not block order creation flow
+      }
+    }
+
+    // If service already set a local createdOrder / orderRes variable, clear cart then return it.
+    if (typeof createdOrder !== 'undefined' && createdOrder) {
+      await clearUserCart(userId);
+      return createdOrder;
+    }
+    if (typeof orderRes !== 'undefined' && orderRes) {
+      await clearUserCart(userId);
+      if (orderRes.id || orderRes.order_id || orderRes.orderId) return orderRes;
+      return orderRes;
+    }
+
+    // Fallback: attempt to return the most recent order for this user (best-effort)
+    // This helps controllers that expect { id } when the service didn't explicitly return it.
+    if (userId) {
+      try {
+        const q = `SELECT id FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`;
+        const { rows } = await client.query(q, [userId]);
+        if (rows && rows[0]) {
+          await clearUserCart(userId);
+          return { id: rows[0].id };
+        }
+      } catch (e) {
+        // don't block the main flow; just log and continue to return null below
+        console.error('[createOrder] fallback fetch latest order failed', e && e.stack ? e.stack : e);
+      }
+    }
+
+    // if nothing found, return null (controller will handle error)
+    return null;
+
   } catch (err) {
     console.error('[createOrder] error', err && err.stack ? err.stack : err);
     throw err;

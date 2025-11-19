@@ -1,4 +1,5 @@
 const userPromotionService = require('../../services/userPromotionService');
+const promotionService = require('../../services/userPromotionService');
 
 
 exports.listForHome = async (req, res, next) => {
@@ -160,28 +161,18 @@ exports.getUserPromotions = async (req, res, next) => {
 exports.preview = async (req, res, next) => {
   try {
     const userId = req.user?.id || null;
-    const { items = [], shipping_fee = 0, promotion_code } = req.body;
-    const preview = await userPromotionService.getPreviewPromotionApplication({ userId, items, shipping_fee, promotion_code });
+    const { items = [], shipping_fee = 0, promotion_code = null, save = false } = req.body;
 
-    // attach size from request items to preview.items (match by variant_id)
-    if (preview && Array.isArray(preview.items) && Array.isArray(items)) {
-      const sizeMap = new Map();
-      for (const it of items) {
-        if (!it) continue;
-        const key = String(it.variant_id ?? it.variantId ?? it.id ?? '').trim();
-        if (!key) continue;
-        sizeMap.set(key, it.size ?? it.size_snapshot ?? null);
-      }
+    console.error('[promotion.preview] userId=%s incoming payload items count=%d', userId, Array.isArray(items) ? items.length : 0);
+    console.error('[promotion.preview] raw items sample', JSON.stringify(items, null, 2));
 
-      preview.items = preview.items.map(pi => {
-        const key = String(pi.variant_id ?? pi.variantId ?? pi.id ?? '').trim();
-        const sizeFromReq = sizeMap.has(key) ? sizeMap.get(key) : (pi.size ?? pi.size_snapshot ?? null);
-        return { ...pi, size: sizeFromReq };
-      });
-    }
+    // service will merge by variant+size
+    const preview = await promotionService.getPreviewPromotionApplication({ items, shipping_fee, promotion_code, userId });
 
+    console.error('[promotion.preview] preview result', JSON.stringify(preview, null, 2));
     return res.json(preview);
   } catch (err) {
+    console.error('[promotion.preview] error', err && err.stack ? err.stack : err);
     next(err);
   }
 };

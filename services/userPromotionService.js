@@ -333,15 +333,23 @@ exports.getPreviewPromotionApplication = async ({ userId= null, items = [], ship
         return { valid: false, reason: 'Promotion code is not active' };
     }
 
-    //chuẩn hóa danh sách sản phẩm
-    const normalizedItems = items.map(it => ({
+    // --- MERGE items theo variant_id + size ---
+    const mergedItemsRaw = mergeItemsByVariantSize(items || []);
+    // minimal info log: promotion code, user and item count
+    console.info('[getPreviewPromotionApplication] promo=%s user=%s items=%d', promotion_code, userId || 'anon', mergedItemsRaw.length);
+
+    // chuẩn hóa danh sách sản phẩm, giữ size
+    const normalizedItems = mergedItemsRaw.map(it => ({
         variant_id: it.variant_id,
-        qty: Number(it.quantity ?? it.qty ?? 0),
-        unit_price: Number(it.unit_price ?? it.price ?? 0),
-        line_base: Number(it.quantity ?? it.qty ?? 0) * Number(it.unit_price ?? it.price ?? 0)
-    })).filter(it => it.variant_id && it.qty > 0); 
+        product_id: it.product_id ?? it.productId ?? null,
+        qty: Number(it.quantity ?? it.qty ?? it.qty ?? 0),
+        size: (it.size ?? null),
+        unit_price: Number(it.unit_price ?? it.price ?? it.unit_price_snapshot ?? 0),
+        line_base: Number(it.quantity ?? it.qty ?? 0) * Number(it.unit_price ?? it.price ?? it.unit_price_snapshot ?? 0)
+    })).filter(it => it.variant_id && it.qty > 0);
 
     if(normalizedItems.length === 0 ){
+        console.info('[getPreviewPromotionApplication] no valid items after normalization');
         return { valid: false, reason: 'No valid items provided' };
     }//trả về mảng các item hợp lệ
 
@@ -350,16 +358,21 @@ exports.getPreviewPromotionApplication = async ({ userId= null, items = [], ship
     //nếu promoProductIds rỗng thì áp dụng cho tất cả sản phẩm
     const appliesToAll = promoProductIds.length === 0;
     let eligible = normalizedItems;
-    //ngược lại lọc ra các sản phẩm hợp lệ
+    //ngược lại lọc ra các sản phẩm hợp lệ (so sánh product_id hoặc variant_id)
     if (!appliesToAll) {
-        const allowed = new Set(promoProductIds);
-        eligible = normalizedItems.filter(it => allowed.has(it.product_id) || allowed.has(it.variant_product_id) || allowed.has(it.variant_id) || allowed.has(String(it.product_id)));
+        const allowed = new Set(promoProductIds.map(String));
+        eligible = normalizedItems.filter(it => {
+            return (it.product_id && allowed.has(String(it.product_id))) || (it.variant_id && allowed.has(String(it.variant_id)));
+        });
     }
-    if (eligible.length === 0) return { valid: false, reason: 'Promotion not applicable to selected items' };
-
+    if (eligible.length === 0) {
+        console.info('[getPreviewPromotionApplication] promotion not applicable to selected items');
+        return { valid: false, reason: 'Promotion not applicable to selected items' };
+    }
 
     const subtotal = normalizedItems.reduce((s, it) => s + it.line_base, 0); //lặp qua từng phần từ lấy line_base cộng dồn vào s, ban đầu s = 0
     if (promo.min_order_value != null && subtotal < Number(promo.min_order_value)) {
+        console.info('[getPreviewPromotionApplication] min_order_value not reached', promo.min_order_value, subtotal);
         return { valid: false, reason: `Minimum order value ${promo.min_order_value} not reached` };
     }
 
@@ -377,7 +390,7 @@ exports.getPreviewPromotionApplication = async ({ userId= null, items = [], ship
     const maxCap = promo.max_discount_value != null ? Number(promo.max_discount_value) : Infinity;
     const discount_amount = Math.min(rawDiscount, eligibleSubtotal, Number.isFinite(maxCap) ? maxCap : Infinity);
 
-    // phân bổ giảm giá theo tỷ lệ
+    // phân bổ giảm giá theo tỷ lệ (giữ thứ tự normalizedItems)
     const allocateByRatioLocal = (itemsList, totalDiscount) => {
         const s = itemsList.reduce((sum, it) => sum + it.line_base, 0);
         if (s <= 0) return itemsList.map(()=>0);
@@ -396,13 +409,27 @@ exports.getPreviewPromotionApplication = async ({ userId= null, items = [], ship
         return alloc;
       };
 
-    const alloc = allocateByRatioLocal(normalizedItems, discount_amount);
-    const breakdown = normalizedItems.map((it, idx) => ({ variant_id: it.variant_id, qty: it.qty, line_base: it.line_base, discount: alloc[idx] }));
+    // allocate across eligible items but breakdown should align to normalizedItems positions
+    // build a map index for normalizedItems for allocation: only allocate to items present in eligible
+    const eligibleKeys = new Set(eligible.map(it => `${it.variant_id}::${it.size ?? ''}`));
+    const allocFull = [];
+    const allocValues = allocateByRatioLocal(eligible, discount_amount);
+    // map eligible allocations to keys
+    const eligibleAllocMap = {};
+    for (let i = 0; i < eligible.length; i++) {
+      const key = `${eligible[i].variant_id}::${eligible[i].size ?? ''}`;
+      eligibleAllocMap[key] = allocValues[i] || 0;
+    }
+    // build breakdown aligned to normalizedItems order
+    const breakdown = normalizedItems.map(it => {
+        const key = `${it.variant_id}::${it.size ?? ''}`;
+        return { variant_id: it.variant_id, size: it.size || null, qty: it.qty, line_base: it.line_base, discount: eligibleAllocMap[key] || 0 };
+    });
 
     const itemsAfter = normalizedItems.map(it => {
-        const found = breakdown.find(b => String(b.variant_id) === String(it.variant_id));
+        const found = breakdown.find(b => String(b.variant_id) === String(it.variant_id) && (b.size || '') === (it.size || ''));
         const disc = found ? found.discount : 0;
-        return { ...it, discount: disc, final_line: it.line_base - disc };
+        return { ...it, discount: disc, final_line: Math.round((it.line_base - disc + Number.EPSILON) * 100) / 100 };
     });
 
     const itemsSumAfter = itemsAfter.reduce((s, it) => s + it.final_line, 0);
@@ -411,11 +438,38 @@ exports.getPreviewPromotionApplication = async ({ userId= null, items = [], ship
     return {
         valid: true,
         promotion: { id: promo.id, code: promo.code, type, value: promoValue, max_discount_value: promo.max_discount_value || null },
-        subtotal: eligible,
+        subtotal: eligible,                // eligible items (each has size)
         shipping_fee: Number(shipping_fee) || 0,
         discount: Math.round((discount_amount + Number.EPSILON) * 100) / 100,
-        discount_breakdown: breakdown,
-        items: itemsAfter,
+        discount_breakdown: breakdown,     // includes size
+        items: itemsAfter,                 // includes size and discount per item
         final_total
       };
 };
+
+/**
+ * Merge items by variant_id + size so promotions are applied per variant+size.
+ * Input items: [{ variant_id, quantity|qty, size, unit_price, ... }, ...]
+ * Returns array of merged items with normalized keys: { variant_id, qty, size, unit_price, ... }
+ */
+function mergeItemsByVariantSize(items = []) {
+  const map = new Map();
+  for (const it of items) {
+    if (!it) continue;
+    const variantId = it.variant_id || it.variantId || it.variant || null;
+    const size = (it.size ?? it.size_snapshot ?? '') === null ? '' : String(it.size ?? it.size_snapshot ?? '').trim();
+    const rawQty = it.quantity ?? it.qty ?? 0;
+    const qty = Number.isFinite(Number(rawQty)) ? Number(rawQty) : 0;
+    const key = `${variantId}::${size}`;
+    if (!map.has(key)) {
+      map.set(key, Object.assign({}, it, { variant_id: variantId, qty, size: size || null }));
+    } else {
+      const cur = map.get(key);
+      cur.qty = (Number(cur.qty) || 0) + qty;
+      // keep first unit_price if present
+    }
+  }
+  return Array.from(map.values());
+}
+
+exports.mergeItemsByVariantSize = mergeItemsByVariantSize;
