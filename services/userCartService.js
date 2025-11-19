@@ -121,41 +121,7 @@ exports.getCart = async (userId) => {
             totalQty += line.qty;
             return line;
         });
-
-        // sort flat items by supplier_name asc, product_name asc
-        items.sort((a, b) => {
-            const sa = (a.supplier_name || '').toLowerCase();
-            const sb = (b.supplier_name || '').toLowerCase();
-            if (sa === sb) {
-                return String(a.product_name || '').localeCompare(String(b.product_name || ''));
-            }
-            if (!sa) return 1;
-            if (!sb) return -1;
-            return sa.localeCompare(sb);
-        });
-
-        // group items by supplier_name and compute per-group totals
-        const groupedMap = {};
-        for (const it of items) {
-            const key = it.supplier_name || 'Others';
-            if (!groupedMap[key]) {
-                groupedMap[key] = { supplier_name: key, items: [], total_qty: 0, subtotal: 0 };
-            }
-            groupedMap[key].items.push(it);
-            groupedMap[key].total_qty += it.qty;
-            groupedMap[key].subtotal += it.line_total;
-        }
-
-        const grouped = Object.values(groupedMap);
-
-        // sort groups alphabetically, keep 'Others' last
-        grouped.sort((a, b) => {
-            if (a.supplier_name === 'Others') return 1;
-            if (b.supplier_name === 'Others') return -1;
-            return a.supplier_name.toLowerCase().localeCompare(b.supplier_name.toLowerCase());
-        });
-
-        return { id: cartId, items, grouped, totalQty, subtotal: Number(subtotal.toFixed(2)) };
+        return { id: cartId, items, totalQty, subtotal: Number(subtotal.toFixed(2)) };
     }finally{
         client.release();
     }
