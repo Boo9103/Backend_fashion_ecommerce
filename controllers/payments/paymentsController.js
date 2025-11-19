@@ -4,6 +4,7 @@ const pool = require('../../config/db');
 exports.createPaypal = async (req, res, next) => {
   try {
     const { orderId, returnUrl, cancelUrl } = req.body;
+    console.log('[createPaypal] inbound params:', { orderId, returnUrl, cancelUrl, userId: req.user?.id });
     // Validate order ownership & compute final_amount from orders table
     const { rows } = await pool.query('SELECT id, final_amount, user_id FROM orders WHERE id = $1', [orderId]);
     if (!rows[0]) return res.status(404).json({ error: 'Order not found' });

@@ -21,9 +21,11 @@ exports.createOrder = async(req, res)=> {
             shipping_fee,
         });
 
+        const orderId = order?.id || order?.order_id || null;
+
         return res.status(201).json({   
             message: 'Order created successfully',
-            order
+            order, orderId
         });
     }catch(error){
         if(error.message.includes('Cart is empty') || error.message.includes('Invalid') || error.message.includes('out of stock')){

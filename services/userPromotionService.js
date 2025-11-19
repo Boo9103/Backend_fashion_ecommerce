@@ -145,7 +145,13 @@ exports.checkPromotionCode = async (code, { userId = null, totalAmount = null, e
             }
         }
 
-        return { valid: true, promotion: promo, product_ids: productIds, eligibleSubtotal: computedEligibleSubtotal, code: promo.code || null };
+        return {
+            valid: true,
+            promotion: promo,
+            product_ids: productIds,
+            eligibleSubtotal: computedEligibleSubtotal,
+            code: promo.code || null
+        };
     } finally {
         client.release();
     }

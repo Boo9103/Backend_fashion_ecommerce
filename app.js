@@ -70,7 +70,7 @@ app.use('/api', authRoutes);
 app.use('/admin', adminRoutes);
 app.use('/user', userRoutes);
 app.use('/public', require('./routes/publicRoutes'));
-app.use('/payments', paymentsRoutes);
+app.use('/payment', paymentsRoutes);
 
 // global rate limiter
 const globalLimiter = rateLimit({

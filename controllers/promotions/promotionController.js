@@ -160,8 +160,26 @@ exports.getUserPromotions = async (req, res, next) => {
 exports.preview = async (req, res, next) => {
   try {
     const userId = req.user?.id || null;
-    const { items, shipping_fee = 0, promotion_code } = req.body;
+    const { items = [], shipping_fee = 0, promotion_code } = req.body;
     const preview = await userPromotionService.getPreviewPromotionApplication({ userId, items, shipping_fee, promotion_code });
+
+    // attach size from request items to preview.items (match by variant_id)
+    if (preview && Array.isArray(preview.items) && Array.isArray(items)) {
+      const sizeMap = new Map();
+      for (const it of items) {
+        if (!it) continue;
+        const key = String(it.variant_id ?? it.variantId ?? it.id ?? '').trim();
+        if (!key) continue;
+        sizeMap.set(key, it.size ?? it.size_snapshot ?? null);
+      }
+
+      preview.items = preview.items.map(pi => {
+        const key = String(pi.variant_id ?? pi.variantId ?? pi.id ?? '').trim();
+        const sizeFromReq = sizeMap.has(key) ? sizeMap.get(key) : (pi.size ?? pi.size_snapshot ?? null);
+        return { ...pi, size: sizeFromReq };
+      });
+    }
+
     return res.json(preview);
   } catch (err) {
     next(err);
