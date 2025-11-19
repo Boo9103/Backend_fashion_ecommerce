@@ -1,39 +1,16 @@
 const e = require('express');
-const orderService = require('../../services/userOrderServices');
+const userOrderServices = require('../../services/userOrderServices');
 
-exports.createOrder = async(req, res)=> {
+exports.createOrder = async (req, res, next) => {
+  try {
     const userId = req.user?.id;
-    const {
-        shipping_address_snapshot,
-        payment_method,
-        items,
-        promotion_code,
-        shipping_fee = 0,
-    }  = req.body;
-
-    try {
-        const order = await orderService.createOrder({
-            user_id: userId,
-            shipping_address_snapshot,
-            payment_method,
-            items,
-            promotion_code,
-            shipping_fee,
-        });
-
-        const orderId = order?.id || order?.order_id || null;
-
-        return res.status(201).json({   
-            message: 'Order created successfully',
-            order, orderId
-        });
-    }catch(error){
-        if(error.message.includes('Cart is empty') || error.message.includes('Invalid') || error.message.includes('out of stock')){
-            return res.status(400).json({ error: error.message });
-        }
-        return res.status(500).json({ error: 'Server error', error: error.message });
-    };
-
+    console.error('[orderController.createOrder] userId=%s, body=%s', userId, JSON.stringify(req.body || {}, null, 2));
+    const order = await userOrderServices.createOrder(userId, req.body);
+    return res.status(201).json({ message: 'Order created successfully', order });
+  } catch (err) {
+    console.error('[orderController.createOrder] caught error', err && err.stack ? err.stack : err);
+    next(err);
+  }
 };
 
 exports.getOrders = async(req, res)=>{
