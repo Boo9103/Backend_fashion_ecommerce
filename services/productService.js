@@ -555,3 +555,40 @@ exports.getProductById = async (productId) => {
   const res = await pool.query(q, [productId]);
   return res.rowCount ? res.rows[0] : null;
 };
+
+
+exports.getAvailableProducts = async () => {
+  const result = await pool.query(`
+    SELECT 
+      p.id,
+      p.name,
+      p.description,
+      p.price::integer,
+      p.final_price,
+      c.name AS category_name,
+      pv.color_name,
+      pv.color_code,
+      pv.sizes,
+      pv.stock_qty,
+      COALESCE(pi.urls, '[]'::jsonb) AS images,
+      json_build_object(
+        'style_tags', COALESCE(ARRAY[
+          CASE WHEN p.name ILIKE '%polo%' THEN 'polo' END,
+          CASE WHEN p.name ILIKE '%jean%' THEN 'jeans' END,
+          CASE WHEN p.name ILIKE '%áo thun%' THEN 'casual' END,
+          CASE WHEN p.price > 500000 THEN 'premium' ELSE 'affordable' END
+        ] FILTER (WHERE ... không null), '{}')
+      ) AS inferred_tags
+    FROM products p
+    JOIN product_variants pv ON pv.product_id = p.id
+    LEFT JOIN (
+      SELECT variant_id, json_agg(json_build_object('url', url)) AS urls
+      FROM product_images WHERE variant_id IS NOT NULL
+      GROUP BY variant_id
+    ) pi ON pi.variant_id = pv.id
+    JOIN categories c ON c.id = p.category_id
+    WHERE pv.stock_qty > 0 AND p.status = 'active'
+  `);
+
+  return result.rows;
+};

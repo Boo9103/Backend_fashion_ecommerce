@@ -66,6 +66,7 @@ router.delete('/favorites/:productId', requireUser, favoriteController.removeFav
 router.get('/favorites/productIds', requireUser, favoriteController.getListIdsFavorite);
 router.get('/favorites/:productId/check', requireUser, favoriteController.checkFavorite);
 router.get('/favorites/list', requireUser, favoriteController.getListFavorite);
+
 module.exports = router;
 
 

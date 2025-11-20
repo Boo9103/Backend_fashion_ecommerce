@@ -8,130 +8,148 @@ const APPLY_POLICY = 'all_eligible_items';
 exports.createOrder = async (userId, orderData) => {
   const client = await pool.connect();
   try {
-    // debugging: log incoming orderData summary
-    console.error('[createOrder] start', { userId, hasOrderData: !!orderData, itemsCount: Array.isArray(orderData?.items) ? orderData.items.length : 0 });
+    await client.query('BEGIN');
 
-    const items = Array.isArray(orderData.items) ? orderData.items : [];
-    // detailed log of items for debug (original payload)
-    console.error('[createOrder] incoming items payload', JSON.stringify(items, null, 2));
+    // validate and normalize incoming items
+    const rawItems = Array.isArray(orderData?.items) ? orderData.items : [];
+    if (rawItems.length === 0) {
+      const e = new Error('items is required');
+      e.status = 400;
+      throw e;
+    }
 
-    // --- MERGE DUPLICATE ITEMS ---
-    // merge by variant_id + size so same variant+size accumulates qty instead of creating separate order items
+    // merge duplicates by variant_id + size
     const mergedMap = new Map();
-    for (const it of items) {
+    for (const it of rawItems) {
       if (!it || !it.variant_id) {
-        // keep validation for later; still allow merging to surface proper errors downstream
-        const key = `__invalid__${Math.random().toString(36).slice(2)}`;
-        mergedMap.set(key, Object.assign({}, it));
-        continue;
+        const err = new Error('variant_id is required for each item');
+        err.status = 400;
+        throw err;
       }
-      const qtyRaw = it.quantity ?? it.qty ?? 0;
-      const qty = Number.isFinite(Number(qtyRaw)) ? Number(qtyRaw) : 0;
-      const sizeVal = (it.size ?? it.size_snapshot ?? '') === null ? '' : String(it.size ?? it.size_snapshot ?? '').trim();
-      const key = `${it.variant_id}::${sizeVal}`;
+      const qtyRaw = it.quantity ?? it.qty ?? 1;
+      const qty = Math.max(0, parseInt(qtyRaw, 10) || 0);
+      if (qty <= 0) {
+        const err = new Error('quantity must be > 0');
+        err.status = 400;
+        throw err;
+      }
+      const sizeVal = it.size ?? it.size_snapshot ?? null;
+      const key = `${it.variant_id}::${sizeVal ?? ''}`;
       if (!mergedMap.has(key)) {
-        mergedMap.set(key, {
-          variant_id: it.variant_id,
-          quantity: qty,
-          size: sizeVal || null,
-          // keep first item's other metadata (sku, price hint) if present
-          sku: it.sku || null,
-          meta: it.meta || null
-        });
+        mergedMap.set(key, { variant_id: it.variant_id, quantity: qty, size: sizeVal, meta: it.meta || null });
       } else {
         const cur = mergedMap.get(key);
-        cur.quantity = (Number(cur.quantity) || 0) + qty;
-        // keep other fields as-is
+        cur.quantity += qty;
       }
     }
-    const mergedItems = Array.from(mergedMap.values());
-    console.error('[createOrder] merged items payload', JSON.stringify(mergedItems, null, 2));
-    // replace items variable so downstream logic works on merged list
-    // (rest of function expects "items" to be the normalized array)
-    items.length = 0;
-    items.push(...mergedItems);
+    const items = Array.from(mergedMap.values());
 
-    // normalize items ...
-    // when validating each item, log and throw clear error
-    const itemKeys = [];
-    const qtyMap = {};
-    const sizeMap = {};
-    const perVariantTotal = {};
-    const variantIdSet = new Set();
+    // fetch variant + product info for all variants in one query
+    const variantIds = items.map(i => i.variant_id);
+    const { rows: variantRows } = await client.query(
+      `SELECT pv.id AS variant_id, pv.product_id, pv.stock_qty, pv.sold_qty,
+              p.name AS product_name, COALESCE(p.final_price, p.price)::numeric AS unit_price
+       FROM product_variants pv
+       JOIN products p ON p.id = pv.product_id
+       WHERE pv.id = ANY($1::uuid[]) FOR UPDATE`,
+      [variantIds]
+    );
 
+    const variantMap = new Map();
+    for (const v of variantRows) variantMap.set(String(v.variant_id), v);
+
+    // validate stock & compute totals
+    let subtotal = 0;
+    const orderItemsData = [];
     for (const it of items) {
-      if (!it) {
-        console.error('[createOrder] invalid item entry (null/undefined)', { userId, item: it, items });
-        const e = new Error('Invalid item payload');
-        e.status = 400;
-        throw e;
+      const v = variantMap.get(String(it.variant_id));
+      if (!v) {
+        throw Object.assign(new Error(`Variant not found: ${it.variant_id}`), { status: 400 });
       }
-      if (!it.variant_id) {
-        console.error('[createOrder] missing variant_id in item', { userId, item: it, items });
-        const e = new Error('variant_id is required');
-        e.status = 400;
-        throw e;
+      if (v.stock_qty < it.quantity) {
+        throw Object.assign(new Error(`Insufficient stock for variant ${it.variant_id}`), { status: 400 });
       }
-      // ...existing normalization logic...
-      // (keep the rest of normalization code as-is)
+      const unitPrice = Number(v.unit_price) || 0;
+      const lineTotal = round2(unitPrice * it.quantity);
+      subtotal += lineTotal;
+      orderItemsData.push({
+        variant_id: it.variant_id,
+        product_id: v.product_id,
+        qty: it.quantity,
+        unit_price: unitPrice,
+        name_snapshot: v.product_name,
+        color_snapshot: null,
+        size_snapshot: it.size || null,
+        final_price: lineTotal
+      });
     }
 
-    // after building per-variant totals, log totals for debug
-    console.error('[createOrder] perVariantTotal', perVariantTotal);
+    // compute discount / shipping (simple/default)
+    const discount = Number(orderData.discount_amount || 0);
+    const shipping_fee = Number(orderData.shipping_fee ?? 30000);
+    const final_amount = round2(Math.max(0, subtotal - discount) + shipping_fee);
 
-    // ...existing code to check stock ...
-    // before final insert, log computed orderItems
-    console.error('[createOrder] computed order items preview', JSON.stringify(itemKeys, null, 2));
-    // ...existing code continues...
+    // insert order
+    const orderInsert = await client.query(
+      `INSERT INTO orders (user_id, total_amount, discount_amount, shipping_fee, final_amount, payment_status, order_status, shipping_address_snapshot, payment_method, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 'unpaid', 'pending', $6, $7, NOW(), NOW())
+       RETURNING id, created_at`,
+      [
+        userId,
+        subtotal,
+        discount,
+        shipping_fee,
+        final_amount,
+        orderData.shipping_address || null,
+        orderData.payment_method || null
+      ]
+    );
+    const orderId = orderInsert.rows[0].id;
 
-    // --- Ensure we return the created order (id) ---
-    // helper: clear user's cart (silent on error)
-    async function clearUserCart(uId){
-      if (!uId) return;
-      try {
-        const cRes = await client.query('SELECT id FROM carts WHERE user_id = $1 LIMIT 1', [uId]);
-        if (cRes.rows.length) {
-          const cartId = cRes.rows[0].id;
-          await client.query('DELETE FROM cart_items WHERE cart_id = $1', [cartId]);
-          await client.query('DELETE FROM carts WHERE id = $1', [cartId]);
-        }
-      } catch (e) {
-        console.error('[createOrder] clearUserCart failed', e && e.stack ? e.stack : e);
-        // do not throw — cart cleanup must not block order creation flow
+    // insert order_items and update stock
+    for (const oi of orderItemsData) {
+      await client.query(
+        `INSERT INTO order_items (order_id, variant_id, qty, unit_price, name_snapshot, color_snapshot, size_snapshot, final_price, promo_applied)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false)`,
+        [orderId, oi.variant_id, oi.qty, oi.unit_price, oi.name_snapshot, oi.color_snapshot, oi.size_snapshot, oi.final_price]
+      );
+
+      // update stock_qty and sold_qty
+      await client.query(
+        `UPDATE product_variants
+         SET stock_qty = GREATEST(stock_qty - $1, 0),
+             sold_qty = COALESCE(sold_qty, 0) + $1,
+             updated_at = NOW()
+         WHERE id = $2`,
+        [oi.qty, oi.variant_id]
+      );
+    }
+
+    // clear user's cart (best-effort)
+    try {
+      const cRes = await client.query('SELECT id FROM carts WHERE user_id = $1 LIMIT 1', [userId]);
+      if (cRes.rows.length) {
+        const cartId = cRes.rows[0].id;
+        await client.query('DELETE FROM cart_items WHERE cart_id = $1', [cartId]);
+        await client.query('DELETE FROM carts WHERE id = $1', [cartId]);
       }
+    } catch (e) {
+      console.error('[createOrder] clear cart failed', e && e.stack ? e.stack : e);
     }
 
-    // If service already set a local createdOrder / orderRes variable, clear cart then return it.
-    if (typeof createdOrder !== 'undefined' && createdOrder) {
-      await clearUserCart(userId);
-      return createdOrder;
-    }
-    if (typeof orderRes !== 'undefined' && orderRes) {
-      await clearUserCart(userId);
-      if (orderRes.id || orderRes.order_id || orderRes.orderId) return orderRes;
-      return orderRes;
-    }
+    await client.query('COMMIT');
 
-    // Fallback: attempt to return the most recent order for this user (best-effort)
-    // This helps controllers that expect { id } when the service didn't explicitly return it.
-    if (userId) {
-      try {
-        const q = `SELECT id FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`;
-        const { rows } = await client.query(q, [userId]);
-        if (rows && rows[0]) {
-          await clearUserCart(userId);
-          return { id: rows[0].id };
-        }
-      } catch (e) {
-        // don't block the main flow; just log and continue to return null below
-        console.error('[createOrder] fallback fetch latest order failed', e && e.stack ? e.stack : e);
-      }
-    }
-
-    // if nothing found, return null (controller will handle error)
-    return null;
-
+    // return basic order summary
+    return {
+      id: orderId,
+      total_amount: subtotal,
+      discount_amount: discount,
+      shipping_fee,
+      final_amount,
+      items: orderItemsData
+    };
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('[createOrder] error', err && err.stack ? err.stack : err);
     throw err;
   } finally {

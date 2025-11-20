@@ -60,6 +60,18 @@ exports.updateOrderStatus = async ({ userId, role, orderId, status, cancel_reaso
             await client.query('COMMIT');
             return updateRes.rows[0];
         }
+
+        if(status === 'delivered'){
+            const updateRes = await client.query(`
+                UPDATE orders
+                SET order_status = $1, payment_statuas = 'paid', updated_at = NOW()
+                WHERE id = $2
+                RETURNING *
+            `, [status, orderId]);
+
+            await client.query('COMMIT');
+            return updateRes.rows[0];
+        }
         //Cập nhật trạng thái
         const updateRes = await client.query(`
             UPDATE orders

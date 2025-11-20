@@ -12,6 +12,7 @@ const promotionService = require('./services/promotionServices');
 const orderNotificationService = require('./services/orderNotificationService');
 const { cleanupExpiredRefreshTokens } = require('./cleanupRefreshTokens');
 const rateLimit = require('express-rate-limit');
+const aiChatRoutes = require('./routes/aiChatRoutes');
 
 const pool = require('./config/db');
 const app = express();
@@ -71,6 +72,7 @@ app.use('/admin', adminRoutes);
 app.use('/user', userRoutes);
 app.use('/public', require('./routes/publicRoutes'));
 app.use('/payment', paymentsRoutes);
+app.use('/api', aiChatRoutes);
 
 // global rate limiter
 const globalLimiter = rateLimit({
