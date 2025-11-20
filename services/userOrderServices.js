@@ -251,6 +251,7 @@ exports.getOrderById = async({ userId, role, orderId})=>{
                 o.final_amount,
                 o.order_status,
                 o.payment_status,
+                o.payment_method,
                 o.shipping_address_snapshot,
                 o.created_at,
                 o.updated_at,
@@ -347,6 +348,7 @@ exports.cancelOrder = async ({ userId, role, orderId, reason }) => {
         );
 
         if (orderCheck.rowCount === 0) {
+
             return null;
         }
 
@@ -360,7 +362,6 @@ exports.cancelOrder = async ({ userId, role, orderId, reason }) => {
         if (!['pending', 'confirmed'].includes(currentStatus)) {
             throw new Error('Order can only be cancelled in pending or confirmed status');
         }
-
         // Hoàn lại stock
         const items = await client.query(
             `SELECT variant_id, qty FROM order_items WHERE order_id = $1`,
@@ -375,7 +376,6 @@ exports.cancelOrder = async ({ userId, role, orderId, reason }) => {
                 [item.qty, item.variant_id]
             );
         }
-
         // Cập nhật trạng thái
         const updateRes = await client.query(
             `UPDATE orders 

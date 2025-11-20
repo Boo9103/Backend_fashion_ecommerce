@@ -15,7 +15,7 @@ exports.getBrands = async ({ limit = 50 } = {}) => {
 };
 
 exports.getCategories = async ({ limit = 50 } = {}) => {
-    const q = `SELECT id, name, image FROM categories ORDER BY name LIMIT $1`;
+    const q = `SELECT id, name, image, parent_id FROM categories ORDER BY name LIMIT $1`;
     const { rows } = await pool.query(q, [limit]);
     return rows;
 };
