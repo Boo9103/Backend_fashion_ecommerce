@@ -9,11 +9,6 @@ const createCategory = async ({ name, parent_id, image }) => {
             throw new Error('Name is required');
         }
 
-        //Kiểm tra image bắt buộc
-        if (!image || image.trim() === ''){
-            throw new Error('Image is required');
-        }
-
         // Kiểm tra parent_id nếu có
         if(parent_id){
             const parentCheck = await client.query('SELECT id FROM categories WHERE id = $1', [parent_id]);

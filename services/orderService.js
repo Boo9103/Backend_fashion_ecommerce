@@ -64,7 +64,7 @@ exports.updateOrderStatus = async ({ userId, role, orderId, status, cancel_reaso
         if(status === 'delivered'){
             const updateRes = await client.query(`
                 UPDATE orders
-                SET order_status = $1, payment_statuas = 'paid', updated_at = NOW()
+                SET order_status = $1, payment_status = 'paid', updated_at = NOW()
                 WHERE id = $2
                 RETURNING *
             `, [status, orderId]);
