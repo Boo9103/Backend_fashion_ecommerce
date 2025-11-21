@@ -216,30 +216,41 @@ exports.getOrders = async ({ userId, role, page = 1, limit = 20, status, from, t
     const limitIdx  = params.length - 1; // vị trí của LIMIT (phần tử áp chót)
     const offsetIdx = params.length;     // vị trí của OFFSET (phần tử cuối)
 
-    // 3) Query chính
+    // 3) Query chính - dùng LATERAL subquery để tránh GROUP BY lỗi
     const query = `
-        SELECT
-            o.id,
-            o.user_id,
-            o.total_amount,
-            o.discount_amount,
-            o.shipping_fee,
-            o.final_amount,
-            o.order_status,
-            o.payment_method,
-            o.payment_status,
-            o.created_at,
-            json_agg(oi.*) FILTER (WHERE oi.order_id IS NOT NULL) AS items
-            FROM orders o
-            LEFT JOIN order_items oi ON o.id = oi.order_id
-            ${whereClauses}
-            GROUP BY o.id
-            ORDER BY o.created_at DESC
-            LIMIT $${limitIdx} OFFSET $${offsetIdx}
-        `;
+      SELECT
+        o.id,
+        o.user_id,
+        o.total_amount,
+        o.discount_amount,
+        o.shipping_fee,
+        o.final_amount,
+        o.order_status,
+        o.payment_method,
+        o.payment_status,
+        o.created_at,
+        u.full_name,
+        u.name,
+        u.email,
+        COALESCE(items.items, '[]'::json) AS items
+      FROM orders o
+      JOIN users u ON o.user_id = u.id
+      LEFT JOIN LATERAL (
+        SELECT json_agg(oi.*) AS items
+        FROM order_items oi
+        WHERE oi.order_id = o.id
+      ) items ON true
+      ${whereClauses}
+      ORDER BY o.created_at DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+    `;
 
     const result = await pool.query(query, params);
-
+    const orders = (result.rows || []).map(r=> ({
+      ...r,
+      user_name:r.full_name || r.name || null,
+      user_email: r.email || null
+    }));
     // 4) Count (dùng lại WHERE, bỏ limit/offset)
     const countQuery = `
         SELECT COUNT(*) AS total
@@ -251,7 +262,7 @@ exports.getOrders = async ({ userId, role, page = 1, limit = 20, status, from, t
     const total = parseInt(countRes.rows[0].total, 10);
 
     return {
-        orders: result.rows,
+        orders,
         total
     };
 };
@@ -616,4 +627,34 @@ exports.getReviewById = async (reviewId, { userId = null, role = null } = {}) =>
   } finally {
     client.release();
   }
+};
+
+exports.getReviewsByUser = async(userId, { limit = 20, offset = 0 } = {})=>{
+  const q = `
+      SELECT r.id, r.product_id, p.name AS product_name, r.rating, r.comment, COALESCE(r.images, '[]'::jsonb) AS images, r.created_at
+      FROM reviews r
+      LEFT JOIN products p ON r.product_id = p.id
+      WHERE r.user_id = $1
+      ORDER BY r.created_at DESC
+      LIMIT $2 OFFSET $3
+      `;
+
+  const { rows } = await pool.query(q, [userId, limit, offset]);
+  return rows;
+};
+
+exports.findUserReviewForProduct = async (userId, { productId = null, variantId = null } = {}) => {
+
+  if (!productId && variantId && typeof variantId !== 'string') {
+    // if variantId provided as object/other, coerce to string
+    variantId = String(variantId);
+  }
+  // if variantId provided, map to product_id
+  if (!productId && variantId) {
+    const r = await pool.query(`SELECT product_id FROM product_variants WHERE id = $1 LIMIT 1`, [variantId]);
+    productId = r.rows[0]?.product_id || null;
+  }
+  if (!productId) return null;
+  const res = await pool.query(`SELECT id, product_id FROM reviews WHERE user_id = $1 AND product_id = $2 LIMIT 1`, [userId, productId]);
+  return res.rows[0] || null;
 };

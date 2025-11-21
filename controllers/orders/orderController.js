@@ -142,3 +142,36 @@ exports.getReviewById = async (req, res, next) => {
     next(err);
   }
 };
+
+exports.getUserReviews = async (req, res, next) => {
+    try{
+        const userId = req.user?.id ;
+        if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+        const page = Math.max(1, Number(req.query.page) || 1);
+        const limit = Math.max(1, Number(req.query.limit) || 20);
+        const offset = (page - 1) * limit;
+        const reviews = await orderService.getReviewsByUser(userId, { limit, offset });
+        return res.json({ success: true, reviews });
+    }catch(error){
+        next(error);
+    }
+};
+
+exports.checkReviewed = async (req, res, next) => {
+    try {
+        const userId = req.user?.id || req.user?.userId;
+        if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+        // support query names: productId, product_id, variantId, variant_id
+        const productId = req.query.productId || req.query.product_id || null;
+        const variantId = req.query.variantId || req.query.variant_id || null;
+        if (!productId && !variantId) return res.status(400).json({ success: false, message: 'productId or variantId required' });
+
+        const found = await orderService.findUserReviewForProduct(userId, { productId, variantId });
+        if (!found) return res.json({ success: true, reviewed: false, reviewId: null });
+
+        return res.json({ success: true, reviewed: true, reviewId: found.id, productId: found.product_id });
+    } catch (err) {
+        next(err);
+    }
+};
