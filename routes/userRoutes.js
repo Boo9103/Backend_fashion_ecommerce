@@ -59,7 +59,8 @@ router.post('/orders/:orderId/reviews', requireUser, orderController.addReview);
 router.get('/reviews/:id', requireUser, orderController.getReviewById);
 router.patch('/reviews/:id', requireUser, orderController.editReview);
 router.delete('/reviews/:id', requireUser, orderController.deleteReview);
-router.get('/reviews/check', requireUser, orderController.checkReviewd);
+//GET /api/user/reviews/check?productId=<product_uuid>
+router.get('/reviews/check', requireUser, orderController.checkReviewed);
 
 //user-reviews
 router.get('/reviewsbyuser', requireUser, orderController.getUserReviews);

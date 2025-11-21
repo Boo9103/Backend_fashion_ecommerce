@@ -644,12 +644,17 @@ exports.getReviewsByUser = async(userId, { limit = 20, offset = 0 } = {})=>{
 };
 
 exports.findUserReviewForProduct = async (userId, { productId = null, variantId = null } = {}) => {
-  let pid = productId;
-  if (!pid && variantId) {
-    const r = await pool.query(`SELECT product_id FROM product_variants WHERE id = $1 LIMIT 1`, [variantId]);
-    pid = r.rows[0]?.product_id || null;
+
+  if (!productId && variantId && typeof variantId !== 'string') {
+    // if variantId provided as object/other, coerce to string
+    variantId = String(variantId);
   }
-  if (!pid) return null;
-  const res = await pool.query(`SELECT id FROM reviews WHERE user_id = $1 AND product_id = $2 LIMIT 1`, [userId, pid]);
+  // if variantId provided, map to product_id
+  if (!productId && variantId) {
+    const r = await pool.query(`SELECT product_id FROM product_variants WHERE id = $1 LIMIT 1`, [variantId]);
+    productId = r.rows[0]?.product_id || null;
+  }
+  if (!productId) return null;
+  const res = await pool.query(`SELECT id, product_id FROM reviews WHERE user_id = $1 AND product_id = $2 LIMIT 1`, [userId, productId]);
   return res.rows[0] || null;
 };

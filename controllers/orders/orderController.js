@@ -157,19 +157,21 @@ exports.getUserReviews = async (req, res, next) => {
     }
 };
 
-exports.checkReviewd = async (req, res, next) => {
+exports.checkReviewed = async (req, res, next) => {
     try {
-        const userId = req.user?.id;
-        const { productId, variantId } = req.query;
-        if(!productId && !variantId){
-            return res.status(400).json({ message: 'productId or variantId is required' });
-        }
+        const userId = req.user?.id || req.user?.userId;
+        if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+        // support query names: productId, product_id, variantId, variant_id
+        const productId = req.query.productId || req.query.product_id || null;
+        const variantId = req.query.variantId || req.query.variant_id || null;
+        if (!productId && !variantId) return res.status(400).json({ success: false, message: 'productId or variantId required' });
+
         const found = await orderService.findUserReviewForProduct(userId, { productId, variantId });
-        if(!found){
-            return res.json({success:true, reviewed: false,  reviewId: null });
-        }
-        return res.json({ success:true, reviewed: true, reviewId: found.id });
-    } catch (error) {
-        next(error);
+        if (!found) return res.json({ success: true, reviewed: false, reviewId: null });
+
+        return res.json({ success: true, reviewed: true, reviewId: found.id, productId: found.product_id });
+    } catch (err) {
+        next(err);
     }
 };
