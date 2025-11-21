@@ -164,7 +164,7 @@ exports.getCategoriesWithProducts = async (perChildLimit = 10) => {
             for (const c of (childrenRes.rows || [])) {
                 // lấy tối đa perChildLimit sản phẩm active trong category con
                 const prodRes = await client.query(
-                    `SELECT id, name, description, price, sale_percent, final_price, category_id, supplier_id, category_name, supplier_name, product_images, variants, sequence_id
+                    `SELECT id, name, description, price, sale_percent, is_flash_sale, final_price, category_id, supplier_id, category_name, supplier_name, product_images, variants, sequence_id
                      FROM v_product_full
                      WHERE category_id = $1 AND status = 'active'
                      ORDER BY created_at DESC
