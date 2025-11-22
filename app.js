@@ -13,8 +13,10 @@ const orderNotificationService = require('./services/orderNotificationService');
 const { cleanupExpiredRefreshTokens } = require('./cleanupRefreshTokens');
 const rateLimit = require('express-rate-limit');
 const aiChatRoutes = require('./routes/aiChatRoutes');
+const { authMiddleware } = require('./middleware/authMiddleware');
 
 const pool = require('./config/db');
+
 const app = express();
 
 // chỉ dùng express.json once, giới hạn body size
@@ -65,6 +67,9 @@ const userLimiter = rateLimit({
   legacyHeaders: false
 });
 app.use('/user', userLimiter);
+
+// mount permissive auth middleware so req.user is set when token present
+app.use(authMiddleware());
 
 // Routes
 app.use('/api', authRoutes);
@@ -121,6 +126,38 @@ cron.schedule('*/5 * * * *', async () => {
   } catch (e) {
     console.error('[cron] checkAndSendForDeliveredOrders error', e && e.stack ? e.stack : e);
   }
+});
+
+async function cleanupOldAiData() {
+  const client = await pool.connect();
+  try {
+    // retention config: sessions/messages older than 90 days; recommendations older than 365 days
+    await client.query('BEGIN');
+    await client.query(
+      `DELETE FROM ai_chat_messages
+       WHERE created_at < NOW() - INTERVAL '90 days'`
+    );
+    await client.query(
+      `DELETE FROM ai_chat_sessions
+       WHERE last_message_at < NOW() - INTERVAL '90 days'`
+    );
+    await client.query(
+      `DELETE FROM ai_recommendations
+       WHERE created_at < NOW() - INTERVAL '365 days'`
+    );
+    await client.query('COMMIT');
+    console.log('[cleanupOldAiData] completed');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[cleanupOldAiData] error', err && err.stack ? err.stack : err);
+  } finally {
+    client.release();
+  }
+}
+
+// Example: run daily at 03:30
+cron.schedule('30 3 * * *', () => {
+  cleanupOldAiData().catch(err => console.error('cleanup job failed', err));
 });
 
 const PORT = process.env.PORT || 3000;

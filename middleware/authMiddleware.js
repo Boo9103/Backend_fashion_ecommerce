@@ -14,7 +14,6 @@ const authMiddleware = (roles = []) => {
     try {
       const token = extractToken(req);
       if (!token) {
-        // if route requires roles, reject when no token
         if (roles.length > 0) {
           return res.status(401).json({ error: 'No token provided' });
         }
@@ -24,7 +23,6 @@ const authMiddleware = (roles = []) => {
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-      // debug log in development
       if (process.env.NODE_ENV === 'development') {
         console.log('authMiddleware: token present, decoded=', decoded);
       }
@@ -35,10 +33,17 @@ const authMiddleware = (roles = []) => {
       }
       next();
     } catch (error) {
-      if (error.name === 'TokenExpiredError') return res.status(200).json({
-        expired: true,
-        error: { message: 'jwt expired' }
-      })
+      // If token expired: mark and continue for public routes; fail for protected routes
+      if (error.name === 'TokenExpiredError') {
+        // for protected routes (roles required), return expired info
+        if (roles.length > 0) {
+          return res.status(401).json({ expired: true, error: { message: 'jwt expired' } });
+        }
+        // for public routes (e.g. login), don't block — set flag and continue
+        req.tokenExpired = true;
+        req.user = null;
+        return next();
+      }
       return res.status(401).json({ error });
     }
   };

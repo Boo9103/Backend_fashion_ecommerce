@@ -26,6 +26,15 @@ const login = async (req, res, next) => {
       return res.status(400).json({ error: 'Missing email or password' });
     }
     const result = await authService.login({ email, password });
+    const sessionId = req.body.session_id || req.headers['x-session-id'] || req.sessionId;
+    if (sessionId) {
+      try {
+        const merged = await authService.mergeEventsForUser(user.id, sessionId);
+        console.log('[auth.login] merged events count=', merged.updated);
+      } catch (err) {
+        console.error('[auth.login] mergeEventsForUser error', err && err.stack ? err.stack : err);
+      }
+    }
     res.status(200).json(result); //Trả về {token, user}
   } catch (error) {
     next(error);
@@ -123,6 +132,21 @@ const googleCallback = async (req, res, next) => {
       return res.redirect(`${process.env.FE_URL || 'http://localhost:5000'}/callback?status=error`);
     }
 
+    // merge events: try state first (OAuth state), fallback to body/header
+    const sessionIdFromState = req.query?.state || null;
+    const sessionIdFromBody = req.body?.session_id || null;
+    const sessionIdFromHeader = req.headers['x-session-id'] || null;
+    const sessionId = sessionIdFromState || sessionIdFromBody || sessionIdFromHeader;
+
+    if (sessionId) {
+      try {
+        const merged = await authService.mergeEventsForUser(result.user.id || user.id, sessionId);
+        console.log('[googleCallback] merged events count=', merged.updated);
+      } catch (err) {
+        console.error('[googleCallback] mergeEventsForUser error', err && err.stack ? err.stack : err);
+      }
+    }
+
     const FE = (process.env.FE_URL || 'http://localhost:5000').replace(/\/+$/, '');
 
     if (process.env.NODE_ENV === 'production') {
@@ -141,7 +165,6 @@ const googleCallback = async (req, res, next) => {
       return res.redirect(`${FE}/callback?status=success`);
     }
 
-    // development: add tokens in query (ONLY dev)
     const params = new URLSearchParams({
       status: 'success',
       accessToken: result.accessToken,

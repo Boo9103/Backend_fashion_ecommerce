@@ -19,12 +19,18 @@ router.get('/me', (req, res) => {
     res.json({ user: req.user });
 });
 
-router.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
-router.get(
-  '/auth/google/callback',
-  passport.authenticate('google', { failureRedirect: '/login', session: false }),
-  authController.googleCallback
-);
+// trước: const googleAuth = passport.authenticate('google', { scope: ['profile', 'email'] });
+// thay bằng route dynamic để inject state (session_id)
+router.get('/auth/google', (req, res, next) => {
+  const sessionId = req.query.session_id || req.headers['x-session-id'] || null;
+  // passport will include state in callback as req.query.state
+  return passport.authenticate('google', {
+    scope: ['profile', 'email'],
+    state: sessionId || undefined
+  })(req, res, next);
+});
+// callback route remains same path used by passport
+router.get('/auth/google/callback', passport.authenticate('google', { session: false }), require('../controllers/authController').googleCallback);
 
 router.get('/check-login', authController.checkLoginStatus);
 

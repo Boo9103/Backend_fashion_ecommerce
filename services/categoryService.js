@@ -38,9 +38,9 @@ const updateCategory = async (id, { name, parent_id, image }) => {
     if (!name || typeof name !== 'string' || name.trim() === '') {
         throw new Error('Name is required');
     }
-    if(image !== undefined && (!image || image.trim() === '')){
-        throw new Error('Image is required');
-    }
+    // if(image !== undefined && (!image || image.trim() === '')){
+    //     throw new Error('Image is required');
+    // }
     if (parent_id && String(parent_id) === String(id)) {
         throw new Error('parent_id cannot equal id');
     }

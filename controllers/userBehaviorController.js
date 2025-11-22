@@ -61,7 +61,9 @@ exports.getContextText = async (req, res, next) => {
 
 exports.create = async (req, res, next) => {
   try {
-    const userId = req.user ? (req.user.id || req.user.userId) : null;
+    console.log('[userBehavior.create] authorization header:', req.headers['authorization']);
+    console.log('[userBehavior.create] req.user before:', req.user);
+    const userId = req.user && (req.user.id || req.user.userId); // <- use req.user if present
     const { event_type, metadata } = req.body || {};
     if (!event_type) return res.status(400).json({ success: false, message: 'event_type is required' });
 

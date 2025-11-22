@@ -157,7 +157,7 @@ exports.createProduct = async (productData) => {
   }
 
   // set to match DB (ensure you ALTER TABLE to same value)
-  const MAX_SKU_LEN = 64;
+  const MAX_SKU_LEN = 252;
   const MAX_COLOR_CODE_LEN = 32;
 
   // debug log before DB work

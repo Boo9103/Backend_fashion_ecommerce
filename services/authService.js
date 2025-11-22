@@ -451,4 +451,17 @@ const resetPasswordWithToken = async (resetToken, newPassword) => {
     }
 };
 
-module.exports = { register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister, googleLogin, requestPasswordReset, verifyOtp, resetPasswordWithToken };
+const mergeEventsForUser = async(userId, sessionId) => {
+  if (!userId || !sessionId) return { updated: 0, ids: [] };
+  const q = `
+    UPDATE user_behavior_events
+    SET user_id = $1
+    WHERE metadata->>'session_id' = $2
+      AND user_id IS NULL
+    RETURNING id
+  `;
+  const { rows } = await pool.query(q, [userId, sessionId]);
+  return { updated: rows.length, ids: rows.map(r => r.id) };
+}
+module.exports = { register, login, adminLogin, refresh, logout, sendOtp, verifyOtpAndRegister,
+   googleLogin, requestPasswordReset, verifyOtp, resetPasswordWithToken, mergeEventsForUser };
