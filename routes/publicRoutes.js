@@ -30,3 +30,6 @@ module.exports = router;
 // Newest: GET /public/home-products?type=newest ... tương tự flash sale dùng cursor
 //có thể thêm order để sắp xếp asc|desc theo sequence_id
 // All groups: GET /public/home-products?type=all&limit=8&page=1
+
+//http://localhost:3000/public/products?limit=10&category_id=c35916a1-387f-4ae8-85c9-0ca9eef95995
+//lấy theo cate con đây nhe, ceteid truyền vào là catecha á, có thể truyền cate con nữa nhe

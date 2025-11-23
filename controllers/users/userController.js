@@ -135,3 +135,29 @@ exports.deactivateAccount = async(req, res, next) => {
     }
 };
 
+exports.updateUserMeasurement = async (req, res, next) => {
+    try {
+        const userId = req.user?.id;
+        if (!userId) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+        const { height, weight, bust, waist, hip } = req.body;
+        const updated = await userService.updateUserMeasurement(userId, { height, weight, bust, waist, hip });
+        return res.status(200).json({ message: 'User measurements updated successfully', measurement: updated });
+    } catch (error) {
+        next(error);
+    }
+};
+
+exports.getUserMeasurement = async (req, res, next) => {
+    try {
+        const userId = req.user?.id;
+        if (!userId) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }  
+        const measurement = await userService.getUserMeasurement(userId);
+        return res.status(200).json({ measurement });
+    } catch (error) {
+        next(error);
+    }
+};

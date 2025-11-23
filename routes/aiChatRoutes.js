@@ -4,8 +4,10 @@ const userBehaviorCtrl = require('../controllers/userBehaviorController');
 const auth = require('../middleware/authMiddleware'); // expects requireUser or similar
 const aiRecommendationController = require('../controllers/aiRecommendationController');
 
+//start chat session
+router.post('/ai/chat/start', auth.requireUser, aiRecommendationController.startSession);
 
-router.post('/ai/chat', auth.requireUser, aiRecommendationController.getAIOutfits);
+router.post('/ai/chat', auth.requireUser, aiRecommendationController.handleChat);
 
 //behavior tracking routes
 // POST /api/events  (allow anonymous)

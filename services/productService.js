@@ -6,120 +6,135 @@ const {
   validateSoldQuantity
 } = require('../utils/validate');
 
-exports.getProducts = async ({
-  search_key,
-  category_id,
-  supplier_id,
-  is_flash_sale,
-  min_price,
-  max_price,
-  status,
-  limit = 10,
-  page = 1,
-  cursor = null,    // sequence_id cursor for keyset paging (optional)
-  order = 'asc'     // 'asc' or 'desc' when using cursor
-} = {}) => {
-  const params = [];
-  let idx = 1;
-  const where = [];
+exports.getProducts = async function ({
+    limit = 40,
+    order = 'asc',
+    cursor,
+    search_key,
+    category_id,
+    supplier_id,
+    min_price,
+    max_price,
+    is_flash_sale,
+    status,
+    page
+} = {}) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
 
-  // normalize order once for both cursor and offset branches
-  const ord = String(order).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+        // nếu có category_id -> lấy tất cả descendant bằng CTE
+        let categoryIds = null;
+        if (category_id) {
+            const catRes = await client.query(
+                `WITH RECURSIVE subcats AS (
+                    SELECT id FROM categories WHERE id = $1
+                    UNION ALL
+                    SELECT c.id FROM categories c JOIN subcats s ON c.parent_id = s.id
+                ) SELECT id FROM subcats`,
+                [category_id]
+            );
+            categoryIds = catRes.rows.map(r => r.id);
+            if (categoryIds.length === 0) categoryIds = [category_id];
+        }
 
-  // status (default active)
-  if (typeof status === 'undefined' || status === null) {
-    where.push(`p.status = $${idx++}`);
-    params.push('active');
-  } else if (status !== 'all') {
-    where.push(`p.status = $${idx++}`);
-    params.push(status);
-  }
+        // Build dynamic WHERE and params
+        const where = [];
+        const params = [];
+        let idx = 1;
 
-  if (search_key && String(search_key).trim()) {
-    const sk = `%${String(search_key).trim()}%`;
-    where.push(`(
-      v.name ILIKE $${idx} OR 
-      v.description ILIKE $${idx + 1} OR 
-      COALESCE(v.supplier_name, '') ILIKE $${idx + 2} OR
-      COALESCE(v.category_name,'') ILIKE $${idx + 3})`);
-    params.push(sk, sk, sk, sk);
-    idx += 4;
-  }
+        // Only show active by default if status not provided
+        if (status) {
+            where.push(`p.status = $${idx++}`);
+            params.push(status);
+        } else {
+            where.push(`p.status = 'active'`);
+        }
 
-  if (category_id) {
-    where.push(`p.category_id = $${idx++}`);
-    params.push(category_id);
-  }
+        if (search_key) {
+            where.push(`(p.name ILIKE $${idx} OR p.description ILIKE $${idx})`);
+            params.push(`%${search_key}%`);
+            idx++;
+        }
 
-  if (supplier_id) {
-    where.push(`p.supplier_id = $${idx++}`);
-    params.push(supplier_id);
-  }
+        if (categoryIds) {
+            where.push(`p.category_id = ANY($${idx}::uuid[])`);
+            params.push(categoryIds);
+            idx++;
+        }
 
-  if (is_flash_sale !== undefined && is_flash_sale !== null) {
-    where.push(`p.is_flash_sale = $${idx++}`);
-    params.push(Boolean(is_flash_sale));
-  }
+        if (supplier_id) {
+            where.push(`p.supplier_id = $${idx++}`);
+            params.push(supplier_id);
+        }
 
-  if (min_price !== undefined && min_price !== null) {
-    where.push(`v.final_price >= $${idx++}`);
-    params.push(min_price);
-  }
-  if (max_price !== undefined && max_price !== null) {
-    where.push(`v.final_price <= $${idx++}`);
-    params.push(max_price);
-  }
+        if (typeof min_price !== 'undefined') {
+            where.push(`p.final_price >= $${idx++}`);
+            params.push(Number(min_price));
+        }
 
-  // Build base FROM (use v_product_full as v and products as p for sequence_id)
-  let sql = `SELECT v.*, p.sequence_id
-             FROM v_product_full v
-             JOIN public.products p ON p.id = v.id`;
+        if (typeof max_price !== 'undefined') {
+            where.push(`p.final_price <= $${idx++}`);
+            params.push(Number(max_price));
+        }
 
-  if (where.length) {
-    sql += ' WHERE ' + where.join(' AND ');
-  }
+        if (typeof is_flash_sale !== 'undefined') {
+            where.push(`p.is_flash_sale = $${idx++}`);
+            params.push(!!is_flash_sale);
+        }
 
-  const useCursor = cursor !== undefined && cursor !== null && String(cursor).trim() !== '';
+        // Pagination: keyset if cursor provided (or controller set cursor), else offset if page provided
+        let sql = '';
+        const limitPlus = Number(limit) + 1; // fetch one extra to detect hasMore
 
-  if (useCursor) {
-    const curVal = Number(cursor);
-    const curParam = Number.isFinite(curVal) ? curVal : 0;
+        if (typeof cursor !== 'undefined' && cursor !== null) {
+            // keyset pagination by sequence_id
+            const cmp = (order === 'asc') ? '>' : '<';
+            where.push(`p.sequence_id ${cmp} $${idx++}`);
+            params.push(Number(cursor));
+            const orderBy = `p.sequence_id ${order === 'desc' ? 'DESC' : 'ASC'}`;
+            sql = `SELECT p.* FROM products p WHERE ${where.join(' AND ')} ORDER BY ${orderBy} LIMIT $${idx++}`;
+            params.push(limitPlus);
+        } else if (page && Number.isFinite(Number(page))) {
+            const pg = Math.max(1, Number(page));
+            const offset = (pg - 1) * Number(limit);
+            sql = `SELECT p.* FROM products p WHERE ${where.join(' AND ')} ORDER BY p.sequence_id ${order === 'desc' ? 'DESC' : 'ASC'} LIMIT $${idx++} OFFSET $${idx++}`;
+            params.push(limit);
+            params.push(offset);
+        } else {
+            // fallback: basic order + limit
+            sql = `SELECT p.* FROM products p WHERE ${where.join(' AND ')} ORDER BY p.sequence_id ${order === 'desc' ? 'DESC' : 'ASC'} LIMIT $${idx++}`;
+            params.push(limitPlus);
+        }
 
-    sql += ` AND p.sequence_id::bigint ${ord === 'ASC' ? '>' : '<'} $${idx}`;
-    params.push(curParam);
-    idx++;
+        const qRes = await client.query(sql, params);
+        await client.query('COMMIT');
 
-    // fetch one extra row to determine hasMore
-    const fetchLimit = Number(limit) + 1;
-    sql += ` ORDER BY p.sequence_id::bigint ${ord} LIMIT $${idx}`;
-    params.push(fetchLimit);
-    idx++;
-  } else {
-    // classic offset pagination
-    const pageNum = Math.max(1, Number(page) || 1);
-    const perPage = Math.max(1, Number(limit) || 10);
-    const offset = (pageNum - 1) * perPage;
-    // use ord for offset too
-    sql += ` ORDER BY p.sequence_id::bigint ${ord} LIMIT $${idx++} OFFSET $${idx++}`;
-    params.push(perPage, offset);
-  }
+        const rows = qRes.rows || [];
+        const hasMore = rows.length > Number(limit);
+        const products = hasMore ? rows.slice(0, limit) : rows;
 
-  // after query
-  const r = await pool.query(sql, params);
-  const rows = r.rows || [];
+        let nextCursor = null;
+        if (typeof cursor !== 'undefined' && cursor !== null) {
+            if (products.length > 0) {
+                nextCursor = products[products.length - 1].sequence_id ?? null;
+            }
+        } else if (!page && products.length > 0) {
+            // if controller relied on automatic cursor start (desc case), return last seq as nextCursor
+            nextCursor = products[products.length - 1]?.sequence_id ?? null;
+        }
 
-  if (!useCursor) return rows;
-
-  // cursor mode: decide hasMore by presence of extra row
-  const hasMore = rows.length > Number(limit);
-  const products = hasMore ? rows.slice(0, Number(limit)) : rows;
-  const nextCursor = products.length > 0 && hasMore
-    ? Number(products[products.length - 1].sequence_id)
-    : (products.length > 0 ? Number(products[products.length - 1].sequence_id) : null);
-
-  // if no extra row -> no more pages => nextCursor could be null to indicate end
-  const finalNextCursor = hasMore ? nextCursor : null;
-  return { products, nextCursor: finalNextCursor, hasMore };
+        return {
+            products,
+            nextCursor,
+            hasMore
+        };
+    } catch (err) {
+        try { await client.query('ROLLBACK'); } catch (e) {}
+        throw err;
+    } finally {
+        client.release();
+    }
 };
 
 exports.createProduct = async (productData) => {

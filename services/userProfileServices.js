@@ -343,3 +343,50 @@ exports.deactiveUserAccount = async (userId)=> {
         client.release();
     }
 };
+
+exports.updateUserMeasurement = async (userId, data = {}) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const qRes = await client.query(`
+            UPDATE users SET height = $1, weight = $2, bust = $3, waist = $4, hip = $5, updated_at = NOW()
+            WHERE id = $6
+            RETURNING height, weight, bust, waist, hip, updated_at`,
+            [
+                data.height || null,
+                data.weight || null,
+                data.bust || null,
+                data.waist || null,
+                data.hip || null,
+                userId
+            ]);
+        await client.query('COMMIT');
+        if (qRes.rowCount === 0) {
+            throw new Error('User not found');
+        }
+        return qRes.rows[0];
+    
+    } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+    }finally {
+        client.release();
+    }
+};
+
+exports.getUserMeasurement = async (userId) => {
+    const client = await pool.connect();
+    try {
+        const q = `
+            SELECT height, weight, bust, waist, hip
+            FROM users
+            WHERE id = $1
+            LIMIT 1`;
+        const { rows } = await client.query(q, [userId]);
+        return rows[0] || null;
+    } catch (error) {
+        throw error;
+    } finally {
+        client.release();
+    }
+};

@@ -73,6 +73,10 @@ router.get('/favorites/productIds', requireUser, favoriteController.getListIdsFa
 router.get('/favorites/:productId/check', requireUser, favoriteController.checkFavorite);
 router.get('/favorites/list', requireUser, favoriteController.getListFavorite);
 
+
+//measurment
+router.get('/measurements', requireUser, userController.getUserMeasurement);
+router.put('/measurements', requireUser, userController.updateUserMeasurement);
 module.exports = router;
 
 

@@ -7,6 +7,7 @@ const adminSupplierController = require('../controllers/suppliers/adminSupplierC
 const adminProductController = require('../controllers/products/adminProductController');
 const promotionController = require('../controllers/promotions/adminPromotionController');
 const userOrderController = require('../controllers/orders/orderController');
+const userController = require('../controllers/users/userController');
 const orderNotificationController = require('../controllers/orders/adminNotificationController');
 const adminNewsController = require('../controllers/news/adminNewsController');
 const adminOrderController = require('../controllers/orders/adminOrderController');
@@ -31,6 +32,7 @@ router.get('/suppliers/:id', requireAdmin, adminSupplierController.getSupplierBy
 
 //User management
 router.get('/users', requireAdmin, adminController.getUsers);
+router.get('/users/:userId', requireAdmin, userController.getUserById);
 router.post('/users', requireAdmin, adminController.createUser);
 router.put('/users/:userId', requireAdmin, adminController.updateUser);
 router.post('/users/:userId/deactivate', requireAdmin, adminController.deactiveUser);
