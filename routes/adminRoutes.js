@@ -32,7 +32,7 @@ router.get('/suppliers/:id', requireAdmin, adminSupplierController.getSupplierBy
 
 //User management
 router.get('/users', requireAdmin, adminController.getUsers);
-router.get('/users/:userId', requireAdmin, userController.getUserById);
+router.get('/users/:userId', requireAdmin, userController.getUserByInputId);
 router.post('/users', requireAdmin, adminController.createUser);
 router.put('/users/:userId', requireAdmin, adminController.updateUser);
 router.post('/users/:userId/deactivate', requireAdmin, adminController.deactiveUser);
