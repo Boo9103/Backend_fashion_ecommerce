@@ -1,6 +1,13 @@
 const pool = require('../config/db');
 const openai = require('../utils/openai'); // adjust import if your project has different openai wrapper
 
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// simple in-memory products cache used by generateOutfitRecommendation
+const productsCache = { data: [], timestamp: 0 };
+// TTL in ms (default 10 minutes)
+const CACHE_TTL = parseInt(process.env.PRODUCTS_CACHE_TTL_MS || '600000', 10);
+
 //lấy thông tin user + hành vi để gợi ý trang phục từ AI
 exports.getUserProfileAndBehavior = async (userId) => {
     const client = await pool.connect();
@@ -132,8 +139,14 @@ const pickSizeFromGuides = (guides, measurements) => {
 
 // modified: generateOutfitRecommendation to include OpenAI generation (with DB-only constraint)
 exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = {}) => {
-  // opts: { productId, variantId, sessionId, message, maxOutfits }
-  // try to auto-extract slots from message if not explicitly provided
+  console.debug('[aiService.generateOutfitRecommendation] called', {
+    userId: String(userId),
+    occasion: occasion || null,
+    weather: weather || null,
+    optsMessagePreview: String(opts.message || '').slice(0, 200),
+    optsMaxOutfits: opts.maxOutfits || null,
+    optsExcludeCount: Array.isArray(opts.excludeVariantIds) ? opts.excludeVariantIds.length : 0
+  });
   if ((!occasion || !weather) && opts.message) {
     const ruleSlots = extractSlotsFromMessage(opts.message || '');
     // prefer explicit provided values; fill missing from rules
@@ -142,7 +155,7 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
     // attach inferred style/gender to opts for downstream use
     opts.inferredStyle = opts.inferredStyle || ruleSlots.style || null;
     opts.inferredGender = opts.inferredGender || ruleSlots.gender || null;
-    opts.inferredWantsAccessories = opts.inferredWantsAccessories || ruleSlots.wantsAccessories || false;
+    opts.inferredWantsAccessories = opts.inferredWantsAccessories || false;
 
     // if still missing core slots (occasion or weather), try AI parsing fallback (low-cost)
     if ((!occasion || !weather) && openai) {
@@ -176,45 +189,33 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
 
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    // Do reads and remote LLM calls WITHOUT holding a DB transaction to avoid locking while waiting.
+    let txStarted = false; // set to true only when we deliberately begin a transaction before persisting results
 
-    // persist user message into session (if provided) so history is complete
+    // persist user message (single-statement autocommit) so session history is up-to-date for AI context.
+    // Do NOT start a multi-statement DB transaction here to avoid holding locks while waiting for LLM.
     if (opts.sessionId && opts.message) {
       const userMsg = String(opts.message || '').trim();
       if (userMsg.length > 0) {
-        await client.query(
-          `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
-          [opts.sessionId, userMsg]
-        );
-        await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [opts.sessionId]);
+        try {
+          await client.query(
+            `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
+            [opts.sessionId, userMsg]
+          );
+          await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [opts.sessionId]);
+        } catch (e) {
+          // non-fatal: log and continue (we still want to call LLM)
+          console.error('[aiService.generateOutfitRecommendation] failed to persist user message (autocommit):', e && e.stack ? e.stack : e);
+        }
       }
     }
 
-    // fetch user + measurements
+    // fetch user + measurements (sequential because needed)
     const userQ = await client.query(`SELECT id, full_name, phone, height, weight, bust, waist, hip FROM users WHERE id = $1 LIMIT 1`, [userId]);
     const user = userQ.rows[0];
     if (!user) throw new Error("User not found");
 
-    // favorites & purchased (existing queries)
-    const favoritesQuery = await client.query(
-      `SELECT p.id, p.name, p.category_id
-       FROM favorite f
-       JOIN products p ON f.product_id = p.id
-       WHERE f.user_id = $1
-       ORDER BY f.seq DESC LIMIT 10`,
-      [userId]
-    );
-    const favorites = favoritesQuery.rows;
-
-    const purchasedQuery = await client.query(`SELECT DISTINCT p.id, p.name, pv.id AS variant_id, p.category_id
-      FROM order_items oi
-      JOIN product_variants pv ON pv.id = oi.variant_id
-      JOIN products p ON p.id = pv.product_id
-      JOIN orders o ON o.id = oi.order_id
-      WHERE o.user_id = $1 AND o.payment_status = 'paid' LIMIT 10`, [userId]);
-    const purchased = purchasedQuery.rows;
-
-    // products candidates (existing)
+    // prepare products query (same as before)
     const prodSql = `
       SELECT p.id AS product_id, p.name, p.description, COALESCE(p.final_price, p.price)::integer as price,
              pv.id AS variant_id, pv.color_name, c.name as category_name, pv.stock_qty, p.category_id, pv.sizes
@@ -224,18 +225,45 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
       WHERE p.status = 'active' AND pv.stock_qty > 0
       LIMIT 300
     `;
-    const productsQuery = await client.query(prodSql);
-    const products = productsQuery.rows;
 
-    if (!products || products.length === 0) {
-      await client.query('COMMIT');
-      return { reply: 'Không tìm thấy sản phẩm khả dụng trong kho để gợi ý.', outfits: [], sessionId: opts.sessionId || null };
-    }
+    // Parallel fetch: favorites, purchased, products (with cache)
+    const favoritesPromise = client.query(
+      `SELECT p.id, p.name, p.category_id
+       FROM favorite f
+       JOIN products p ON f.product_id = p.id
+       WHERE f.user_id = $1
+       ORDER BY f.seq DESC LIMIT 10`,
+      [userId]
+    );
 
-    // Build set of valid variant ids for strict validation
-    const validVariants = new Set(products.map(p => String(p.variant_id)));
+    const purchasedPromise = client.query(
+      `SELECT DISTINCT p.id, p.name, pv.id AS variant_id, p.category_id
+       FROM order_items oi
+       JOIN product_variants pv ON pv.id = oi.variant_id
+       JOIN products p ON p.id = pv.product_id
+       JOIN orders o ON o.id = oi.order_id
+       WHERE o.user_id = $1 AND o.payment_status = 'paid' LIMIT 10`,
+      [userId]
+    );
 
-    // prefetch size_guides per category present
+    const productsPromise = (async () => {
+      if (productsCache.timestamp > Date.now() - CACHE_TTL && Array.isArray(productsCache.data)) {
+        return { rows: productsCache.data };
+      }
+      const res = await client.query(prodSql);
+      // cache snapshot of rows (shallow copy)
+      productsCache.data = res.rows.slice();
+      productsCache.timestamp = Date.now();
+      return res;
+    })();
+
+    const [favoritesRes, purchasedRes, productsRes] = await Promise.all([favoritesPromise, purchasedPromise, productsPromise]);
+
+    const favorites = favoritesRes.rows;
+    const purchased = purchasedRes.rows;
+    const products = productsRes.rows;
+
+    // prefetch size_guides per category present (needs categoryIds from products)
     const categoryIds = Array.from(new Set(products.map(p => p.category_id).filter(Boolean)));
     const guidesByCategory = {};
     if (categoryIds.length) {
@@ -249,18 +277,30 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
     // load session history if provided (last N)
     const sessionHistory = await loadSessionHistory(client, opts.sessionId, 60);
 
-    // Build a compact product list JSON for AI (limit items to reduce token use)
+    // Build compactProducts as before
     const maxProductsForAI = 120;
-    const compactProducts = products.slice(0, maxProductsForAI).map(p => ({
-      variant_id: String(p.variant_id),
-      product_id: String(p.product_id),
-      name: p.name,
-      category: p.category_name,
-      color: p.color_name,
-      sizes: p.sizes,
-      stock: p.stock_qty,
-      price: p.price
-    }));
+    const excludedSet = new Set((opts.excludeVariantIds || []).map(v => String(v)));
+    console.debug('[aiService] excludeVariantIds count:', excludedSet.size);
+    console.debug('[aiService] total products fetched:', products.length);
+    const filteredProducts = products.filter(p => !excludedSet.has(String(p.variant_id)));
+    console.debug('[aiService] products after exclude filter:', filteredProducts.length);
+    // shuffle to avoid always picking same top N variants (Fisher-Yates)
+    for (let i = filteredProducts.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = filteredProducts[i]; filteredProducts[i] = filteredProducts[j]; filteredProducts[j] = tmp;
+    }
+    const compactProducts = filteredProducts.slice(0, maxProductsForAI).map(p => ({
+       variant_id: String(p.variant_id),
+       product_id: String(p.product_id),
+       name: p.name,
+       category: p.category_name,
+       color: p.color_name,
+       sizes: p.sizes,
+       stock: p.stock_qty,
+       price: p.price
+     }));
+
+    const validVariants = new Set(compactProducts.map(p => String(p.variant_id)));
 
     // System prompt: persona + strict JSON schema + rules (IMPROVED)
     const systemPrompt = `
@@ -296,6 +336,14 @@ HƯỚNG DẪN CHUNG:
 - KHÔNG hallucinate: mọi đề xuất phải dựa trên fields trong "products" hoặc thông tin user/size_guides.
 - Nếu AI sử dụng tên sản phẩm thay vì variant_id, server sẽ chạy fuzzy-match; AI nên ưu tiên trả variant_id.
 - Không trả markdown, không trả text ngoài JSON, không liệt kê thêm chú thích.
+
+QUY TẮC CHẶT:
+- TRẢ VỀ TỐI ĐA 1 outfit duy nhất (server sẽ chỉ trả 1).
+- Nếu có thể, outfit PHẢI gồm ít nhất 1 "Top" (áo) và 1 "Bottom" (quần/chân váy). Nếu không có top trong dữ liệu thì chọn item phù hợp nhất.
+- KHÔNG trả nhiều item thuộc cùng 1 category (ví dụ: quần + quần). Tránh duplicates.
+- Mọi items phải là variant_id tồn tại trong "products" (server sẽ validate).
+- Không in thêm giải thích, chỉ trả một JSON object theo schema.
+...rest of prompt...
     `.trim();
 
     // Few-shot example to guide structure (keeps AI consistent)
@@ -334,47 +382,58 @@ Task: Gợi 1 outfit.`;
       }) }
     ];
 
-    // call OpenAI - try to get a JSON-only reply
-    let assistantText = null;
-    let aiOutfits = null;
-    try {
-      if (openai && typeof openai.createChatCompletion === 'function') {
-        const resp = await openai.createChatCompletion({
-          model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-          messages,
-          temperature: 0.7,
-          max_tokens: 800
-        });
-        assistantText = (resp && (resp.choices?.[0]?.message?.content || resp.choices?.[0]?.text || '')) || '';
-      } else if (openai && typeof openai.chat === 'function') {
-        const resp = await openai.chat({ messages, max_tokens: 800 });
-        assistantText = resp?.content || '';
-      } else {
-        throw new Error('openai.createChatCompletion not available');
-      }
+    // call OpenAI - outside of any DB transaction (avoid keeping locks while waiting)
+     let assistantText = null;
+     let aiOutfits = null;
+     try {
+       if (openai && typeof openai.createChatCompletion === 'function') {
+         const resp = await callOpenAIWithRetry(() => openai.createChatCompletion({
+           model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+           messages,
+           temperature: 0.25,
+           top_p: 0.95,
+           max_tokens: 800
+         }));
+         assistantText = (resp && (resp.choices?.[0]?.message?.content || resp.choices?.[0]?.text || '')) || '';
+         console.debug('[aiService] OpenAI raw assistantText:', String(assistantText).slice(0, 2000));
+       } else if (openai && typeof openai.chat === 'function') {
+         const resp = await callOpenAIWithRetry(() => openai.chat({
+           messages,
+           max_tokens: 800,
+           temperature: 0.25,
+           top_p: 0.95
+         }));
+         assistantText = resp?.content || '';
+         console.debug('[aiService] OpenAI raw assistantText (chat):', String(assistantText).slice(0, 2000));
+       } else {
+         throw new Error('openai.createChatCompletion not available');
+       }
 
-      // extract JSON block
-      const jsonMatch = assistantText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        try {
+       // extract JSON block (unchanged)
+       const jsonMatch = assistantText.match(/\{[\s\S]*\}/);
+       console.debug('[aiService] OpenAI jsonMatch present:', Boolean(jsonMatch));
+       if (jsonMatch) {
+         try {
           const parsed = JSON.parse(jsonMatch[0]);
-          if (Array.isArray(parsed.outfits)) aiOutfits = parsed.outfits;
-        } catch (e) {
-          console.warn('AI JSON parse failed:', e.message);
-        }
-      }
+          console.debug('[aiService] OpenAI parsed JSON (outfits count):', Array.isArray(parsed.outfits) ? parsed.outfits.length : 0);
+           if (Array.isArray(parsed.outfits)) aiOutfits = parsed.outfits;
+         } catch (e) {
+           console.warn('AI JSON parse failed:', e.message);
+         }
+       }
 
     } catch (err) {
-      console.warn('OpenAI request failed, falling back to DB heuristic:', err && err.message ? err.message : err);
+      console.warn('OpenAI request failed or timed out, falling back to DB heuristic:', err && err.message ? err.message : err);
       assistantText = null;
       aiOutfits = null;
     }
 
     // If AI returned outfits, validate and sanitize (with fuzzy matching fallback)
     if (Array.isArray(aiOutfits) && aiOutfits.length > 0) {
-      const sanitized = [];
-      for (const o of aiOutfits.slice(0, opts.maxOutfits || 3)) {
-        if (!o || !Array.isArray(o.items)) continue;
+      console.debug('[aiService] aiOutfits raw:', JSON.stringify(aiOutfits).slice(0,2000));
+       const sanitized = [];
+       for (const o of aiOutfits.slice(0, opts.maxOutfits || 3)) {
+         if (!o || !Array.isArray(o.items)) continue;
 
         // Normalize items: try direct acceptance, else try fuzzy matching to known compactProducts
         const items = [];
@@ -418,68 +477,104 @@ Task: Gợi 1 outfit.`;
         // Build a quick map from variant_id -> product info available in `products`
         const namesByVariant = {};
         for (const p of products) {
-          namesByVariant[String(p.variant_id)] = { name: p.name, category_id: p.category_id };
+          namesByVariant[String(p.variant_id)] = {
+            name: p.name,
+            category_id: p.category_id,
+            category_name: (p.category_name || p.category || '').toString()
+          };
         }
 
-        // compute size suggestions per item using guidesByCategory + pickSizeFromGuides
+        // Use global normalizer (server-side enforcement)
         for (const out of sanitized) {
-          out.size_suggestions = []; // parallel array aligned with out.items
-          for (const vid of out.items) {
-            const prodInfo = namesByVariant[String(vid)] || null;
-            let suggested = null;
-            if (prodInfo && prodInfo.category_id) {
-              const guides = guidesByCategory[prodInfo.category_id] || [];
-              suggested = pickSizeFromGuides(guides, {
-                height: user.height,
-                weight: user.weight,
-                bust: user.bust,
-                waist: user.waist,
-                hip: user.hip
-              });
-            }
-            out.size_suggestions.push(suggested); // may be null
-          }
+          out.items = normalizeOutfitItemsGlobal(out.items, namesByVariant, 4);
         }
+        const limitedSanitized = sanitized.slice(0, opts.maxOutfits || 3); // server returns 1 outfit
 
-        // assistant text: keep friendly text + short size summary if available
-        const sizeHints = [];
-        for (const out of sanitized) {
-          const hints = out.items.map((vid, i) => {
-            const nm = namesByVariant[String(vid)]?.name || vid;
-            const s = out.size_suggestions[i];
-            return s ? `${nm} → ${s}` : null;
-          }).filter(Boolean);
-          if (hints.length) sizeHints.push(`Gợi ý size cho "${out.name}": ${hints.join('; ')}`);
-        }
-        const assistantTextToSave = (assistantText && assistantText.trim()) || `Mình đã gợi ý ${sanitized.length} set cho bạn.`;
-        const assistantTextWithSizes = sizeHints.length ? `${assistantTextToSave} ${sizeHints.join(' ')}` : assistantTextToSave;
-
-        if (opts.sessionId) {
-          await client.query(
-            `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'assistant', $2, NOW())`,
-            [opts.sessionId, assistantTextWithSizes]
-          );
-          await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [opts.sessionId]);
-        }
+        // --- ADDED: compute size suggestions and assistantTextWithSizes to avoid undefined variable ---
+        // Decide whether we should compute size suggestions:
+        // Only compute if user provided measurements in profile OR explicitly requested size advice.
+        const wantsSizeExplicit = Boolean(opts.requestSize) || /\b(size|chọn size|tư vấn size|size phù hợp|kích cỡ)\b/i.test(String(opts.message || ''));
+        // require BOTH height & weight as minimal measurements to provide size suggestions
+        const userHasMeasurements = Boolean(user && user.height && user.weight);
+        const wantsSizeButMissingMeasurements = wantsSizeExplicit && !userHasMeasurements;
+ 
+         // attach per-item size suggestions ONLY when allowed
+         for (const out of limitedSanitized) {
+          out.size_suggestions = null;
+          if (userHasMeasurements) {
+             out.size_suggestions = out.items.map(vid => {
+               const p = namesByVariant[String(vid)] || {};
+               const guides = p.category_id ? (guidesByCategory[p.category_id] || []) : [];
+               return pickSizeFromGuides(guides, {
+                 height: user.height,
+                 weight: user.weight,
+                 bust: user.bust,
+                 waist: user.waist,
+                 hip: user.hip
+               }) || null;
+             });
+           }
+         }
+ 
+         // build assistant text: include size hints only when computed; always append follow-up question
+         const sizeHints = [];
+         for (const out of limitedSanitized) {
+           if (Array.isArray(out.size_suggestions) && out.size_suggestions.length) {
+             const hints = out.items.map((vid, i) => {
+               const nm = namesByVariant[String(vid)]?.name || vid;
+               const s = out.size_suggestions[i];
+               return s ? `${nm} → ${s}` : null;
+             }).filter(Boolean);
+             if (hints.length) sizeHints.push(`Gợi ý size: ${hints.join('; ')}`);
+           }
+         }
+         const assistantTextToSave = (assistantText && assistantText.trim()) || `Mình đã gợi ý ${limitedSanitized.length} set cho bạn.`;
+         // always include a short follow-up question inviting to "xem thêm"
+         const followUpQuestion = 'Bạn có muốn xem thêm 1 outfit khác không?';
+        // if user explicitly asked for size but missing measurements -> ask for measurements instead of fabricating sizes
+        const measurementAsk = wantsSizeButMissingMeasurements ? ' Bạn cho mình biết chiều cao và cân nặng (cm/kg) để mình tư vấn size chính xác nhé?' : '';
+        const assistantTextWithSizes = userHasMeasurements
+          ? (sizeHints.length ? `${assistantTextToSave} ${sizeHints.join(' ')} ${followUpQuestion}` : `${assistantTextToSave} ${followUpQuestion}`)
+          : (wantsSizeButMissingMeasurements ? `${assistantTextToSave} ${measurementAsk}` : `${assistantTextToSave} ${followUpQuestion}`);
+        // --- END ADDED ---
+ 
+ // Persist assistant message + recommendation inside a short transaction to keep DB consistent.
+         await client.query('BEGIN');
+         txStarted = true;
+         if (opts.sessionId) {
+           await client.query(
+             `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'assistant', $2, NOW())`,
+             [opts.sessionId, assistantTextWithSizes]
+           );
+           await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [opts.sessionId]);
+         }
 
         // persist recommendation with richer metadata so later references ("cái áo đó") resolve to the same product name
-        const storedOutfits = sanitized.map(o => ({
-          name: o.name,
-          why: o.why,
-          items: o.items.map(vid => {
+        // Store items as array of variant_id strings for easy reuse/exclusion.
+        // Keep metadata in a separate `meta` field so we don't break exclude/filter logic.
+        const storedOutfits = limitedSanitized.map(o => {
+          const itemsStrings = o.items.map(vid => String(vid));
+          const itemsMeta = o.items.map(vid => {
             const p = namesByVariant[String(vid)] || {};
-            return { variant_id: vid, product_name: p.name || null, category_id: p.category_id || null };
-          })
-        }));
+            return { variant_id: String(vid), product_name: p.name || null, category_id: p.category_id || null };
+          });
+          return {
+            name: o.name,
+            why: o.why,
+            items: itemsStrings,    // primary: simple array of variant_id strings
+            meta: itemsMeta         // optional metadata for later resolution
+          };
+        });
         await client.query(
           `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
            VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
           [userId, JSON.stringify({ occasion, weather }), JSON.stringify({ outfits: storedOutfits }), process.env.OPENAI_MODEL || 'gpt-4o-mini']
         );
 
-        const followUp = buildFollowUpForOutfits(sanitized);
+        const followUp = buildFollowUpForOutfits(limitedSanitized);
         await client.query('COMMIT');
-        return { reply: assistantTextWithSizes, outfits: sanitized, followUp, sessionId: opts.sessionId || null };
+        txStarted = false;
+        return { reply: assistantTextWithSizes, outfits: limitedSanitized, followUp, sessionId: opts.sessionId || null };
       }
     }
 
@@ -527,65 +622,101 @@ Task: Gợi 1 outfit.`;
       );
       const namesById = {};
       namesQ.rows.forEach(r => namesById[r.variant_id] = r);
-      const title = namesById[items[0]] ? `${namesById[items[0]].category_name || 'Outfit'}: ${namesById[items[0]].product_name}` : `Outfit ${i+1}`;
-      const descParts = items.map(id => {
+
+      // normalize items server-side to tránh quần+quần sets
+      const normalizedItems = normalizeOutfitItemsGlobal(items, namesById, 4);
+
+      const title = namesById[normalizedizedItems[0]] ? `${namesById[normalizedizedItems[0]].category_name || 'Outfit'}: ${namesById[normalizedizedItems[0]].product_name}` : `Outfit ${i+1}`;
+      const descParts = normalizedItems.map(id => {
         const n = namesById[id];
         if (!n) return id;
         return `${n.product_name}${n.color_name ? ' ('+n.color_name+')' : ''}`;
       });
-      // after namesQ and namesById are built
-      // compute size recommendation per item (use pickSizeFromGuides)
-      const sizeSuggestions = [];
-      for (const vid of items) {
-        const prodRow = products.find(p => String(p.variant_id) === String(vid));
-        let suggested = null;
-        if (prodRow && prodRow.category_id) {
-          const guides = guidesByCategory[prodRow.category_id] || [];
-          suggested = pickSizeFromGuides(guides, {
-            height: user.height,
-            weight: user.weight,
-            bust: user.bust,
-            waist: user.waist,
-            hip: user.hip
-          });
-        }
-        sizeSuggestions.push(suggested); // may be null
-      }
 
-      // build description / why (add size info)
-      const description = descParts.join(' + ') + `. Gợi ý phối: thử phối cùng phụ kiện nhẹ để hoàn thiện set.`;
-      const whyParts = [];
-      whyParts.push(`Được chọn dựa trên hàng có sẵn trong kho và phù hợp với dịp "${occasion}" và thời tiết "${weather}".`);
-      // append per-item size hints if available
-      const sizeHints = sizeSuggestions
-        .map((s, idx) => s ? `${namesById[items[idx]]?.product_name || 'Item'} → size ${s}` : null)
-        .filter(Boolean);
-      if (sizeHints.length) whyParts.push(`Gợi ý size: ${sizeHints.join('; ')}.`);
+      const whyText = `Phối dựa trên màu sắc, kiểu dáng và hàng có sẵn phù hợp cho ${occasion || 'nhiều dịp'}.`;
 
+      // compute size suggestion using normalizedItems...
+      // push only first outfit overall (we'll slice outfits after loop)
       outfits.push({
         name: title,
-        description: description,
-        items,
-        why: whyParts.join(' ')
+        description: descParts.join(' + ') + `. Gợi ý phối: thử phối cùng phụ kiện nhẹ để hoàn thiện set.`,
+        items: normalizedItems,
+        why: whyText
       });
     }
 
+// After loop, ensure only single outfit returned
+    const finalOutfits = outfits.length ? [outfits[0]] : [];
+
+    // Persist fallback recommendation in a short transaction
+    await client.query('BEGIN');
+    txStarted = true;
     await client.query(
       `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
        VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
-      [userId, JSON.stringify({ occasion, weather }), JSON.stringify({ outfits }), 'db-heuristic-fallback']
+      [userId, JSON.stringify({ occasion, weather }), JSON.stringify({ outfits: finalOutfits }), 'db-heuristic-fallback']
     );
-
     await client.query('COMMIT');
-    return { reply: outfits.map((o,idx) => `Gợi ý ${idx+1}: ${o.name} — ${o.description}`).join('\n\n'), outfits, sessionId: opts.sessionId || null };
-
-  } catch (err) {
-    await client.query('ROLLBACK');
+    txStarted = false;
+    return { reply: finalOutfits.map((o,idx) => `Gợi ý ${idx+1}: ${o.name} — ${o.description}`).join('\n\n'), outfits: finalOutfits, sessionId: opts.sessionId || null };
+ 
+   } catch (err) {
+    // rollback only if we started a transaction
+    try { if (typeof txStarted !== 'undefined' && txStarted) await client.query('ROLLBACK'); } catch(e){ /* ignore */ }
     throw err;
-  } finally {
-    client.release();
+   } finally {
+     client.release();
+   }
+ };
+ 
+// --- OPENAI: improved retry + timeout wrapper (supports Retry-After header) ---
+const OPENAI_TIMEOUT_MS = parseInt(process.env.OPENAI_TIMEOUT_MS || '10000'); // default 10s
+const OPENAI_MAX_RETRIES = parseInt(process.env.OPENAI_MAX_RETRIES || '3');
+const OPENAI_BASE_DELAY_MS = parseInt(process.env.OPENAI_BASE_DELAY_MS || '800');
+
+const callOpenAIWithRetry = async (fn, opts = {}) => {
+  const maxRetries = typeof opts.maxRetries === 'number' ? opts.maxRetries : OPENAI_MAX_RETRIES;
+  const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : OPENAI_TIMEOUT_MS;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      // race between real call and timeout
+      const resp = await Promise.race([
+        fn(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('OpenAI timeout')), timeoutMs))
+      ]);
+      return resp;
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : err);
+      const status = err && (err.status || (err.response && err.response.status));
+      const retryAfterHeader = err && err.response && err.response.headers && err.response.headers['retry-after'];
+
+      const isRateLimit = status === 429 || /rate limit|rate_limit|too many requests/i.test(msg);
+      const isTransient = /timeout|ECONNRESET|ETIMEDOUT|ENOTFOUND|OpenAI timeout/i.test(msg);
+
+      // if Retry-After present from server, respect it (in seconds)
+      let retryDelay = OPENAI_BASE_DELAY_MS * Math.pow(2, attempt);
+      if (retryAfterHeader) {
+        const ra = Number(retryAfterHeader);
+        if (!Number.isNaN(ra)) retryDelay = Math.max(retryDelay, ra * 1000);
+      }
+
+      // if last attempt or non-transient non-rate-limit => throw
+      if (attempt === maxRetries || (!isRateLimit && !isTransient)) {
+        // attach status for caller
+        err._openai_status = status || null;
+        throw err;
+      }
+
+      console.warn(`[openai retry] attempt=${attempt+1} status=${status || 'n/a'} msg=${msg}. retrying after ${retryDelay}ms`);
+      await sleep(retryDelay);
+      // continue retry loop
+    }
   }
+
+  throw new Error('OpenAI call failed after retries');
 };
+// --- END: additions ---
 
 // helper: load last N messages from ai_chat_messages for a session (chronological order)
 const loadSessionHistory = async (client, sessionId, limit = 60) => {
@@ -612,41 +743,63 @@ const fuzzyMatchVariant = (compactProducts, token) => {
 
   // 1) direct match by variant_id
   for (const p of compactProducts) {
-    if (String(p.variant_id) === t) return String(p.variant_id);
+    if (String(p.variant_id).toLowerCase() === t) return String(p.variant_id);
   }
 
-  // 2) exact name or color match
+  // 2) exact full name or color match (prefer exact)
   for (const p of compactProducts) {
     if (p.name && p.name.toLowerCase() === t) return String(p.variant_id);
     if (p.color && p.color.toLowerCase() === t) return String(p.variant_id);
   }
 
-  // 3) partial substring match on name or color (prefer longer name match)
+  // 3) word-boundary / startsWith match has higher weight; require threshold to accept
   let best = null;
   let bestScore = 0;
+  const tokens = t.split(/\s+/).filter(Boolean);
   for (const p of compactProducts) {
     const name = (p.name || '').toLowerCase();
     const color = (p.color || '').toLowerCase();
-    // score: length of longest common substring approx => here: check includes or token includes substring
     let score = 0;
-    if (name && name.includes(t)) score += 10 + t.length;
-    if (t && name.includes(t.split(' ')[0])) score += 5;
-    if (color && color.includes(t)) score += 8;
-    // also check token contains key words from name
-    const tokens = t.split(/\s+/).filter(Boolean);
+
+    if (!name && !color) continue;
+
+    // strong signals
+    if (name && name === t) score += 40;
+    if (name && name.startsWith(t)) score += 20;
+    if (name && new RegExp(`\\b${escapeRegExp(t)}\\b`).test(name)) score += 18;
+
+    // color strong signal
+    if (color && color === t) score += 16;
+    if (color && new RegExp(`\\b${escapeRegExp(t)}\\b`).test(color)) score += 12;
+
+    // partial token matches
     for (const tk of tokens) {
-      if (name.includes(tk)) score += 1;
-      if (color.includes(tk)) score += 1;
+      if (name.includes(tk)) score += 3;
+      if (color.includes(tk)) score += 3;
     }
+
+    // small bonus for longer common substrings
+    if (name && t.length > 3 && name.includes(t)) score += 5;
+
     if (score > bestScore) {
       bestScore = score;
       best = p;
     }
   }
 
-  if (best && bestScore >= 3) return String(best.variant_id);
+  // accept only if confident
+  // increase minimum confidence to reduce wrong mappings
+  if (best && bestScore >= 18) {
+    console.debug('[aiService.fuzzyMatchVariant] mapped token ->', token, '=>', String(best.variant_id), 'score=', bestScore);
+    return String(best.variant_id);
+  }
   return null;
 };
+
+// small helper for regex-safe token matching
+function escapeRegExp(str) {
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 // helper: lightweight rule-based slot extractor (Vietnamese keywords)
 const extractSlotsFromMessage = (message) => {
@@ -715,13 +868,15 @@ const parseWithOpenAI = async (message) => {
 - If a slot is missing, return null for it.
 - weather can be descriptive (e.g., "mát", "lạnh", "25°C")`;
   const user = `Sentence: ${message}\nReturn JSON only.`;
+
   try {
-    const resp = await openai.createChatCompletion({
+    const resp = await callOpenAIWithRetry(() => openai.createChatCompletion({
       model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
       messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
       temperature: 0.0,
       max_tokens: 200
-    });
+    }), { timeoutMs: OPENAI_TIMEOUT_MS, maxRetries: OPENAI_MAX_RETRIES });
+
     const txt = resp?.choices?.[0]?.message?.content || resp?.choices?.[0]?.text || '';
     const jsonMatch = txt.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
@@ -734,17 +889,24 @@ const parseWithOpenAI = async (message) => {
       wantsAccessories: parsed.wantsAccessories || false
     };
   } catch (e) {
-    console.warn('parseWithOpenAI failed:', e && e.message ? e.message : e);
+    // if rate-limited: log and return null (so fallback heuristic kicks in)
+    const isRateLimit = e && (e._openai_status === 429 || /rate limit/i.test(String(e.message)));
+    console.warn('parseWithOpenAI failed:', (e && e.message) || e);
+    if (isRateLimit) {
+      console.warn('parseWithOpenAI: rate limit detected, skipping LLM parse and falling back to rule-based slots');
+      return null;
+    }
     return null;
   }
 };
+
 
 // helper: build followUp options after generating outfits
 const buildFollowUpForOutfits = (outfits) => {
   const options = ['Xem thêm'];
   outfits.forEach((_, i) => options.push(`Chọn ${i+1}`));
   return {
-    text: 'Bạn muốn xem thêm set khác hay chọn 1 bộ để mình tư vấn size? Trả lời "Xem thêm" hoặc "Chọn 2" (ví dụ).',
+    text: 'Bạn có muốn xem thêm 1 outfit khác không? Hoặc bạn có muốn mình tư vấn size cho bộ nào không? (ví dụ: "Xem thêm" hoặc "Chọn 2")',
     options
   };
 };
@@ -803,10 +965,6 @@ exports.handleOutfitSelection = async (userId, sessionId, index) => {
 exports.handleGeneralMessage = async (userId, opts = {}) => {
   const client = await pool.connect();
   try {
-    // NOTE: Do not BEGIN / persist the user message here BEFORE delegating to
-    // generateOutfitRecommendation. That function manages its own transaction and
-    // persists messages; writing here first causes lock-waits / deadlocks.
-    // We'll still log start for debugging.
     const { message = '', sessionId = null, lastRecommendationAllowed = true } = opts || {};
     console.log('[aiService.handleGeneralMessage] start (no early persist)', { userId, sessionId, message: String(message).slice(0,120) });
 
@@ -814,8 +972,9 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
     let lastRec = null;
     if (lastRecommendationAllowed) {
       try {
+        // include context so downstream "show more" can reuse occasion/weather without extra fetch
         const recQ = await client.query(
-          `SELECT id, items, created_at FROM ai_recommendations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+          `SELECT id, items, context, created_at FROM ai_recommendations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
           [userId]
         );
         if (recQ.rowCount > 0) lastRec = recQ.rows[0];
@@ -824,7 +983,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       }
     }
 
-    // helper: resolve simple references ("áo đó", "outfit 2") -> returns a variant id string or null
+    // helper: resolve simple references ("áo đó", "outfit 2") -> variant id or null
     const resolveRefFromLastRecommendation = (lastRecLocal, msg) => {
       if (!lastRecLocal || !msg) return null;
       let recJson = lastRecLocal.items;
@@ -848,75 +1007,281 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       return null;
     };
 
-    // quick local intents
     const lowerMsg = String(message || '').toLowerCase();
     const stockIntentRe = /\b(có\s+size|còn\s+size|còn\s+hàng|còn\s+không|còn\s+size\s*[a-z0-9]|có\s+hàng)\b/i;
-    // Broader intent detector: match many phrasings that imply "gợi ý outfit" or "muốn 1 bộ"
     const recommendIntentRe = /\b(tư vấn|gợi ý|chọn\s*size|giúp\s*mình|muốn|gợi ý\s*1|muốn\s*(?:1|một)?\s*(?:bộ|outfit|set)|bộ|outfit|set|mix\s*đồ|phối\s*đồ|basic|đơn giản|văn\s+phòng|công\s+sở)\b/i;
-
-    // quick keyword fallback using slot extractor (covers cases like "basic, công sở" where user didn't say "muốn")
     const quickSuggestKeywords = /\b(basic|đơn giản|văn phòng|công sở|office|phối đồ|mix đồ)\b/i;
     const slotHints = (typeof extractSlotsFromMessage === 'function') ? extractSlotsFromMessage(message || '') : {};
 
-    // NEW: if user explicitly asks for outfit recommendation (or slot hints / quick keywords), delegate to generateOutfitRecommendation
-    if (recommendIntentRe.test(lowerMsg) || quickSuggestKeywords.test(lowerMsg) || slotHints.occasion || slotHints.style || (slotHints.productHints && slotHints.productHints.length)) {
-       try {
-         const rec = await exports.generateOutfitRecommendation(userId, null, null, {
-           sessionId,
-           message,
-           maxOutfits: opts?.maxOutfits || 3
-         });
+    // follow-up intents
+    const showMoreIntent = /\b(xem thêm|thêm (?:1|một)? (?:outfit|bộ|set)|thêm giúp|thêm nữa)\b/i;
+    const colorIntent = /\b(màu|màu gì|màu nào)\b/i;
+    const sizeIntent = /\b(size|cỡ|kích cỡ|chiều cao|cân nặng|tư vấn size)\b/i;
 
-         // Defensive handling of generateOutfitRecommendation result
-         if (!rec) {
-           console.error('[aiService.handleGeneralMessage] generateOutfitRecommendation returned empty');
-           await client.query('COMMIT');
-           return { reply: 'Mình đang tạm thời không thể gợi ý được. Thử lại sau nhé!', outfits: [], sessionId };
-         }
+    // 1) show more -> call generateOutfitRecommendation excluding previous variants
+    if (showMoreIntent.test(lowerMsg)) {
+      // try to reuse last recommendation's context so LLM won't ask for occasion/weather again
+      let last = lastRec;
+      if (!last && lastRecommendationAllowed) {
+        try {
+          const lq = await client.query(`SELECT id, items, context FROM ai_recommendations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [userId]);
+          if (lq.rowCount) last = lq.rows[0];
+        } catch (e) { /* ignore */ }
+      }
+      const excludeIds = [];
+      if (last) {
+        // extract variant ids robustly
+        let recJson = last.items;
+        if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; } }
+        const outfits = recJson && recJson.outfits ? recJson.outfits : [];
+        for (const o of outfits) {
+          if (!Array.isArray(o.items)) continue;
+          for (const it of o.items) {
+            if (typeof it === 'string' && it.trim()) excludeIds.push(String(it));
+            else if (it && typeof it === 'object') {
+              if (it.variant_id) excludeIds.push(String(it.variant_id));
+              else if (it.id) excludeIds.push(String(it.id));
+            }
+          }
+        }
+      }
 
-         // If service asked for clarification (ask), persist and forward ask
-         if (rec.ask) {
-           const askText = rec.ask;
-           if (sessionId) {
-             try {
-               await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, askText]);
-               await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-             } catch (e) {
-               console.error('[aiService.handleGeneralMessage] persist ask failed', e && e.stack ? e.stack : e);
-             }
-           }
-           await client.query('COMMIT');
-           return { ask: askText, outfits: Array.isArray(rec.outfits) ? rec.outfits : [], sessionId };
-         }
+      // prefer to reuse stored context (occasion/weather) if available
+      let occasionFromContext = null;
+      let weatherFromContext = null;
+      if (last && last.context) {
+        try {
+          const ctx = typeof last.context === 'string' ? JSON.parse(last.context) : last.context;
+          occasionFromContext = ctx && ctx.occasion ? ctx.occasion : null;
+          weatherFromContext = ctx && ctx.weather ? ctx.weather : null;
+        } catch (e) { /* ignore parse errors */ }
+      }
 
-         // Normal flow: structured outfits returned
-         const outfitsArr = Array.isArray(rec.outfits) ? rec.outfits : [];
-         const replyText = rec.reply || rec.message || (outfitsArr.length ? `Mình đã gợi ý ${outfitsArr.length} set cho bạn.` : 'Mình chưa tìm được set phù hợp, bạn muốn mình thử phong cách khác không?');
-
-         if (sessionId && replyText) {
-           try {
-             await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, replyText]);
-             await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-           } catch (e) {
-             console.error('[aiService.handleGeneralMessage] persist reply failed', e && e.stack ? e.stack : e);
-           }
-         }
-
-         await client.query('COMMIT');
-         return { reply: replyText, outfits: outfitsArr, sessionId };
-       } catch (e) {
-         console.error('[aiService.handleGeneralMessage] delegate to generateOutfitRecommendation failed', e && e.stack ? e.stack : e);
-         // rollback here and fall through to LLM/local flow below
-         try { await client.query('ROLLBACK'); } catch(_) {}
-       }
+      try {
+        console.debug('[aiService.handleGeneralMessage.showMore] reusing context', { occasionFromContext, weatherFromContext, excludeCount: excludeIds.length });
+        // Do NOT forward the raw "show more" user message to generator — it may trigger parsing & asking again.
+        const rec = await exports.generateOutfitRecommendation(
+          userId,
+          occasionFromContext, // reuse occasion from last rec when possible
+          weatherFromContext,  // reuse weather from last rec when possible
+          { sessionId, /* message intentionally omitted */ maxOutfits: 1, excludeVariantIds: excludeIds, more: true }
+        );
+        if (rec && rec.outfits && rec.outfits.length) return { reply: rec.reply || rec.message || 'Mình gợi ý thêm 1 set cho bạn.', outfits: rec.outfits, sessionId };
+        return { reply: 'Mình chưa tìm được set khác, bạn muốn thử phong cách khác không?', outfits: [], sessionId };
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] showMore flow failed', e && e.stack ? e.stack : e);
+        return { reply: 'Mình không tìm được set mới ngay bây giờ, thử lại sau nhé!', outfits: [], sessionId };
+      }
     }
 
-    // ...existing code continues (LLM / local fallback flow) ...
+    // 2) stock/color/size follow-ups referencing last recommendation
+    if (stockIntentRe.test(lowerMsg) || colorIntent.test(lowerMsg) || sizeIntent.test(lowerMsg)) {
+      const refVariant = resolveRefFromLastRecommendation(lastRec, message);
+      if (!refVariant) {
+        return { ask: 'Bạn đang nói tới món đồ nào trong gợi ý trước đó? Bạn có thể nói "cái áo đó" hoặc "outfit 2" nhé.', sessionId };
+      }
+
+      if (stockIntentRe.test(lowerMsg)) {
+        try {
+          const info = await checkVariantAvailability(refVariant);
+          if (!info) return { reply: 'Mình không tìm thấy sản phẩm này trong kho.', sessionId };
+          const reply = info.stock_qty > 0 ? `Chiếc đó vẫn còn ${info.stock_qty} chiếc trong kho.` : 'Chiếc đó hiện đã hết hàng rồi.';
+          return { reply, sessionId };
+        } catch (e) {
+          return { reply: 'Mình không truy xuất được kho lúc này, thử lại sau nhé.', sessionId };
+        }
+      }
+
+      if (colorIntent.test(lowerMsg)) {
+        try {
+          const variants = await getVariantColorsByVariant(refVariant);
+          if (!variants || variants.length === 0) return { reply: 'Mình không tìm thấy màu cho sản phẩm này.', sessionId };
+          const colors = variants.map(v => (v.color_name || 'Không rõ') + (v.stock_qty > 0 ? ' (còn hàng)' : ' (hết)'));
+          return { reply: `Sản phẩm có các màu: ${colors.join(', ')}.`, sessionId };
+        } catch (e) {
+          return { reply: 'Mình không lấy được thông tin màu lúc này, thử lại sau nhé.', sessionId };
+        }
+      }
+
+      if (sizeIntent.test(lowerMsg)) {
+        try {
+          const uQ = await client.query(`SELECT height, weight, bust, waist, hip FROM users WHERE id = $1 LIMIT 1`, [userId]);
+          const u = uQ.rows[0];
+          if (!u || (!u.height && !u.weight && !u.bust && !u.waist && !u.hip)) {
+            return { ask: 'Bạn cho mình biết chiều cao và cân nặng (cm/kg) để mình tư vấn size chính xác nhé?', sessionId };
+          }
+          const pvQ = await client.query(`SELECT product_id FROM product_variants WHERE id = $1 LIMIT 1`, [refVariant]);
+          const productId = pvQ.rowCount ? pvQ.rows[0].product_id : null;
+          let guides = [];
+          if (productId) {
+            const prodQ = await client.query(`SELECT category_id FROM products WHERE id = $1 LIMIT 1`, [productId]);
+            const categoryId = prodQ.rowCount ? prodQ.rows[0].category_id : null;
+            if (categoryId) {
+              const sgQ = await client.query(`SELECT size_label, min_height, max_height, min_weight, max_weight FROM size_guides WHERE category_id = $1`, [categoryId]);
+              guides = sgQ.rows || [];
+            }
+          }
+          const suggested = pickSizeFromGuides(guides, u) || 'Không chắc — mình cần biết số đo vòng ngực/eo/hông để tư vấn kỹ hơn.';
+          return { reply: `Mình gợi ý size: ${suggested}. Bạn muốn mình lưu size này hay so sánh với S/M/L không?`, sessionId };
+        } catch (e) {
+          return { reply: 'Mình không truy xuất được thông tin size lúc này, thử lại sau nhé.', sessionId };
+        }
+      }
+    }
+
+    // If user asked for new recommendation (original flow)
+    if (recommendIntentRe.test(lowerMsg) || quickSuggestKeywords.test(lowerMsg) || slotHints.occasion || slotHints.style || (slotHints.productHints && slotHints.productHints.length)) {
+      try {
+        const rec = await exports.generateOutfitRecommendation(userId, null, null, {
+          sessionId,
+          message,
+          maxOutfits: opts?.maxOutfits || 3
+        });
+
+        if (!rec) {
+          console.error('[aiService.handleGeneralMessage] generateOutfitRecommendation returned empty');
+          return { reply: 'Mình đang tạm thời không thể gợi ý được. Thử lại sau nhé!', outfits: [], sessionId };
+        }
+
+        if (rec.ask) {
+          const askText = rec.ask;
+          if (sessionId) {
+            try {
+              await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, askText]);
+              await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+            } catch (e) {
+              console.error('[aiService.handleGeneralMessage] persist ask failed', e && e.stack ? e.stack : e);
+            }
+          }
+          return { ask: askText, outfits: Array.isArray(rec.outfits) ? rec.outfits : [], sessionId };
+        }
+
+        const outfitsArr = Array.isArray(rec.outfits) ? rec.outfits : [];
+        const replyText = rec.reply || rec.message || (outfitsArr.length ? `Mình đã gợi ý ${outfitsArr.length} set cho bạn.` : 'Mình chưa tìm được set phù hợp, bạn muốn mình thử phong cách khác không?');
+
+        if (sessionId && replyText) {
+          try {
+            await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, replyText]);
+            await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+          } catch (e) {
+            console.error('[aiService.handleGeneralMessage] persist reply failed', e && e.stack ? e.stack : e);
+          }
+        }
+
+        return { reply: replyText, outfits: outfitsArr, sessionId };
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] delegate to generateOutfitRecommendation failed', e && e.stack ? e.stack : e);
+      }
+    }
+
+    // If nothing matched, fallback reply
+    return { reply: 'Mình chưa hiểu ý bạn lắm. Bạn muốn mình gợi ý outfit hay hỏi về sản phẩm trong gợi ý trước đó?', outfits: [], sessionId };
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch(e){/*ignore*/ }
     console.error('[aiService.handleGeneralMessage] uncaught error', err && err.stack ? err.stack : err);
     return { reply: 'Mình đang bận thử đồ, thử lại sau nhé!', outfits: [], sessionId: opts?.sessionId || null };
   } finally {
     try { client.release(); } catch (e) { /* ignore */ }
+  }
+};
+
+// --- NEW helper: normalize items to prefer Top+Bottom, avoid same-category duplicates ---
+const normalizeOutfitItemsGlobal = (items = [], namesByVariant = {}, maxItems = 4) => {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  // map vid -> lowercased category name
+  const catByVid = {};
+  for (const vid of items) {
+    const info = namesByVariant[String(vid)] || {};
+    catByVid[vid] = (info.category_name || info.category || '').toString().toLowerCase();
+  }
+
+  const isTopCat = (c) => /áo|top|shirt|tee|blouse|sleeve|t-shirt|jaket|jacket/i.test(c);
+  const isBottomCat = (c) => /quần|pants|jean|short|skirt|legging|bottom|trousers/i.test(c);
+
+  // pick one top + one bottom if present
+  let topVid = null, bottomVid = null;
+  for (const vid of items) {
+    const c = catByVid[vid] || '';
+    if (!topVid && isTopCat(c)) topVid = vid;
+    if (!bottomVid && isBottomCat(c)) bottomVid = vid;
+    if (topVid && bottomVid) break;
+  }
+
+  const seenCats = new Set();
+  const out = [];
+  if (topVid) { seenCats.add(catByVid[topVid]); out.push(topVid); }
+  if (bottomVid && bottomVid !== topVid) { seenCats.add(catByVid[bottomVid]); out.push(bottomVid); }
+
+  // fill remaining with unique categories preserving original order
+  for (const vid of items) {
+    if (out.length >= maxItems) break;
+    const c = catByVid[vid] || '';
+    if (!c) {
+      if (!out.includes(vid)) out.push(vid);
+      continue;
+    }
+    if (seenCats.has(c)) continue;
+    out.push(vid);
+    seenCats.add(c);
+  }
+
+  // if result is still only bottoms (no top) but a top exists in original product pool, prefer a top if available
+  if (out.length > 0) {
+    const hasTop = out.some(v => isTopCat(catByVid[v]));
+    if (!hasTop) {
+      for (const vid of items) {
+        if (isTopCat(catByVid[vid]) && !out.includes(vid)) {
+          out.unshift(vid);
+          // dedupe categories keeping maxItems
+          while (out.length > maxItems) out.pop();
+          break;
+        }
+      }
+    }
+  }
+
+  return out.length ? out : [items[0]];
+};
+
+// --- ADDED HELPERS: resolve stored recommendation + variant helpers ---
+exports.getLastRecommendationForUser = async (userId) => {
+  if (!userId) return null;
+  const client = await pool.connect();
+  try {
+    // include context so callers can reuse occasion/weather without extra queries
+    const q = await client.query(
+      `SELECT id, items, context, created_at FROM ai_recommendations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [userId]
+    );
+    return q.rowCount ? q.rows[0] : null;
+  } finally {
+    client.release();
+  }
+};
+
+const checkVariantAvailability = async (variantId) => {
+  if (!variantId) return null;
+  const client = await pool.connect();
+  try {
+    const q = await client.query(
+      `SELECT pv.id, pv.stock_qty, pv.sizes, pv.sku, pv.product_id FROM product_variants pv WHERE pv.id = $1 LIMIT 1`,
+      [variantId]
+    );
+    return q.rowCount ? q.rows[0] : null;
+  } finally {
+    client.release();
+  }
+};
+
+const getVariantColorsByVariant = async (variantId) => {
+  if (!variantId) return [];
+  const client = await pool.connect();
+  try {
+    const pQ = await client.query(`SELECT product_id FROM product_variants WHERE id = $1 LIMIT 1`, [variantId]);
+    if (pQ.rowCount === 0) return [];
+    const productId = pQ.rows[0].product_id;
+    const q = await client.query(`SELECT id AS variant_id, color_name, sizes, stock_qty FROM product_variants WHERE product_id = $1 ORDER BY id`, [productId]);
+    return q.rows;
+  } finally {
+    client.release();
   }
 };

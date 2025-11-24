@@ -60,8 +60,8 @@ exports.handleChat = async (req, res) => {
           console.error('[aiRecommendationController.handleChat] handleOutfitSelection returned empty');
           return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
         }
-        if (sel.ask) return res.json({ success: true, ask: sel.ask, selected: sel.selected || null, sessionId: sel.sessionId || session_id || null });
-        return res.json({ success: true, message: sel.reply || '', selected: sel.selected || null, sessionId: sel.sessionId || session_id || null });
+        if (sel.ask) return res.json({ success: true, ask: sel.ask, selected: sel.selected || null, sessionId: sel.sessionId || null });
+        return res.json({ success: true, message: sel.reply || '', selected: sel.selected || null, sessionId: sel.sessionId || null });
       } catch (err) {
         console.error('[aiRecommendationController.handleChat] handleOutfitSelection error', err && err.stack ? err.stack : err);
         return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
@@ -70,30 +70,65 @@ exports.handleChat = async (req, res) => {
 
     if (intent.type === 'more') {
       try {
-        const moreRes = await aiService.generateOutfitRecommendation(userId, occasion, weather, {
+        // Load last recommendation (use service helper) and reuse its context (occasion/weather)
+        const lastRec = typeof aiService.getLastRecommendationForUser === 'function' ? await aiService.getLastRecommendationForUser(userId) : null;
+        const excludeVariantIds = [];
+        if (lastRec && lastRec.items) {
+          try {
+            const parsed = typeof lastRec.items === 'object' ? lastRec.items : JSON.parse(lastRec.items || '{}');
+            const outfits = parsed && parsed.outfits ? parsed.outfits : [];
+            for (const o of outfits) {
+              if (!Array.isArray(o.items)) continue;
+              for (const it of o.items) {
+                if (typeof it === 'string' && it.trim()) excludeVariantIds.push(String(it));
+                else if (it && typeof it === 'object') {
+                  if (it.variant_id) excludeVariantIds.push(String(it.variant_id));
+                  else if (it.id) excludeVariantIds.push(String(it.id));
+                }
+              }
+            }
+          } catch (e) { /* ignore parse errors, fallback to empty exclude list */ }
+        }
+
+        // Extract context (occasion/weather) from stored recommendation if available
+        let occasionFromContext = null;
+        let weatherFromContext = null;
+        if (lastRec && lastRec.context) {
+          try {
+            const ctx = typeof lastRec.context === 'string' ? JSON.parse(lastRec.context) : lastRec.context;
+            occasionFromContext = ctx && ctx.occasion ? ctx.occasion : null;
+            weatherFromContext = ctx && ctx.weather ? ctx.weather : null;
+          } catch (e) { /* ignore parse errors */ }
+        }
+
+        console.debug('[aiRecommendationController.more] reuse context', { occasionFromContext, weatherFromContext, excludeCount: excludeVariantIds.length });
+        // IMPORTANT: do NOT forward the "Thêm outfit..." user message to generator (may trigger parser to ask)
+        const moreRes = await aiService.generateOutfitRecommendation(userId, occasionFromContext, weatherFromContext, {
           productId: product_id,
           variantId: variant_id,
           sessionId: session_id || null,
-          message,
-          more: true
+          // message intentionally omitted to force reuse of stored context
+          more: true,
+          excludeVariantIds,
+          maxOutfits: 1
         });
-        if (!moreRes) {
-          console.error('[aiRecommendationController.handleChat] generateOutfitRecommendation returned empty (more)');
-          return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
-        }
-        if (moreRes.ask) return res.json({ success: true, ask: moreRes.ask });
-        return res.json({
-          success: true,
-          message: moreRes.reply || 'Mình đã tìm thêm vài set khác cho bạn.',
-          data: moreRes.outfits || [],
-          followUp: moreRes.followUp || null,
-          sessionId: moreRes.sessionId || session_id || null
-        });
-      } catch (err) {
-        console.error('[aiRecommendationController.handleChat] generateOutfitRecommendation (more) error', err && err.stack ? err.stack : err);
-        return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
-      }
-    }
+         if (!moreRes) {
+           console.error('[aiRecommendationController.handleChat] generateOutfitRecommendation returned empty (more)');
+           return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
+         }
+         if (moreRes.ask) return res.json({ success: true, ask: moreRes.ask });
+         return res.json({
+           success: true,
+           message: moreRes.reply || 'Mình đã tìm thêm vài set khác cho bạn.',
+           data: moreRes.outfits || [],
+           followUp: moreRes.followUp || null,
+           sessionId: moreRes.sessionId || null
+         });
+       } catch (err) {
+         console.error('[aiRecommendationController.handleChat] generateOutfitRecommendation (more) error', err && err.stack ? err.stack : err);
+         return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
+       }
+     }
 
     // default: general / contextual question
     try {
@@ -108,12 +143,12 @@ exports.handleChat = async (req, res) => {
         return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
       }
 
-      if (result.ask) return res.json({ success: true, ask: result.ask, sessionId: result.sessionId || session_id || null });
+      if (result.ask) return res.json({ success: true, ask: result.ask, sessionId: result.sessionId || null });
       return res.json({
         success: true,
         message: result.reply || '',
         data: result.outfits || null,
-        sessionId: result.sessionId || session_id || null
+        sessionId: result.sessionId || null
       });
     } catch (err) {
       console.error('[aiRecommendationController.handleChat] handleGeneralMessage error', err && err.stack ? err.stack : err);
