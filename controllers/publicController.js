@@ -85,6 +85,7 @@ exports.getProductsSimple = async (req, res, next) => {
         const supplier_id = req.query.supplier_id || null; // supplier == brand
         const min_price = req.query.min_price !== undefined ? Number(req.query.min_price) : undefined;
         const max_price = req.query.max_price !== undefined ? Number(req.query.max_price) : undefined;
+        const price_range = req.query.price_range || null;
         const is_flash_sale = req.query.is_flash_sale !== undefined ? (req.query.is_flash_sale === 'true' || req.query.is_flash_sale === '1') : undefined;
         const status = req.query.status || undefined;
         const page = req.query.page ? Number(req.query.page) : undefined;
@@ -99,10 +100,12 @@ exports.getProductsSimple = async (req, res, next) => {
             ...(supplier_id ? { supplier_id } : {}),
             ...(min_price !== undefined ? { min_price } : {}),
             ...(max_price !== undefined ? { max_price } : {}),
+            ...(price_range ? { price_range } : {}),
             ...(typeof is_flash_sale !== 'undefined' ? { is_flash_sale } : {}),
             ...(status ? { status } : {}),
             ...(page ? { page } : {})
         };
+        console.debug('[publicController.getProductsSimple] callArgs:', callArgs);
         const resp = await productService.getProducts(callArgs);
 
         // normalize both return shapes (array or { products,... })

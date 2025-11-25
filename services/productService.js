@@ -146,6 +146,7 @@ exports.getProducts = async function ({
     supplier_id,
     min_price,
     max_price,
+    price_range,
     is_flash_sale,
     status,
     page
@@ -199,6 +200,27 @@ exports.getProducts = async function ({
             where.push(`p.supplier_id = $${idx++}`);
             params.push(supplier_id);
         }
+
+        // parse price_range like "100000-200000" into min_price/max_price when neither min/max provided
+        if ((!min_price && !max_price) && typeof price_range === 'string') {
+            const m = price_range.trim().match(/^(\d+)\s*-\s*(\d+)$/);
+            if (m) {
+                min_price = Number(m[1]);
+                max_price = Number(m[2]);
+            }
+        }
+        // also support min_price passed as "100000-200000"
+        if (typeof min_price === 'string' && min_price.includes('-') && (max_price === undefined || max_price === null)) {
+            const m2 = String(min_price).trim().match(/^(\d+)\s*-\s*(\d+)$/);
+            if (m2) {
+                min_price = Number(m2[1]);
+                max_price = Number(m2[2]);
+            }
+        }
+        if (min_price !== undefined && min_price !== null) min_price = Number(min_price);
+        if (max_price !== undefined && max_price !== null) max_price = Number(max_price);
+        
+        console.debug('[productService.getProducts] parsed price_range ->', { min_price, max_price, price_range });
 
         if (typeof min_price !== 'undefined') {
             where.push(`p.final_price >= $${idx++}`);

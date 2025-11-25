@@ -33,3 +33,6 @@ module.exports = router;
 
 //http://localhost:3000/public/products?limit=10&category_id=c35916a1-387f-4ae8-85c9-0ca9eef95995
 //lấy theo cate con đây nhe, ceteid truyền vào là catecha á, có thể truyền cate con nữa nhe
+
+//http://localhost:3000/public/products?price_range=1000000-1200000&limit=20 -- có thể lấy range price như thé này 
+//http://localhost:3000/public/products?min_price=100000&max_price=200000&limit=20 -- hoặc lấy min max price như thế này
