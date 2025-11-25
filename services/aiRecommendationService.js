@@ -211,9 +211,18 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
     }
 
     // fetch user + measurements (sequential because needed)
-    const userQ = await client.query(`SELECT id, full_name, phone, height, weight, bust, waist, hip FROM users WHERE id = $1 LIMIT 1`, [userId]);
+    const userQ = await client.query(`SELECT id, full_name, phone, height, weight, bust, waist, hip, gender FROM users WHERE id = $1 LIMIT 1`, [userId]);
     const user = userQ.rows[0];
     if (!user) throw new Error("User not found");
+    // resolve gender after we have user profile (opts may include inferredGender)
+    const finalGender = opts.gender || opts.inferredGender || user.gender || null;
+    opts._resolvedGender = finalGender;
+    // detect accessories intent (from parsed rule or raw message)
+    const wantsAccessories = Boolean(opts.inferredWantsAccessories) || /\b(phụ kiện|túi|ví|kính|jewelry|vòng|dây chuyền|belt)\b/i.test(String(opts.message || ''));
+    if (wantsAccessories && !finalGender) {
+      // ask for gender before generating outfit with accessories
+      return { ask: 'Bạn là nam hay nữ để mình chọn phụ kiện phù hợp?' };
+    }
 
     // prepare products query (same as before)
     const prodSql = `
@@ -277,18 +286,40 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
     // load session history if provided (last N)
     const sessionHistory = await loadSessionHistory(client, opts.sessionId, 60);
 
-    // Build compactProducts as before
+    // Build compactProducts as before (after filteredProducts computed)
     const maxProductsForAI = 120;
     const excludedSet = new Set((opts.excludeVariantIds || []).map(v => String(v)));
     console.debug('[aiService] excludeVariantIds count:', excludedSet.size);
     console.debug('[aiService] total products fetched:', products.length);
-    const filteredProducts = products.filter(p => !excludedSet.has(String(p.variant_id)));
+    let filteredProducts = products.filter(p => !excludedSet.has(String(p.variant_id)));
     console.debug('[aiService] products after exclude filter:', filteredProducts.length);
-    // shuffle to avoid always picking same top N variants (Fisher-Yates)
-    for (let i = filteredProducts.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      const tmp = filteredProducts[i]; filteredProducts[i] = filteredProducts[j]; filteredProducts[j] = tmp;
+
+    // ensure keepVariantIds (items we must keep in new outfit) are present and prioritized
+    const keepSet = new Set((opts.keepVariantIds || []).map(v => String(v)));
+    if (keepSet.size > 0) {
+      // bring keep items to the front (if they exist in products)
+      const keepItems = [];
+      const rest = [];
+      const prodByVid = new Map(products.map(p => [String(p.variant_id), p]));
+      for (const vid of keepSet) {
+        if (prodByVid.has(vid)) {
+          keepItems.push(prodByVid.get(vid));
+        }
+      }
+      // remove any keepItems from filteredProducts to avoid duplicates, then unshift
+      filteredProducts = filteredProducts.filter(p => !keepSet.has(String(p.variant_id)));
+      if (keepItems.length) filteredProducts.unshift(...keepItems);
     }
+
+    // shuffle remaining (but keep preprended keepItems at start)
+    if (filteredProducts.length > 1) {
+      const startIdx = keepSet.size > 0 ? Math.min(keepSet.size, filteredProducts.length) : 0;
+      for (let i = filteredProducts.length - 1; i > startIdx; i--) {
+        const j = Math.floor(Math.random() * (i - startIdx + 1)) + startIdx;
+        const tmp = filteredProducts[i]; filteredProducts[i] = filteredProducts[j]; filteredProducts[j] = tmp;
+      }
+    }
+
     const compactProducts = filteredProducts.slice(0, maxProductsForAI).map(p => ({
        variant_id: String(p.variant_id),
        product_id: String(p.product_id),
@@ -376,9 +407,10 @@ Task: Gợi 1 outfit.`;
           weather,
           favorites: favorites.map(f => ({ id: f.id, name: f.name })),
           purchased: purchased.map(p => ({ id: p.id, name: p.name, variant_id: p.variant_id })),
-          size_guides: guidesByCategory, // may be large but helpful
+          size_guides: guidesByCategory,
           products: compactProducts,
-          max_outfits: opts.maxOutfits || 3
+          max_outfits: opts.maxOutfits || 3,
+         must_include: Array.isArray(opts.keepVariantIds) && opts.keepVariantIds.length ? opts.keepVariantIds : undefined
       }) }
     ];
 
@@ -475,21 +507,61 @@ Task: Gợi 1 outfit.`;
 
       if (sanitized.length > 0) {
         // Build a quick map from variant_id -> product info available in `products`
+        // include extra metadata (color, product description) so we can build canonical descriptions
         const namesByVariant = {};
         for (const p of products) {
           namesByVariant[String(p.variant_id)] = {
             name: p.name,
             category_id: p.category_id,
-            category_name: (p.category_name || p.category || '').toString()
+            category_name: (p.category_name || p.category || '').toString(),
+            color: (p.color_name || p.color || '') || null,
+            product_description: (p.description || '') || null
           };
         }
-
+ 
         // Use global normalizer (server-side enforcement)
         for (const out of sanitized) {
           out.items = normalizeOutfitItemsGlobal(out.items, namesByVariant, 4);
         }
         const limitedSanitized = sanitized.slice(0, opts.maxOutfits || 3); // server returns 1 outfit
-
+ 
+        // --- NEW: build canonical descriptions from DB metadata to avoid LLM hallucination ---
+        for (const out of limitedSanitized) {
+          // create readable fragment per item
+          const fragments = out.items.map((vid) => {
+            const info = namesByVariant[String(vid)] || {};
+            const nm = info.name || vid;
+            const colorPart = info.color ? (`màu ${info.color}`) : '';
+            return `${nm}${colorPart ? ' (' + colorPart + ')' : ''}`;
+          });
+ 
+          // prefer first two items (top + bottom) when composing description
+          const main = fragments[0] || '';
+          const secondary = fragments[1] ? `kết hợp với ${fragments[1]}` : '';
+          const weatherPhrase = weather || 'thời tiết hiện tại';
+          const why = out.why || `Phù hợp cho ${occasion || 'nhiều dịp'} và ${weatherPhrase}.`;
+ 
+          // canonical description: 3 short sentences + CTA
+          const canonicalDesc = [
+            `${main} ${secondary}`.trim() + '.',
+            (namesByVariant[String(out.items[0])] && namesByVariant[String(out.items[0])].product_description) ? (`${String(namesByVariant[String(out.items[0])].product_description).split('.').slice(0,1).join('.').trim()}.`) : `Chất liệu thoáng mát và dễ chịu.`,
+            `Phối thêm phụ kiện nhỏ như túi xách hoặc giày phù hợp để hoàn thiện set.`,
+            `Bạn muốn mình chọn size phù hợp không?`
+          ].filter(Boolean).join(' ');
+ 
+          // if AI's description seems to mismatch (e.g., mentions "áo" nhưng mapped variant là quần), log it and override
+          const aiHas = (out.description || '').toLowerCase();
+          const mappedCats = (out.items || []).map(v => (namesByVariant[String(v)]?.category_name || '').toLowerCase()).join('|');
+          const mismatch = (aiHas.includes('áo') && mappedCats.includes('quần')) || (aiHas.includes('quần') && mappedCats.includes('áo')) || false;
+           // Server authoritative: prefer canonical DB-based description to avoid hallucination.
+          // Keep AI-provided `why` but replace description with canonical wording built from DB metadata.
+          if (mismatch) {
+            console.warn('[aiService] AI description mismatch detected — overriding with canonical description', { outfitName: out.name, mappedCats, aiDescriptionSample: (out.description||'').slice(0,120) });
+          }
+          out.description = canonicalDesc;
+        }
+        // --- END canonical description generation ---
+ 
         // --- ADDED: compute size suggestions and assistantTextWithSizes to avoid undefined variable ---
         // Decide whether we should compute size suggestions:
         // Only compute if user provided measurements in profile OR explicitly requested size advice.
@@ -627,7 +699,7 @@ Task: Gợi 1 outfit.`;
       const normalizedItems = normalizeOutfitItemsGlobal(items, namesById, 4);
 
       const title = namesById[normalizedizedItems[0]] ? `${namesById[normalizedizedItems[0]].category_name || 'Outfit'}: ${namesById[normalizedizedItems[0]].product_name}` : `Outfit ${i+1}`;
-      const descParts = normalizedItems.map(id => {
+      const descParts = normalizedizedItems.map(id => {
         const n = namesById[id];
         if (!n) return id;
         return `${n.product_name}${n.color_name ? ' ('+n.color_name+')' : ''}`;
@@ -991,19 +1063,57 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
         try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; }
       }
       const outfits = (recJson && recJson.outfits) ? recJson.outfits : [];
-      const idxMatch = String(msg).match(/(?:thứ\s*)?(\d+)|(?:bộ|outfit|chọn)\s*(\d+)/i);
+
+      // if user said "outfit 2" or "bộ 1" -> prefer the outfit by index
+      const idxMatch = String(msg).match(/(?:bộ|outfit|thứ)\s*(\d+)/i) || String(msg).match(/(?:^|\s)(\d+)\s*(?:$|$)/);
       if (idxMatch) {
-        const n = Number(idxMatch[1] || idxMatch[2]);
-        if (!Number.isNaN(n) && outfits[n - 1]) return outfits[n - 1].items && outfits[n - 1].items[0];
+        const n = Number(idxMatch[1]);
+        if (!Number.isNaN(n) && outfits[n - 1]) {
+          // return whole outfit's first item as fallback (caller may interpret this)
+          return Array.isArray(outfits[n - 1].items) && outfits[n - 1].items[0] ? outfits[n - 1].items[0] : null;
+        }
       }
+
       const token = String(msg || '').toLowerCase();
+      const wantTop = /\b(áo|shirt|top|blouse|sơ mi|áo len|áo khoác)\b/i.test(token);
+      const wantBottom = /\b(quần|pants|jean|short|skirt|chân váy|kaki|trousers)\b/i.test(token);
+
+      // helper: try to pick correct variant inside an outfit by inspecting `meta` (product_name/category)
+      const pickFromMeta = (o, matchTop, matchBottom) => {
+        if (!o || !Array.isArray(o.items)) return null;
+        // if meta present and aligns with items
+        const meta = Array.isArray(o.meta) ? o.meta : null;
+        if (meta && meta.length === o.items.length) {
+          for (let i = 0; i < meta.length; i++) {
+            const m = meta[i] || {};
+            const pname = (m.product_name || '').toLowerCase();
+            const cat = (m.category_name || '').toLowerCase();
+            if (matchTop && (pname.includes('áo') || /top|shirt|blouse|t-shirt/.test(cat))) return o.items[i];
+            if (matchBottom && (pname.includes('quần') || /quần|pants|jean|skirt|bottom|trousers/.test(cat))) return o.items[i];
+          }
+        }
+        // fallback: inspect name/description text if available on outfit
+        const name = String(o.name || '').toLowerCase();
+        const desc = String(o.description || '').toLowerCase();
+        if (matchTop && (name.includes('áo') || desc.includes('áo'))) return o.items[0];
+        if (matchBottom && (name.includes('quần') || desc.includes('quần'))) return o.items[0];
+        return null;
+      };
+
+      // try to find a variant matching requested piece
       for (const o of outfits) {
-        const name = (o.name || '').toLowerCase();
-        const desc = (o.description || '').toLowerCase();
-        if (token.includes('áo') && (name.includes('áo') || desc.includes('áo'))) return o.items && o.items[0];
-        if (token.includes('quần') && (name.includes('quần') || desc.includes('quần'))) return o.items && o.items[0];
+        if (wantTop) {
+          const v = pickFromMeta(o, true, false);
+          if (v) return v;
+        }
+        if (wantBottom) {
+          const v = pickFromMeta(o, false, true);
+          if (v) return v;
+        }
       }
-      if (outfits.length === 1 && outfits[0].items && outfits[0].items[0]) return outfits[0].items[0];
+
+      // if single outfit, return its items[0] as last resort
+      if (outfits.length === 1 && Array.isArray(outfits[0].items) && outfits[0].items[0]) return outfits[0].items[0];
       return null;
     };
 
@@ -1014,7 +1124,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
     const slotHints = (typeof extractSlotsFromMessage === 'function') ? extractSlotsFromMessage(message || '') : {};
 
     // follow-up intents
-    const showMoreIntent = /\b(xem thêm|thêm (?:1|một)? (?:outfit|bộ|set)|thêm giúp|thêm nữa)\b/i;
+     const showMoreIntent = /\b(xem thêm|thêm (?:1|một)? (?:outfit|bộ|set)|thêm giúp|thêm nữa|mình muốn (?:1|một)? (?:outfit|bộ) khác|muốn (?:1|một)? (?:outfit|bộ) khác|outfit khác|bộ khác)? (?:có)\b/i;
     const colorIntent = /\b(màu|màu gì|màu nào)\b/i;
     const sizeIntent = /\b(size|cỡ|kích cỡ|chiều cao|cân nặng|tư vấn size)\b/i;
 
@@ -1054,7 +1164,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
           const ctx = typeof last.context === 'string' ? JSON.parse(last.context) : last.context;
           occasionFromContext = ctx && ctx.occasion ? ctx.occasion : null;
           weatherFromContext = ctx && ctx.weather ? ctx.weather : null;
-        } catch (e) { /* ignore parse errors */ }
+        } catch (e) { /* ignore */ }
       }
 
       try {
@@ -1074,6 +1184,56 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       }
     }
 
+    // 1.5) change/dislike item intent (keep/replace specific item in last outfit)
+    const changeIntent = /\b(thay\s*đổi|đổi|không\s*thích|ko\s*thích|không\s*ưa|không\s*hợp|không thích mẫu|đổi cái)\b/i;
+    if (changeIntent.test(lowerMsg)) {
+      if (!lastRec) return { ask: 'Bạn đang nói tới bộ outfit trước đó phải không? Mình cần biết bộ nào để đổi giúp bạn nhé.', sessionId };
+      const targetVariant = resolveRefFromLastRecommendation(lastRec, message);
+      if (!targetVariant) return { ask: 'Bạn có thể nói rõ "cái áo đó" hoặc "outfit 2" để mình biết đổi món nào không?', sessionId };
+
+      // find outfit that contains targetVariant (fallback to first outfit)
+      let recJson = lastRec.items;
+      if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch(e) { recJson = null; } }
+      const outfits = recJson && recJson.outfits ? recJson.outfits : [];
+      let outfit = outfits.find(o => Array.isArray(o.items) && o.items.includes(targetVariant));
+      if (!outfit && outfits.length === 1) outfit = outfits[0];
+
+      const keepIds = Array.isArray(outfit?.items) ? outfit.items.filter(i => String(i) !== String(targetVariant)) : [];
+      const removeIds = [String(targetVariant)];
+
+      // reuse context if available
+      let occasionFromContext = null, weatherFromContext = null;
+      if (lastRec && lastRec.context) {
+        try {
+          const ctx = typeof lastRec.context === 'string' ? JSON.parse(lastRec.context) : lastRec.context;
+          occasionFromContext = ctx && ctx.occasion ? ctx.occasion : null;
+          weatherFromContext = ctx && ctx.weather ? ctx.weather : null;
+        } catch (e) { /* ignore */ }
+      }
+
+      try {
+        const rec = await exports.generateOutfitRecommendation(
+          userId,
+          occasionFromContext,
+          weatherFromContext,
+          {
+            sessionId: sessionId,
+            // message intentionally omitted to force reuse of stored context
+            maxOutfits: 1,
+            excludeVariantIds: removeIds,
+            keepVariantIds: keepIds,
+            more: true
+          }
+        );
+        if (!rec) return { reply: 'Mình chưa tìm được món thay thế ngay, thử lại nhé!', sessionId };
+        if (rec.ask) return { ask: rec.ask, sessionId };
+        return { reply: rec.reply || rec.message || 'Mình gợi ý 1 set khác cho bạn.', outfits: rec.outfits || [], sessionId };
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] change-item flow failed', e && e.stack ? e.stack : e);
+        return { reply: 'Mình không tìm được món thay thế ngay giờ, thử lại sau nhé!', sessionId };
+      }
+    }
+ 
     // 2) stock/color/size follow-ups referencing last recommendation
     if (stockIntentRe.test(lowerMsg) || colorIntent.test(lowerMsg) || sizeIntent.test(lowerMsg)) {
       const refVariant = resolveRefFromLastRecommendation(lastRec, message);
@@ -1174,6 +1334,46 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       }
     }
 
+    // Replace/adjust follow-up handling for stock/size/color intents
+    // (insert into the place that handles resolvedRef and size/stock/color intents)
+    {
+      // ...existing code...
+      // e.g. const targetVariantId = resolveRefFromLastRecommendation(lastRec, message) || variantHintFromMsg;
+
+      if (targetVariantId) {
+        // Handle "size / availability" question
+        if (sizeIntentRe.test(lowerMsg) || /\b(size|size|cỡ|M|L|XL|S)\b/i.test(message)) {
+          const info = await checkVariantAvailability(targetVariantId);
+          if (!info) return { reply: 'Mình không tìm thấy sản phẩm đó nữa.' };
+          // only respond with product name + availability for requested size (no numeric stock)
+          const sizeRequestedMatch = message.match(/\b(size|size|cỡ|M|L|XL|S)\b/i);
+          const sizeLabel = sizeRequestedMatch ? sizeRequestedMatch[0] : info.size;
+          const availabilityText = info.available ? 'còn hàng' : 'hết hàng';
+          const reply = `${info.product_name || 'Sản phẩm'} — size ${sizeLabel}: ${availabilityText}.`;
+          // optionally persist assistant message, return structured minimal data (no counts)
+          return { reply, selected: { product_id: info.product_id, variant_id: info.variant_id } };
+        }
+
+        // Handle "color preference / list colors" user utterance
+        if (colorIntentRe.test(lowerMsg) || /màu|color|đỏ|đen|xanh|kem|trắng/i.test(message)) {
+          // list COLORS only for same product_id
+          const colors = await getVariantColorsByVariant(targetVariantId);
+          if (!colors || colors.length === 0) return { reply: 'Mình không tìm thấy màu nào cho sản phẩm đó.' };
+          // Build human-friendly list: "Đen (còn hàng), Kem (hết hàng)."
+          const parts = [];
+          const productName = (await (async () => {
+            const c = await checkVariantAvailability(targetVariantId);
+            return c ? c.product_name : null;
+          })()) || 'Sản phẩm';
+          for (const c of colors) {
+            parts.push(`${c.color}${c.available ? ' (còn hàng)' : ' (hết hàng)'}`);
+          }
+          const reply = `Sản phẩm ${productName} có các màu: ${parts.join(', ')}.`;
+          return { reply, selected: { product_id: colors[0].product_id || null } };
+        }
+      }
+    }
+
     // If nothing matched, fallback reply
     return { reply: 'Mình chưa hiểu ý bạn lắm. Bạn muốn mình gợi ý outfit hay hỏi về sản phẩm trong gợi ý trước đó?', outfits: [], sessionId };
   } catch (err) {
@@ -1259,28 +1459,97 @@ exports.getLastRecommendationForUser = async (userId) => {
 };
 
 const checkVariantAvailability = async (variantId) => {
-  if (!variantId) return null;
   const client = await pool.connect();
   try {
     const q = await client.query(
-      `SELECT pv.id, pv.stock_qty, pv.sizes, pv.sku, pv.product_id FROM product_variants pv WHERE pv.id = $1 LIMIT 1`,
+      `SELECT pv.variant_id, pv.product_id, pv.sku, pv.color_name, pv.size_name, pv.stock_qty, p.name as product_name
+       FROM product_variants pv
+       JOIN products p ON pv.product_id = p.id
+       WHERE pv.variant_id = $1 LIMIT 1`,
       [variantId]
     );
-    return q.rowCount ? q.rows[0] : null;
+    if (!q.rowCount) return null;
+    const r = q.rows[0];
+    // Do NOT expose stock_qty in user-facing text. Keep it internal boolean.
+    return {
+      variant_id: String(r.variant_id),
+      product_id: String(r.product_id),
+      product_name: r.product_name || null,
+      color: r.color_name || null,
+      size: r.size_name || null,
+      available: (typeof r.stock_qty === 'number' && r.stock_qty > 0) ? true : false,
+      // internal: keep raw stock for debug only (do not include in replies)
+      _stock_qty_internal: r.stock_qty
+    };
   } finally {
     client.release();
   }
 };
 
 const getVariantColorsByVariant = async (variantId) => {
-  if (!variantId) return [];
   const client = await pool.connect();
   try {
-    const pQ = await client.query(`SELECT product_id FROM product_variants WHERE id = $1 LIMIT 1`, [variantId]);
-    if (pQ.rowCount === 0) return [];
-    const productId = pQ.rows[0].product_id;
-    const q = await client.query(`SELECT id AS variant_id, color_name, sizes, stock_qty FROM product_variants WHERE product_id = $1 ORDER BY id`, [productId]);
-    return q.rows;
+    // first find product_id for the variant (defensive)
+    const vq = await client.query(
+      `SELECT product_id FROM product_variants WHERE variant_id = $1 LIMIT 1`,
+      [variantId]
+    );
+    if (!vq.rowCount) return [];
+    const productId = vq.rows[0].product_id;
+    const q = await client.query(
+      `SELECT variant_id, color_name, size_name, stock_qty
+       FROM product_variants
+       WHERE product_id = $1
+       ORDER BY color_name NULLS LAST, size_name NULLS LAST`,
+      [productId]
+    );
+    return q.rows.map(r => ({
+      variant_id: String(r.variant_id),
+      color: r.color_name,
+      size: r.size_name,
+      available: (typeof r.stock_qty === 'number' && r.stock_qty > 0) ? true : false,
+      _stock_qty_internal: r.stock_qty
+    }));
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Suggest accessories (bags, wallets, jewelry, hats...) for user/occasion/gender.
+ * opts: { gender, occasion, max = 6, colorPreference }
+ * Returns: [{ variant_id, product_id, name, color, available, url }]
+ */
+exports.suggestAccessories = async (userId, opts = {}) => {
+  const client = await pool.connect();
+  try {
+    const max = parseInt(opts.max || 6, 10);
+    // basic category list for accessories - adjust to your categories table values
+    const accessoryCategoryIds = opts.categoryIds || ['bags','wallets','accessories','jewelry','hats']; // replace with real slugs/ids if needed
+    // prefer gendered accessories if gender provided
+    const genderFilter = opts.gender ? `AND (p.target_gender IS NULL OR p.target_gender = $2)` : '';
+    const params = [userId];
+    if (opts.gender) params.push(opts.gender);
+    // simple query: pick active products in accessory categories with stock > 0
+    const q = await client.query(
+      `SELECT pv.variant_id, pv.product_id, p.name, pv.color_name, pv.stock_qty, p.url
+       FROM product_variants pv
+       JOIN products p ON pv.product_id = p.id
+       WHERE p.status = 'active'
+         AND (p.category_slug = ANY($3::text[])) 
+         AND pv.stock_qty > 0
+       ORDER BY p.popularity DESC NULLS LAST, pv.stock_qty DESC
+       LIMIT $1`,
+      [max, ...(opts.gender ? [opts.gender] : []), accessoryCategoryIds]
+    );
+    return q.rows.map(r => ({
+      variant_id: String(r.variant_id),
+      product_id: String(r.product_id),
+      name: r.name,
+      color: r.color_name,
+      available: (typeof r.stock_qty === 'number' && r.stock_qty > 0),
+      url: r.url || null
+    }));
   } finally {
     client.release();
   }

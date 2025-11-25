@@ -74,6 +74,7 @@ exports.getCart = async (userId) => {
                 p.is_flash_sale,
                 p.final_price,
                 s.name AS supplier_name
+                (SELECT pi.url FROM product_images pi WHERE pi.variant_id = pv.id ORDER BY COALESCE(pi.is_primary, false) DESC, pi.id LIMIT 1) AS image_url
             FROM cart_items ci
             LEFT JOIN product_variants pv ON ci.variant_id = pv.id
             LEFT JOIN products p ON p.id = pv.product_id
@@ -110,6 +111,7 @@ exports.getCart = async (userId) => {
                 qty: qty,
                 unit_price: unitPriceSnapshot,
                 line_total: lineTotal,
+                image_url: r.image_url,
 
                 //flash sale / sale info
                 is_flash_sale: isFlash,

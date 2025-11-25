@@ -44,7 +44,7 @@ exports.createOrder = async (userId, orderData) => {
     }
     const items = Array.from(mergedMap.values());
 
-    // fetch variant + product info for all variants in one query
+    // fetch variant + product info for all variants in one query (FOR UPDATE to lock stock)
     const variantIds = items.map(i => i.variant_id);
     const { rows: variantRows } = await client.query(
       `SELECT pv.id AS variant_id, pv.product_id, pv.stock_qty, pv.sold_qty,
@@ -80,27 +80,92 @@ exports.createOrder = async (userId, orderData) => {
         name_snapshot: v.product_name,
         color_snapshot: null,
         size_snapshot: it.size || null,
-        final_price: lineTotal
+        final_price: lineTotal, // will be reduced if promo applies
+        promo_applied: false,
+        promo_discount: 0
       });
     }
 
-    // compute discount / shipping (simple/default)
-    const discount = Number(orderData.discount_amount || 0);
+    // promotion handling (preview + allocation)
+    let discount = 0;
+    let appliedPromotion = null;
     const shipping_fee = Number(orderData.shipping_fee ?? 30000);
-    const final_amount = round2(Math.max(0, subtotal - discount) + shipping_fee);
 
-    // insert order
+    if (orderData.promotion_code) {
+      // prepare items shape expected by preview function
+      const itemsForPromo = orderItemsData.map((oi) => ({
+        variant_id: oi.variant_id,
+        product_id: oi.product_id,
+        qty: oi.qty,
+        unit_price: oi.unit_price,
+        line_base: round2(Number(oi.final_price)),
+        size: oi.size_snapshot || null
+      }));
+
+      const preview = await promotionService.getPreviewPromotionApplication({
+        userId,
+        items: itemsForPromo,
+        shipping_fee,
+        promotion_code: String(orderData.promotion_code).trim()
+      });
+
+      if (!preview || preview.valid !== true) {
+        const e = new Error(preview?.reason || 'Promotion not applicable or invalid');
+        e.status = 400;
+        throw e;
+      }
+
+      // map breakdown discounts to variant_id::size keys
+      const discMap = new Map();
+      for (const b of preview.discount_breakdown || []) {
+        const key = `${b.variant_id}::${b.size ?? ''}`;
+        discMap.set(key, Number(b.discount || 0));
+      }
+
+      // apply per-item discount and mark promo_applied
+      let allocatedTotal = 0;
+      for (const oi of orderItemsData) {
+        const key = `${oi.variant_id}::${oi.size_snapshot ?? ''}`;
+        const d = round2(discMap.get(key) || 0);
+        if (d > 0) {
+          oi.final_price = round2(Math.max(0, Number(oi.final_price) - d));
+          oi.promo_applied = true;
+          oi.promo_discount = d;
+          allocatedTotal += d;
+        }
+      }
+
+      discount = round2(Number(preview.discount || allocatedTotal || 0));
+      appliedPromotion = preview.promotion ? { id: preview.promotion.id, code: preview.promotion.code } : { code: String(orderData.promotion_code).trim() };
+
+      // protective: if preview reported discount but allocation sum mismatch, prefer preview.discount
+      if (Math.abs(discount - allocatedTotal) > 0.01) {
+        // adjust last eligible item to match preview.discount
+        const lastIdx = orderItemsData.length - 1;
+        const diff = round2(discount - allocatedTotal);
+        if (diff !== 0) {
+          orderItemsData[lastIdx].final_price = round2(orderItemsData[lastIdx].final_price - diff);
+          orderItemsData[lastIdx].promo_discount = round2((orderItemsData[lastIdx].promo_discount || 0) + diff);
+        }
+      }
+    }
+
+    // compute final amount
+    let final_amount = round2(subtotal - discount + Number(shipping_fee || 0));
+    if (final_amount < 0) final_amount = 0;
+
+    // insert order (use shipping_address_snapshot field)
     const orderInsert = await client.query(
       `INSERT INTO orders (user_id, total_amount, discount_amount, shipping_fee, final_amount, payment_status, order_status, shipping_address_snapshot, payment_method, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, 'unpaid', 'pending', $6, $7, NOW(), NOW())
        RETURNING id, created_at`,
       [
         userId,
-        subtotal,
-        discount,
-        shipping_fee,
+        round2(subtotal),
+        round2(discount),
+        Number(shipping_fee),
         final_amount,
-        orderData.shipping_address || null,
+        orderData.shipping_address_snapshot ? JSON.stringify(orderData.shipping_address_snapshot) : null,
         orderData.payment_method || null
       ]
     );
@@ -110,8 +175,8 @@ exports.createOrder = async (userId, orderData) => {
     for (const oi of orderItemsData) {
       await client.query(
         `INSERT INTO order_items (order_id, variant_id, qty, unit_price, name_snapshot, color_snapshot, size_snapshot, final_price, promo_applied)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false)`,
-        [orderId, oi.variant_id, oi.qty, oi.unit_price, oi.name_snapshot, oi.color_snapshot, oi.size_snapshot, oi.final_price]
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [orderId, oi.variant_id, oi.qty, oi.unit_price, oi.name_snapshot, oi.color_snapshot, oi.size_snapshot, oi.final_price, oi.promo_applied]
       );
 
       // update stock_qty and sold_qty
@@ -123,6 +188,31 @@ exports.createOrder = async (userId, orderData) => {
          WHERE id = $2`,
         [oi.qty, oi.variant_id]
       );
+    }
+
+    // If promotion applied, increment used_count and insert user_promotion 'used' record (in same transaction)
+    if (appliedPromotion && appliedPromotion.id) {
+      // lock promotion row and update used_count (prevent race)
+      const pQ = await client.query(`SELECT id, used_count, usage_limit FROM promotions WHERE id = $1 FOR UPDATE`, [appliedPromotion.id]);
+      if (pQ.rowCount) {
+        const promoRow = pQ.rows[0];
+        if (promoRow.usage_limit != null && (Number(promoRow.used_count || 0) + 1) > Number(promoRow.usage_limit)) {
+          throw Object.assign(new Error('Promotion usage limit exceeded'), { status: 400 });
+        }
+        await client.query(`UPDATE promotions SET used_count = COALESCE(used_count,0) + 1 WHERE id = $1`, [appliedPromotion.id]);
+
+        // record user usage (audit)
+        try {
+          await client.query(
+            `INSERT INTO user_promotions (id, user_id, promotion_id, action, code, created_at)
+             VALUES (public.uuid_generate_v4(), $1, $2, 'used', $3, NOW())`,
+            [userId, appliedPromotion.id, appliedPromotion.code || null]
+          );
+        } catch (e) {
+          // best-effort: don't fail entire order if user_promotion insert conflicts
+          console.error('[createOrder] user_promotions insert failed', e && e.stack ? e.stack : e);
+        }
+      }
     }
 
     // clear user's cart (best-effort)
@@ -139,14 +229,22 @@ exports.createOrder = async (userId, orderData) => {
 
     await client.query('COMMIT');
 
-    // return basic order summary
+    // return basic order summary (include per-item promo_discount for client)
     return {
       id: orderId,
-      total_amount: subtotal,
-      discount_amount: discount,
-      shipping_fee,
+      total_amount: round2(subtotal),
+      discount_amount: round2(discount),
+      shipping_fee: Number(shipping_fee),
       final_amount,
-      items: orderItemsData
+      items: orderItemsData.map(it => ({
+        variant_id: it.variant_id,
+        qty: it.qty,
+        size: it.size_snapshot,
+        unit_price: it.unit_price,
+        final_price: it.final_price,
+        promo_applied: it.promo_applied,
+        promo_discount: round2(it.promo_discount || 0)
+      }))
     };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});

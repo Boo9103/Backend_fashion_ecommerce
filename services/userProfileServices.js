@@ -358,6 +358,7 @@ exports.updateUserMeasurement = async (userId, data = {}) => {
                 data.bust || null,
                 data.waist || null,
                 data.hip || null,
+                data.gender || null,
                 userId
             ]);
         await client.query('COMMIT');
@@ -378,7 +379,7 @@ exports.getUserMeasurement = async (userId) => {
     const client = await pool.connect();
     try {
         const q = `
-            SELECT height, weight, bust, waist, hip
+            SELECT height, weight, bust, waist, hip, gender
             FROM users
             WHERE id = $1
             LIMIT 1`;

@@ -151,8 +151,8 @@ exports.updateUserMeasurement = async (req, res, next) => {
         if (!userId) {
             return res.status(401).json({ message: 'Unauthorized' });
         }
-        const { height, weight, bust, waist, hip } = req.body;
-        const updated = await userService.updateUserMeasurement(userId, { height, weight, bust, waist, hip });
+        const { height, weight, bust, waist, hip, gender } = req.body;
+        const updated = await userService.updateUserMeasurement(userId, { height, weight, bust, waist, hip, gender });
         return res.status(200).json({ message: 'User measurements updated successfully', measurement: updated });
     } catch (error) {
         next(error);
