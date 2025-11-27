@@ -36,3 +36,6 @@ module.exports = router;
 
 //http://localhost:3000/public/products?price_range=1000000-1200000&limit=20 -- có thể lấy range price như thé này 
 //http://localhost:3000/public/products?min_price=100000&max_price=200000&limit=20 -- hoặc lấy min max price như thế này
+
+//http://localhost:3000/public/products?sort_by=price&order=asc&limit=20 lọc theo price tăng dần
+//http://localhost:3000/public/products?sort_by=price&order=desc&limit=20 lọc theo price giảm dần

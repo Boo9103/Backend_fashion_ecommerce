@@ -149,7 +149,8 @@ exports.getProducts = async function ({
     price_range,
     is_flash_sale,
     status,
-    page
+    page,
+    sort_by = 'sequence' // 'sequence' (default) or 'price'
 } = {}) {
     if (limit < 1 || limit > 100) throw new Error('Invalid limit (1-100)');
     if (!['asc', 'desc'].includes(order)) throw new Error('Invalid order (asc/desc)');
@@ -239,7 +240,8 @@ exports.getProducts = async function ({
 
         let sql = '';
         const limitPlus = Number(limit) + 1;
-        const orderBy = `p.sequence_id ${order === 'desc' ? 'DESC' : 'ASC'}`;
+        const orderKey = (sort_by === 'price') ? 'p.final_price' : 'p.sequence_id';
+        const orderBy = `${orderKey} ${order === 'desc' ? 'DESC' : 'ASC'}`;
 
         if (typeof cursor !== 'undefined' && cursor !== null) {
             const cmp = (order === 'asc') ? '>' : '<';
@@ -267,7 +269,8 @@ exports.getProducts = async function ({
 
         let nextCursor = null;
         if (products.length > 0) {
-            nextCursor = products[products.length - 1].sequence_id ?? null;
+            const lastKey = (sort_by === 'price') ? 'final_price' : 'sequence_id';
+            nextCursor = products[products.length - 1][lastKey] ?? null;
         }
 
         return {

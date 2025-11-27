@@ -52,6 +52,8 @@ exports.getProductsSimple = async (req, res, next) => {
         const limit = Math.max(1, Number(req.query.limit) || 40);
         const order = (req.query.order || 'asc').toString().toLowerCase();
 
+        let sort_by = (req.query.sort_by || req.query.sort || 'sequence_id').toString().toLowerCase();
+        if(!['sequence_id', 'price'].includes(sort_by)) sort_by = 'sequence_id';
         // parse cursor only if client provided it
         let cursorProvided = false;
         let cursor;
@@ -94,6 +96,7 @@ exports.getProductsSimple = async (req, res, next) => {
         const callArgs = {
             limit,
             order,
+            sort_by,
             ...(cursor !== undefined ? { cursor } : {}),
             ...(search_key ? { search_key } : {}),
             ...(category_id ? { category_id } : {}),
