@@ -349,8 +349,8 @@ exports.updateUserMeasurement = async (userId, data = {}) => {
     try {
         await client.query('BEGIN');
         const qRes = await client.query(`
-            UPDATE users SET height = $1, weight = $2, bust = $3, waist = $4, hip = $5, updated_at = NOW()
-            WHERE id = $6
+            UPDATE users SET height = $1, weight = $2, bust = $3, waist = $4, hip = $5, gender = $6, updated_at = NOW()
+            WHERE id = $7
             RETURNING height, weight, bust, waist, hip, updated_at`,
             [
                 data.height || null,
