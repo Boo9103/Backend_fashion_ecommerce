@@ -658,7 +658,8 @@ Task: Gợi 1 outfit.`;
 
         await client.query('COMMIT');
         txStarted = false;
-        return { 
+        return {
+          type: 'outfit_suggestions',
           reply: cleanReply, 
           outfits: limitedSanitized, 
           followUp, 
@@ -716,8 +717,8 @@ Task: Gợi 1 outfit.`;
       // normalize items server-side to tránh quần+quần sets
       const normalizedItems = normalizeOutfitItemsGlobal(items, namesById, 4);
 
-      const title = namesById[normalizedizedItems[0]] ? `${namesById[normalizedizedItems[0]].category_name || 'Outfit'}: ${namesById[normalizedizedItems[0]].product_name}` : `Outfit ${i+1}`;
-      const descParts = normalizedizedItems.map(id => {
+      const title = namesById[normalizedItems[0]] ? `${namesById[normalizedItems[0]].category_name || 'Outfit'}: ${namesById[normalizedItems[0]].product_name}` : `Outfit ${i+1}`;
+      const descParts = normalizedItems.map(id => {
         const n = namesById[id];
         if (!n) return id;
         return `${n.product_name}${n.color_name ? ' ('+n.color_name+')' : ''}`;
@@ -1154,7 +1155,12 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
           await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`, [sessionId, reply, JSON.stringify({ size_suggestions: suggestions })]);
           await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
         }
-        return { reply, sizeSuggestions: suggestions, sessionId };
+        return { 
+          type: 'size_suggestions',
+          reply, 
+          sizeSuggestions: suggestions, 
+          metadata: { size_suggestions: suggestions },
+          sessionId };
       }
 
       // 2) Show more outfit -> reuse last recommendation context and exclude previous variants
@@ -1310,7 +1316,8 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
     const showMoreIntent = /\b(xem thêm|thêm (?:1|một)? (?:outfit|bộ|set)|thêm giúp|thêm nữa|mình muốn (?:1|một)? (?:outfit|bộ) khác|muốn (?:1|một)? (?:outfit|bộ) khác|outfit khác|bộ khác)? (?:có)\b/i;
     const colorIntent = /\b(màu|màu gì|màu nào)\b/i;
     const sizeIntent = /\b(size|cỡ|kích cỡ|chiều cao|cân nặng|tư vấn size)\b/i;
-
+    const sizeIntentRe = sizeIntent;
+    const colorIntentRe = colorIntent;
     // 1) show more -> call generateOutfitRecommendation excluding previous variants
     if (showMoreIntent.test(lowerMsg)) {
       // try to reuse last recommendation's context so LLM won't ask for occasion/weather again
@@ -1539,7 +1546,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
     {
       // ...existing code...
       // e.g. const targetVariantId = resolveRefFromLastRecommendation(lastRec, message) || variantHintFromMsg;
-
+      const targetVariantId = (typeof resolveRefFromLastRecommendation === 'function') ? resolveRefFromLastRecommendation(lastRec, message) : null;
       if (targetVariantId) {
         // Handle "size / availability" question
         if (sizeIntentRe.test(lowerMsg) || /\b(size|size|cỡ|M|L|XL|S)\b/i.test(message)) {

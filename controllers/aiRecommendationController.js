@@ -146,8 +146,10 @@ exports.handleChat = async (req, res) => {
       if (result.ask) return res.json({ success: true, ask: result.ask, sessionId: result.sessionId || null });
       return res.json({
         success: true,
+        type: result.type || 'info',
         message: result.reply || '',
         data: result.outfits || null,
+        sizeSuggestions: result.sizeSuggestions || null,
         followUp: result.followUp || null, 
         sessionId: result.sessionId || null
       });
