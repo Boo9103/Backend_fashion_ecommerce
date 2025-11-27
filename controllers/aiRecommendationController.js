@@ -148,6 +148,7 @@ exports.handleChat = async (req, res) => {
         success: true,
         message: result.reply || '',
         data: result.outfits || null,
+        followUp: result.followUp || null, 
         sessionId: result.sessionId || null
       });
     } catch (err) {

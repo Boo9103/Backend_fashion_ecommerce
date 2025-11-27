@@ -560,11 +560,7 @@ Task: Gợi 1 outfit.`;
           }
           out.description = canonicalDesc;
         }
-        // --- END canonical description generation ---
- 
-        // --- ADDED: compute size suggestions and assistantTextWithSizes to avoid undefined variable ---
-        // Decide whether we should compute size suggestions:
-        // Only compute if user provided measurements in profile OR explicitly requested size advice.
+
         const wantsSizeExplicit = Boolean(opts.requestSize) || /\b(size|chọn size|tư vấn size|size phù hợp|kích cỡ)\b/i.test(String(opts.message || ''));
         // require BOTH height & weight as minimal measurements to provide size suggestions
         const userHasMeasurements = Boolean(user && user.height && user.weight);
@@ -603,7 +599,9 @@ Task: Gợi 1 outfit.`;
 
         // === TÁCH RIÊNG TEXT + FOLLOW-UP (UX chuẩn 10/10) ===
         let cleanReply = (assistantText && assistantText.trim()) || `Mình đã gợi ý ${limitedSanitized.length} set cho bạn.`;
-        if (userHasMeasurements && sizeHints.length > 0) {
+        // Nếu assistantText đã chứa cụm "gợi ý size" thì không append lại sizeHints
+        const assistantContainsSizeHint = Boolean(cleanReply && /\bgợi\s*ý\s*size\b/i.test(cleanReply));
+        if (userHasMeasurements && sizeHints.length > 0 && !assistantContainsSizeHint) {
           cleanReply += ' ' + sizeHints.join(' ');
         }
 
@@ -634,27 +632,11 @@ Task: Gợi 1 outfit.`;
             [
               opts.sessionId,
               cleanReply,
-              JSON.stringify({ outfits: limitedSanitized, followUp }) // lưu cả followUp để FE load lại
+              JSON.stringify({ outfits: limitedSanitized, followUp, context: { occasion, weather } }) // lưu cả followUp để FE load lại
             ]
           );
           await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [opts.sessionId]);
         }
-
-        // Persist assistant message + recommendation inside a short transaction to keep DB consistent.
-        //  await client.query('BEGIN');
-        //  txStarted = true;
-        //  if (opts.sessionId) {
-        //    await client.query(
-        //      `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1, 'assistant', $2, $3::JSONB, NOW())`,
-        //      [
-        //       opts.sessionId,
-        //       cleanReply,
-        //       JSON.stringify({ outfits: limitedSanitized })
-        //     ]
-        //    );
-        //    await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [opts.sessionId]);
-        //  }
-
         const storedOutfits = limitedSanitized.map(o => {
           const itemsStrings = o.items.map(vid => String(vid));
           const itemsMeta = o.items.map(vid => {
@@ -674,14 +656,15 @@ Task: Gợi 1 outfit.`;
           [userId, JSON.stringify({ occasion, weather }), JSON.stringify({ outfits: storedOutfits }), process.env.OPENAI_MODEL || 'gpt-4o-mini']
         );
 
-        // const followUp = buildFollowUpForOutfits(limitedSanitized);
         await client.query('COMMIT');
         txStarted = false;
         return { 
           reply: cleanReply, 
           outfits: limitedSanitized, 
           followUp, 
-          sessionId: opts.sessionId || null };
+          sessionId: opts.sessionId || null,
+          _persistedByGenerator: Boolean(opts.sessionId)
+       };
       }
     }
 
@@ -1093,6 +1076,20 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       }
     }
 
+    // Debug: surface lastRec content so we can see if context exists / is parseable
+    try {
+      if (lastRec) {
+        const itemsPreview = typeof lastRec.items === 'string' ? (lastRec.items || '').slice(0,200) : JSON.stringify(lastRec.items || {}).slice(0,200);
+        console.debug('[aiService.handleGeneralMessage] lastRec loaded', { id: lastRec.id, contextRaw: lastRec.context, itemsPreview });
+        let ctx = null;
+        try { ctx = (typeof lastRec.context === 'string') ? JSON.parse(lastRec.context) : lastRec.context; } catch(e){ ctx = lastRec.context; }
+        console.debug('[aiService.handleGeneralMessage] lastRec parsed context', ctx);
+      } else {
+        console.debug('[aiService.handleGeneralMessage] no lastRec found for user', { userId });
+      }
+    } catch (logErr) { /* ignore logging errors */ }
+    
+
     const lowerMsg = String(message || '').toLowerCase();
     const slotHints = (typeof extractSlotsFromMessage === 'function') ? extractSlotsFromMessage(message || '') : {};
 
@@ -1495,7 +1492,14 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
           const askText = rec.ask;
           if (sessionId) {
             try {
-              await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, askText]);
+              if(rec.outfits || rec.followUp){
+                await client.query(
+                  `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`,
+                  [sessionId, askText, JSON.stringify({ outfits: rec.outfits || [], followUp: rec.followUp || null })]
+                );
+              } else {
+                await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, askText]);
+              }
               await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
             } catch (e) {
               console.error('[aiService.handleGeneralMessage] persist ask failed', e && e.stack ? e.stack : e);
@@ -1507,9 +1511,17 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
         const outfitsArr = Array.isArray(rec.outfits) ? rec.outfits : [];
         const replyText = rec.reply || rec.message || (outfitsArr.length ? `Mình đã gợi ý ${outfitsArr.length} set cho bạn.` : 'Mình chưa tìm được set phù hợp, bạn muốn mình thử phong cách khác không?');
 
-        if (sessionId && replyText) {
+        if (sessionId && replyText && !rec._persistedByGenerator) {
           try {
-            await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, replyText]);
+            // Nếu generator không tự lưu, persist reply và kèm metadata khi có followUp/outfits
+            if (rec && (rec.followUp || (Array.isArray(outfitsArr) && outfitsArr.length))) {
+              await client.query(
+                `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`,
+                [sessionId, replyText, JSON.stringify({ outfits: outfitsArr, followUp: rec.followUp || null })]
+              );
+            } else {
+              await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, replyText]);
+            }
             await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
           } catch (e) {
             console.error('[aiService.handleGeneralMessage] persist reply failed', e && e.stack ? e.stack : e);
