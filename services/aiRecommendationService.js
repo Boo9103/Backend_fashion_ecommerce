@@ -284,8 +284,14 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
     }
 
     // load session history if provided (last N)
-    const sessionHistory = await loadSessionHistory(client, opts.sessionId, 60);
-
+    //const sessionHistory = await loadSessionHistory(client, opts.sessionId, 60);
+    let sessionHistory = [];
+    try {
+      sessionHistory = await loadSessionHistory(client, opts.sessionId, 60);
+    } catch (e) {
+      console.error('[aiService.generateOutfitRecommendation] load session history failed', e && e.stack ? e.stack : e);
+      sessionHistory = [];
+    }
     // Build compactProducts as before (after filteredProducts computed)
     const maxProductsForAI = 120;
     const excludedSet = new Set((opts.excludeVariantIds || []).map(v => String(v)));
@@ -518,38 +524,84 @@ Task: Gợi 1 outfit.`;
             product_description: (p.description || '') || null
           };
         }
+
+        // Ensure we have DB metadata for any variant IDs AI returned but were not in the products snapshot
+        const aiVariantIds = new Set();
+        for (const o of aiOutfits || []) {
+          (o.items || []).forEach(v => { if (v) aiVariantIds.add(String(v)); });
+        }
+        const missing = Array.from(aiVariantIds).filter(id => !namesByVariant[id]);
+        if (missing.length > 0) {
+          try {
+            const metaQ = await client.query(
+              `SELECT pv.id AS variant_id, p.id AS product_id, p.name, p.category_id, c.name AS category_name, pv.color_name, p.description
+               FROM product_variants pv
+               JOIN products p ON pv.product_id = p.id
+               LEFT JOIN categories c ON p.category_id = c.id
+               WHERE pv.id = ANY($1::uuid[])`,
+              [missing]
+            );
+            for (const r of metaQ.rows) {
+              namesByVariant[String(r.variant_id)] = {
+                name: r.name || null,
+                product_id: r.product_id || null,
+                category_id: r.category_id || null,
+                category_name: (r.category_name || '').toString(),
+                color: (r.color_name || null),
+                product_description: (r.description || null)
+              };
+            }
+          } catch (e) {
+            console.warn('[aiService] failed to fetch missing variant metadata', e && e.stack ? e.stack : e);
+          }
+        }
  
         // Enhanced filtering & ensure top+bottom (avoid accessory-only outfits)
         const accessoryRe = /\b(kính|kinh|túi|tui|ví|vi|phụ kiện|phukien|clutch|wallet|bag|handbag|sunglass|jewelry|jewellery)\b/i;
-        const topRe = /\b(áo|top|shirt|tee|blouse|sơ mi|áo len|hoodie|jacket|coat|áo khoác)\b/i;
-        const bottomRe = /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki)\b/i;
+        const topRe = /\b(áo|top|shirt|tee|blouse|sơ mi|áo len|hoodie|polo|t-shirt|jacket|coat|áo khoác|đầm|dress)\b/i;
+        const bottomRe = /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki|chino)\b/i;
 
-        const ensureTopBottom = (items) => {
-          const curCats = items.map(v => (namesByVariant[String(v)]?.category_name || '').toLowerCase());
-          const hasTop = curCats.some(c => topRe.test(c));
-          const hasBottom = curCats.some(c => bottomRe.test(c));
-          if (hasTop && hasBottom) return items.slice();
+        const getCombinedTextForVid = (vid) => {
+          const info = namesByVariant[String(vid)] || {};
+          const cat = (info.category_name || '').toString();
+          const nm = (info.name || '').toString();
+          return `${cat} ${nm}`.toLowerCase();
+        };
 
-          // if user explicitly wants accessories, accept as-is (do not force top/bottom)
-          if (opts.inferredWantsAccessories) return items.slice();
+        const ensureTopBottom = (items, maxItems = 4) => {
+          if (!Array.isArray(items) || items.length === 0) return null;
+          const curText = items.map(v => getCombinedTextForVid(v));
+          const hasTop = curText.some(t => topRe.test(t));
+          const hasBottom = curText.some(t => bottomRe.test(t));
+          if (hasTop && hasBottom) {
+            // dedupe to unique categories and preserve order
+            return normalizeOutfitItemsGlobal(items, namesByVariant, maxItems);
+          }
 
-          // try to add missing piece(s) from compactProducts (prefer non-accessory)
+          // if user explicitly wants accessories, accept as-is (no forcing)
+          if (opts.inferredWantsAccessories) return normalizeOutfitItemsGlobal(items, namesByVariant, maxItems);
+
+          // try to add missing pieces from compactProducts using combined name/category matching
           const newItems = items.slice();
           if (!hasTop) {
-            const cand = compactProducts.find(p => !newItems.includes(String(p.variant_id)) && topRe.test((p.category || '').toLowerCase()) && !accessoryRe.test((p.category || '').toLowerCase()));
+            const cand = compactProducts.find(p => !newItems.includes(String(p.variant_id)) &&
+              (topRe.test(((p.category || '') + ' ' + (p.name || '')).toLowerCase())) &&
+              !accessoryRe.test(((p.category || '') + ' ' + (p.name || '')).toLowerCase()));
             if (cand) newItems.unshift(String(cand.variant_id));
           }
           if (!hasBottom) {
-            const cand = compactProducts.find(p => !newItems.includes(String(p.variant_id)) && bottomRe.test((p.category || '').toLowerCase()) && !accessoryRe.test((p.category || '').toLowerCase()));
+            const cand = compactProducts.find(p => !newItems.includes(String(p.variant_id)) &&
+              (bottomRe.test(((p.category || '') + ' ' + (p.name || '')).toLowerCase())) &&
+              !accessoryRe.test(((p.category || '') + ' ' + (p.name || '')).toLowerCase()));
             if (cand) newItems.push(String(cand.variant_id));
           }
 
-          // validate again
-          const finalCats = newItems.map(v => (namesByVariant[String(v)]?.category_name || '').toLowerCase());
-          const finalHasTop = finalCats.some(c => topRe.test(c));
-          const finalHasBottom = finalCats.some(c => bottomRe.test(c));
-          if (finalHasTop && finalHasBottom) return newItems;
-          // still invalid -> signal to drop outfit
+          // final validation & normalize
+          const normalized = normalizeOutfitItemsGlobal(newItems, namesByVariant, maxItems);
+          const finalText = normalized.map(v => getCombinedTextForVid(v));
+          const finalHasTop = finalText.some(t => topRe.test(t));
+          const finalHasBottom = finalText.some(t => bottomRe.test(t));
+          if (finalHasTop && finalHasBottom) return normalized;
           return null;
         };
 
@@ -572,42 +624,77 @@ Task: Gợi 1 outfit.`;
           // final guard: require at least one item
           if (Array.isArray(out.items) && out.items.length) filteredSanitized.push(out);
         }
-        const limitedSanitized = filteredSanitized.slice(0, opts.maxOutfits || 3); // server returns 1 outfit
-        //const limitedSanitized = sanitized.slice(0, opts.maxOutfits || 3); // server returns 1 outfit
- 
+         // Enforce EXACTLY 1 Top + 1 Bottom per outfit (try to pick from outfit, else pick from product pool)
+        const makeOneTopOneBottom = (items = []) => {
+          if (!Array.isArray(items) || items.length === 0) return null;
+          const topReLocal = /\b(áo|top|shirt|tee|blouse|sơ mi|áo len|hoodie|polo|t-shirt|jacket|coat|đầm|dress)\b/i;
+          const bottomReLocal = /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki|chino)\b/i;
+          const getText = (vid) => {
+            const info = namesByVariant[String(vid)] || {};
+            return (((info.category_name || '') + ' ' + (info.name || '')).toString()).toLowerCase();
+          };
+
+          let top = null, bottom = null;
+          for (const v of items) {
+            const t = getText(v);
+            if (!top && topReLocal.test(t)) top = v;
+            if (!bottom && bottomReLocal.test(t)) bottom = v;
+            if (top && bottom) break;
+          }
+
+          // fallback: search compactProducts pool for missing piece(s)
+          if (!top) {
+            const cand = compactProducts.find(p => topReLocal.test(((p.category||'') + ' ' + (p.name||'')).toLowerCase()) && validVariants.has(String(p.variant_id)));
+            if (cand) top = String(cand.variant_id);
+          }
+          if (!bottom) {
+            const cand = compactProducts.find(p => bottomReLocal.test(((p.category||'') + ' ' + (p.name||'')).toLowerCase()) && validVariants.has(String(p.variant_id)));
+            if (cand) bottom = String(cand.variant_id);
+          }
+
+          if (top && bottom && top !== bottom) return [top, bottom];
+          return null;
+        };
+
+        const processedSanitized = [];
+        for (const out of filteredSanitized) {
+          const enforced = makeOneTopOneBottom(out.items || []);
+          if (!enforced) continue; // drop outfits we cannot reduce to top+bottom
+          out.items = enforced;
+          processedSanitized.push(out);
+        }
+
+        // limit final outfits (server generally returns 1; keep opts.maxOutfits fallback)
+        const limitedSanitized = processedSanitized.slice(0, Math.max(1, opts.maxOutfits || 1));
         // --- NEW: build canonical descriptions from DB metadata to avoid LLM hallucination ---
         for (const out of limitedSanitized) {
           // create readable fragment per item
-          const fragments = out.items.map((vid) => {
+          const firstTwo = (out.items || []).slice(0, 2);
+          const fragments = firstTwo.map((vid) => {
             const info = namesByVariant[String(vid)] || {};
             const nm = info.name || vid;
             const colorPart = info.color ? (`màu ${info.color}`) : '';
-            return `${nm}${colorPart ? ' (' + colorPart + ')' : ''}`;
+            const shortDesc = info.product_description ? (String(info.product_description).split('.').slice(0,1).join('.').trim()) : null;
+            return {
+              text: `${nm}${colorPart ? ' (' + colorPart + ')' : ''}`,
+              shortDesc
+            };
           });
- 
-          // prefer first two items (top + bottom) when composing description
-          const main = fragments[0] || '';
-          const secondary = fragments[1] ? `kết hợp với ${fragments[1]}` : '';
-          const weatherPhrase = weather || 'thời tiết hiện tại';
-          const why = out.why || `Phù hợp cho ${occasion || 'nhiều dịp'} và ${weatherPhrase}.`;
- 
-          // canonical description: 3 short sentences + CTA
-          const canonicalDesc = [
+
+          const main = fragments[0] ? fragments[0].text : '';
+          const secondary = fragments[1] ? `kết hợp với ${fragments[1].text}` : '';
+          const materialSentence = fragments[0] && fragments[0].shortDesc ? `${fragments[0].shortDesc}.` : `Chất liệu thoáng mát và dễ chịu.`;
+          const secondarySentence = fragments[1] && fragments[1].shortDesc ? `${fragments[1].shortDesc}.` : null;
+
+          // canonical description: combine main + short desc of both items, accessory hint, CTA
+          const canonicalDescParts = [
             `${main} ${secondary}`.trim() + '.',
-            (namesByVariant[String(out.items[0])] && namesByVariant[String(out.items[0])].product_description) ? (`${String(namesByVariant[String(out.items[0])].product_description).split('.').slice(0,1).join('.').trim()}.`) : `Chất liệu thoáng mát và dễ chịu.`,
-            `Phối thêm phụ kiện nhỏ như túi xách hoặc giày phù hợp để hoàn thiện set.`,
+            materialSentence,
+            secondarySentence,
+            `Phối thêm phụ kiện nhỏ như túi xách hoặc kính phù hợp để hoàn thiện set.`,
             `Bạn muốn mình chọn size phù hợp không?`
-          ].filter(Boolean).join(' ');
- 
-          // if AI's description seems to mismatch (e.g., mentions "áo" nhưng mapped variant là quần), log it and override
-          const aiHas = (out.description || '').toLowerCase();
-          const mappedCats = (out.items || []).map(v => (namesByVariant[String(v)]?.category_name || '').toLowerCase()).join('|');
-          const mismatch = (aiHas.includes('áo') && mappedCats.includes('quần')) || (aiHas.includes('quần') && mappedCats.includes('áo')) || false;
-           // Server authoritative: prefer canonical DB-based description to avoid hallucination.
-          // Keep AI-provided `why` but replace description with canonical wording built from DB metadata.
-          if (mismatch) {
-            console.warn('[aiService] AI description mismatch detected — overriding with canonical description', { outfitName: out.name, mappedCats, aiDescriptionSample: (out.description||'').slice(0,120) });
-          }
+          ].filter(Boolean);
+          const canonicalDesc = canonicalDescParts.join(' ');
           out.description = canonicalDesc;
         }
 
@@ -648,10 +735,10 @@ Task: Gợi 1 outfit.`;
          }
 
         // === TÁCH RIÊNG TEXT + FOLLOW-UP (UX chuẩn 10/10) ===
-        let cleanReply = (assistantText && assistantText.trim()) || `Mình đã gợi ý ${limitedSanitized.length} set cho bạn.`;
-        // Nếu assistantText đã chứa cụm "gợi ý size" thì không append lại sizeHints
-        const assistantContainsSizeHint = Boolean(cleanReply && /\bgợi\s*ý\s*size\b/i.test(cleanReply));
-        if (userHasMeasurements && sizeHints.length > 0 && !assistantContainsSizeHint) {
+        let cleanReply = limitedSanitized.length
+                ? limitedSanitized.map((o, idx) => `${o.name} — ${o.description}`).join('\n\n')
+                : `Mình đã gợi ý ${limitedSanitized.length} set cho bạn.`;
+        if (userHasMeasurements && sizeHints.length > 0) {
           cleanReply += ' ' + sizeHints.join(' ');
         }
 
@@ -1140,7 +1227,15 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       }
     } catch (logErr) { /* ignore logging errors */ }
     
-
+    
+    // load session history if provided (last N) — assign into predeclared variable
+    // let sessionHistory = [];
+    // try {
+    //   sessionHistory = await loadSessionHistory(client, opts.sessionId, 60);
+    // } catch (e) {
+    //   console.error('[aiService.handleGeneralMessage] load session history failed', e && e.stack ? e.stack : e);
+    //   sessionHistory = [];
+    // }
     const lowerMsg = String(message || '').toLowerCase();
     const slotHints = (typeof extractSlotsFromMessage === 'function') ? extractSlotsFromMessage(message || '') : {};
 
@@ -1159,9 +1254,61 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
           try {
             // lưu trực tiếp vào users
             await client.query(`UPDATE users SET height = $1, weight = $2 WHERE id = $3`, [height, weight, userId]);
+            // Reuse sessionHistory loaded earlier (top of handler). Also fetch recent assistant messages
+            // including metadata because follow-up question may be stored in metadata.followUp.question.
+            const measurementRegex = /\b(chiều cao|cân nặng|cm\/kg|cm\/kg|cho mình biết chiều cao|cho mình biết chiều cao và cân nặng|tư vấn size|để mình tư vấn size)\b/i;
 
-            // Nếu frontend yêu cầu silentSave -> chỉ lưu, tiếp tục luồng xử lý (không return)
-            if (opts && opts.silentSave) {
+            // sessionHistory (chronological) was loaded near the top of the function into `sessionHistory`.
+            const recentFromHistory = Array.isArray(sessionHistory) && sessionHistory.length > 0
+              ? sessionHistory.slice(-6).reverse() // examine last few messages (most recent last)
+              : [];
+
+            // also pull last assistant rows including metadata (defensive)
+            let recentAssistantRows = [];
+            try {
+              if (sessionId) {
+                const aQ = await client.query(
+                  `SELECT content, metadata FROM ai_chat_messages WHERE session_id = $1 AND role = 'assistant' ORDER BY created_at DESC LIMIT 6`,
+                  [sessionId]
+                );
+                recentAssistantRows = aQ.rows || [];
+              }
+            } catch (e) {
+              console.error('[aiService.handleGeneralMessage] fetch recent assistant rows failed', e && e.stack ? e.stack : e);
+              recentAssistantRows = [];
+            }
+
+            const assistantAskedForMeasurements = (
+              // check textual assistant messages in sessionHistory
+              recentFromHistory.some(m => m.role === 'assistant' && measurementRegex.test(String(m.content || '')))
+              ||
+              // check DB assistant rows content + metadata JSON (followUp.question, metadata.followUp, metadata)
+              recentAssistantRows.some(r => {
+                try {
+                  const txt = String(r.content || '');
+                  if (measurementRegex.test(txt)) return true;
+                  const meta = r.metadata;
+                  if (!meta) return false;
+                  const j = (typeof meta === 'string') ? JSON.parse(meta) : meta;
+                  // check common metadata locations
+                  const candidates = [];
+                  if (j && typeof j === 'object') {
+                    if (j.followUp && typeof j.followUp === 'object' && j.followUp.question) candidates.push(String(j.followUp.question));
+                    if (j.question) candidates.push(String(j.question));
+                    if (j.size_prompt) candidates.push(String(j.size_prompt));
+                    // fallback: stringify metadata
+                    candidates.push(JSON.stringify(j));
+                  }
+                  return candidates.some(c => measurementRegex.test(String(c || '')));
+                } catch (ex) {
+                  return false;
+                }
+              })
+            );
+
+            const triggerSizeFlow = (opts && opts.silentSave) || (lastRec && assistantAskedForMeasurements);
+
+            if (triggerSizeFlow){
               // Nếu silentSave: sau khi lưu, tiếp tục và chạy luồng "Chọn size giúp mình"
               try {
                 let last = lastRec;
@@ -1341,7 +1488,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
         });
 
         const lines = suggestions.map(s => `${s.variant_id} → ${s.suggested_size || 'Không rõ (cần số đo chi tiết)'}`);
-        const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}. Bạn muốn mình lưu size này cho tài khoản không?`;
+        const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}. Mình nghĩ là nó vừa khít với bạn ấy, nếu bạn muốn mặc rộng 1 tí thì cân nhắc tăng lên 1 size nữa nhe.`;
         if (sessionId) {
           await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`, [sessionId, reply, JSON.stringify({ size_suggestions: suggestions })]);
           await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
@@ -1881,7 +2028,7 @@ const checkVariantAvailability = async (variantId) => {
       `SELECT pv.id, pv.product_id, pv.sku, pv.color_name, pv.size_name, pv.stock_qty, p.name as product_name
        FROM product_variants pv
        JOIN products p ON pv.product_id = p.id
-       WHERE pv.id = $1 LIMIT 1`,
+       WHERE pv.variant_id = $1 LIMIT 1`,
       [variantId]
     );
     if (!q.rowCount) return null;
