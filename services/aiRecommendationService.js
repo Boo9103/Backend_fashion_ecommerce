@@ -1714,68 +1714,60 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
 
     // helper: resolve simple references ("áo đó", "outfit 2") -> variant id or null
     const resolveRefFromLastRecommendation = (lastRecLocal, msg) => {
-      if (!lastRecLocal || !msg) return null;
-      let recJson = lastRecLocal.items;
-      if (typeof recJson === 'string') {
-        try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; }
-      }
-      const outfits = (recJson && recJson.outfits) ? recJson.outfits : [];
-
-      // if user said "outfit 2" or "bộ 1" -> prefer the outfit by index
-      const idxMatch = String(msg).match(/(?:bộ|outfit|thứ)\s*(\d+)/i) || String(msg).match(/(?:^|\s)(\d+)\s*(?:$|$)/);
-      if (idxMatch) {
-        const n = Number(idxMatch[1]);
-        if (!Number.isNaN(n) && outfits[n - 1]) {
-          // return whole outfit's first item as fallback (caller may interpret this)
-          return Array.isArray(outfits[n - 1].items) && outfits[n - 1].items[0] ? outfits[n - 1].items[0] : null;
+        if (!lastRecLocal || !msg) return null;
+        let recJson = lastRecLocal.items;
+        if (typeof recJson === 'string') {
+          try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; }
         }
-      }
+        const outfits = (recJson && recJson.outfits) ? recJson.outfits : [];
 
-      const token = String(msg || '').toLowerCase();
-      // const wantTop = /\b(áo|shirt|top|blouse|sơ mi|áo len|áo khoác)\b/i.test(token);
-      // const wantBottom = /\b(quần|pants|jean|short|skirt|chân váy|kaki|trousers)\b/i.test(token);
-
-      const _norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      const wantTop = /\b(áo|cái áo|chiếc áo|top|shirt|blouse|sơ mi|áo len|áo khoác|áo thun|đầm|dress)\b/i.test(txt) || /\bao\b/i.test(txt);
-      const wantBottom = /\b(quần|pants|jean|short|skirt|váy|kaki|trousers|chino)\b/i.test(txt);
-  
-      // helper: try to pick correct variant inside an outfit by inspecting `meta` (product_name/category)
-      const pickFromMeta = (o, matchTop, matchBottom) => {
-        if (!o || !Array.isArray(o.items)) return null;
-        // if meta present and aligns with items
-        const meta = Array.isArray(o.meta) ? o.meta : null;
-        if (meta && meta.length === o.items.length) {
-          for (let i = 0; i < meta.length; i++) {
-            const m = meta[i] || {};
-            const pname = _norm(m.product_name || '');
-            const cat = _norm(m.category_name || '');
-            if (wantTop && (pname.includes('ao') || /top|shirt|blouse|dress/.test(cat))) { candidateVariant = String(m.variant_id || selected.items[i]); break; }
-            if (wantBottom && (pname.includes('quan') || /quan|pants|jean|skirt|trousers/.test(cat))) { candidateVariant = String(m.variant_id || selected.items[i]); break; }
+        // numeric index "outfit 2" or "bộ 1"
+        const idxMatch = String(msg).match(/(?:bộ|outfit|thứ)\s*(\d+)/i);
+        if (idxMatch) {
+          const n = Number(idxMatch[1]);
+          if (!Number.isNaN(n) && outfits[n - 1]) {
+            return Array.isArray(outfits[n - 1].items) && outfits[n - 1].items[0] ? outfits[n - 1].items[0] : null;
+          }
         }
-        // fallback: inspect name/description text if available on outfit
-        const name = String(o.name || '').toLowerCase();
-        const desc = String(o.description || '').toLowerCase();
-        if (matchTop && (name.includes('áo') || desc.includes('áo'))) return o.items[0];
-        if (matchBottom && (name.includes('quần') || desc.includes('quần'))) return o.items[0];
+
+        const txt = String(msg || '').toLowerCase();
+        const _norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        const wantTop = /\b(áo|cái áo|chiếc áo|top|shirt|blouse|sơ mi|áo len|áo khoác|áo thun|đầm|dress)\b/i.test(txt) || /\bao\b/i.test(txt);
+        const wantBottom = /\b(quần|pants|jean|short|skirt|váy|kaki|trousers|chino)\b/i.test(txt);
+
+        const pickFromMeta = (o, matchTop, matchBottom) => {
+          if (!o || !Array.isArray(o.items)) return null;
+          const meta = Array.isArray(o.meta) ? o.meta : null;
+          if (meta && meta.length === o.items.length) {
+            for (let i = 0; i < meta.length; i++) {
+              const m = meta[i] || {};
+              const pname = _norm(m.product_name || '');
+              const cat = _norm(m.category_name || '');
+              if (matchTop && (pname.includes('ao') || /top|shirt|blouse|dress/.test(cat))) return o.items[i];
+              if (matchBottom && (pname.includes('quan') || /quan|pants|jean|skirt|trousers/.test(cat))) return o.items[i];
+            }
+          }
+          const name = String(o.name || '').toLowerCase();
+          const desc = String(o.description || '').toLowerCase();
+          if (matchTop && (name.includes('áo') || desc.includes('áo'))) return o.items[0];
+          if (matchBottom && (name.includes('quần') || desc.includes('quần'))) return o.items[0];
+          return null;
+        };
+
+        for (const o of outfits) {
+          if (wantTop) {
+            const v = pickFromMeta(o, true, false);
+            if (v) return v;
+          }
+          if (wantBottom) {
+            const v = pickFromMeta(o, false, true);
+            if (v) return v;
+          }
+        }
+
+        if (outfits.length === 1 && Array.isArray(outfits[0].items) && outfits[0].items[0]) return outfits[0].items[0];
         return null;
       };
-
-      // try to find a variant matching requested piece
-      for (const o of outfits) {
-        if (wantTop) {
-          const v = pickFromMeta(o, true, false);
-          if (v) return v;
-        }
-        if (wantBottom) {
-          const v = pickFromMeta(o, false, true);
-          if (v) return v;
-        }
-      }
-
-      // if single outfit, return its items[0] as last resort
-      if (outfits.length === 1 && Array.isArray(outfits[0].items) && outfits[0].items[0]) return outfits[0].items[0];
-      return null;
-    };
 
     //const lowerMsg = String(message || '').toLowerCase();
     const stockIntentRe = /\b(có\s+size|còn\s+size|còn\s+hàng|còn\s+không|còn\s+size\s*[a-z0-9]|có\s+hàng)\b/i;
@@ -2132,7 +2124,6 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
     // Replace/adjust follow-up handling for stock/size/color intents
     // (insert into the place that handles resolvedRef and size/stock/color intents)
     {
-      // ...existing code...
       // e.g. const targetVariantId = resolveRefFromLastRecommendation(lastRec, message) || variantHintFromMsg;
       const targetVariantId = (typeof resolveRefFromLastRecommendation === 'function') ? resolveRefFromLastRecommendation(lastRec, message) : null;
       if (targetVariantId) {
