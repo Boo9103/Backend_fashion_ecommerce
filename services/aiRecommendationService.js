@@ -626,6 +626,45 @@ Task: Gợi 1 outfit.`;
           // final guard: require at least one item
           if (Array.isArray(out.items) && out.items.length) filteredSanitized.push(out);
         }
+
+        let accessoryCategoryIdSet = new Set();
+        try {
+          const accessorySlugsToCheck = [
+            'phu-kien', 'phu-kien/kinh-mat', 'phu-kien/gong-kinh',
+            'tui-xach-nu/tui-xach', 'phu-kien/vi-nu', 'phu-kien/vi-nam', 'phu-kien/kinh-mat'
+          ];
+          const catQ = await client.query(`SELECT id FROM categories WHERE slug = ANY($1::text[])`, [accessorySlugsToCheck]);
+          for (const r of (catQ.rows || [])) accessoryCategoryIdSet.add(String(r.id));
+        } catch (e) {
+          // non-fatal: keep empty set and fallback to name-regex filtering below
+          accessoryCategoryIdSet = new Set();
+        }
+
+        // When removing accessories, prefer explicit category_id check; fallback to text regex
+        for (const out of filteredSanitized) {
+          if (!opts.inferredWantsAccessories) {
+            out.items = (out.items || []).filter(vid => {
+              const info = namesByVariant[String(vid)] || {};
+              const cid = info.category_id ? String(info.category_id) : null;
+              if (cid && accessoryCategoryIdSet.has(cid)) return false;
+              // fallback: original text-based check
+              const combined = (((info.category_name || '') + ' ' + (info.name || '')).toString()).toLowerCase();
+              return !accessoryRe.test(combined);
+            });
+          }
+          // debug: if outfit still lacks a Top after filtering, warn with details (helps reproduce)
+          const curText = (out.items || []).map(v => getCombinedTextForVid(v));
+          const hasTopNow = curText.some(t => topRe.test(t));
+          const hasBottomNow = curText.some(t => bottomRe.test(t));
+          if (!hasTopNow || !hasBottomNow) {
+            console.warn('[aiService.generateOutfitRecommendation] outfit missing top/bottom after accessory-filter', {
+              outfitName: out.name,
+              itemsBefore: (out.items || []).slice(0,10),
+              hasTopNow,
+              hasBottomNow
+            });
+          }
+        }
          // Enforce EXACTLY 1 Top + 1 Bottom per outfit (try to pick from outfit, else pick from product pool)
         const makeOneTopOneBottom = (items = []) => {
           if (!Array.isArray(items) || items.length === 0) return null;
@@ -1443,7 +1482,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
                       });
 
                       const lines = suggestions.map(s => `${s.variant_id} → ${s.suggested_size || 'Không rõ (cần số đo chi tiết)'}`);
-                      const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}.`;
+                      const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}. Nếu bạn muốn mặc rộng hơn thì tăng lên 1 size nhé!`;
                       if (sessionId) {
                         await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`, [sessionId, reply, JSON.stringify({ size_suggestions: suggestions })]);
                         await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
