@@ -26,16 +26,46 @@ exports.startSession = async (req, res) => {
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
 
     const { session_id } = req.body || {};
-    const sessionRes = await aiService.startChatSession(userId, session_id || null);
+    //cho phép lazy-load từ user
+    const loadMessages = req.body?.loadMessages === true || req.query?.loadMessages === 'true';
+    const messagesLimit = Number(req.body?.messagesLimit || req.query?.messagesLimit) || 20;
+
+    const sessionRes = await aiService.startChatSession(userId, session_id || null, { loadMessages, messageLimit: messagesLimit });
     return res.json({
       success: true,
       isNew: sessionRes.isNew,
-      messages: sessionRes.messages,
+      messages: sessionRes.messages || [],
+      hasMore: sessionRes.hasMore,
       sessionId: sessionRes.sessionId
     });
   } catch (error) {
     console.error('[aiRecommendationController.startSession]', error && error.stack ? error.stack : error);
     return res.status(500).json({ success: false, message: 'Luna đang bận, thử lại sau nha!', error: error.message });
+  }
+};
+
+//xử lý load more tin nhắn
+exports.loadSessionMessages = async (req, res) => {
+  try {
+    const userId = req.user?.id || null;
+    if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+    const sessionId = req.query?.session_id || req.body?.session_id || null;
+    if (!sessionId) return res.status(400).json({ success: false, message: 'Missing session_id' });
+
+    const before = req.query?.before || req.body?.before || null; // timestamp or message ID
+    const limit = Math.min(Number(req.query?.limit || req.body?.limit) || 20);
+
+    const page = await aiService.loadSessionMessages(sessionId, userId, before, limit);
+    return res.json({
+      success: true,
+      messages: page.messages || [],
+      hasMore: page.hasMore
+    });
+  } catch (error) {
+    console.error('[aiRecommendationController.loadSessionMessages]', error && error.stack ? error.stack : error);
+    return res.status(500).json({ success: false, message: 'Luna đang bận, thử lại sau nha!', error: error.message
+    })
   }
 };
 

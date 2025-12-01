@@ -6,7 +6,7 @@ const aiRecommendationController = require('../controllers/aiRecommendationContr
 
 //start chat session
 router.post('/ai/chat/start', auth.requireUser, aiRecommendationController.startSession);
-
+router.get('/ai/chat/load-messages', auth.requireUser, aiRecommendationController.loadSessionMessages);
 router.post('/ai/chat', auth.requireUser, aiRecommendationController.handleChat);
 
 //behavior tracking routes

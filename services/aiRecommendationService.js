@@ -50,9 +50,12 @@ exports.getUserProfileAndBehavior = async (userId) => {
     }
 };
 
-// new: start or resume chat session when user opens chatbox
-exports.startChatSession = async (userId, providedSessionId = null) => {
+//start or resume chat session when user opens chatbox
+exports.startChatSession = async (userId, providedSessionId = null, opts = {}) => {
   const client = await pool.connect();
+  const loadMessages = Boolean(opts.loadMessages);
+  const messageLimit = Number(opts.messageLimit) || 20;
+  
   try {
     await client.query('BEGIN');
 
@@ -63,12 +66,24 @@ exports.startChatSession = async (userId, providedSessionId = null) => {
         [providedSessionId, userId]
       );
       if (sRes.rowCount > 0) {
-        const msgs = await client.query(
-          `SELECT role, content, metadata, created_at FROM ai_chat_messages WHERE session_id = $1 ORDER BY created_at`,
-          [providedSessionId]
-        );
+        //chỉ load tối thiểu n tin nhắn khi có requested (lazy load)
+        let messages = [];
+        if(loadMessages){
+          const mQ = await client.query(
+            `SELECT role, content, metadata, created_at 
+            FROM ai_chat_messages
+            WHERE session_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2`,
+            [providedSessionId, messageLimit + 1] // +1 để kiểm tra có thêm tin nhắn không
+          );
+        }
+        const rows = mQ.rows || [];
+        const hasMore = rows.length > messageLimit;
+        const sliced = rows.slice(0, messageLimit).reverse(); // chronological order
+        messages = sliced;
         await client.query('COMMIT');
-        return { sessionId: providedSessionId, messages: msgs.rows, isNew: false, sessionExpired: false };
+        return { sessionId: providedSessionId, messages: [], hasMore: false, isNew: false, sessionExpired: false };
       }
       // providedSessionId invalid -> fallthrough to create/resume default below
     }
@@ -81,21 +96,24 @@ exports.startChatSession = async (userId, providedSessionId = null) => {
     );
     if (existingRes.rowCount > 0) {
       const sessionId = existingRes.rows[0].id;
-      const msgs = await client.query(
-        `SELECT role, content, created_at FROM ai_chat_messages WHERE session_id = $1 ORDER BY created_at`,
-        [sessionId]
-      );
+      if (loadMessages) {
+        const mQ = await client.query(
+          `SELECT role, content, metadata, created_at
+           FROM ai_chat_messages
+           WHERE session_id = $1
+           ORDER BY created_at DESC
+           LIMIT $2`,
+          [sessionId, messagesLimit + 1]
+        );
+        const rows = mQ.rows || [];
+        const hasMore = rows.length > messagesLimit;
+        const messages = rows.slice(0, messagesLimit).reverse();
+        await client.query('COMMIT');
+        return { sessionId, messages, hasMore, isNew: false, sessionExpired: false };
+      }
       await client.query('COMMIT');
-      return { sessionId, messages: msgs.rows, isNew: false, sessionExpired: false };
+      return { sessionId, messages: [], hasMore: false, isNew: false, sessionExpired: false };
     }
-
-    // 3) No existing session -> create a new persistent session for this user
-    const sIns = await client.query(
-      `INSERT INTO ai_chat_sessions (user_id, context, started_at, last_message_at)
-       VALUES ($1, '{}'::jsonb, NOW(), NOW()) RETURNING id`,
-      [userId]
-    );
-    const sessionId = sIns.rows[0].id;
 
     // personalized welcome
     const uQ = await client.query(`SELECT full_name FROM users WHERE id = $1 LIMIT 1`, [userId]);
@@ -106,14 +124,55 @@ exports.startChatSession = async (userId, providedSessionId = null) => {
       `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'assistant', $2, NOW())`,
       [sessionId, welcome]
     );
-
     await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
 
     await client.query('COMMIT');
-    return { sessionId, messages: [{ role: 'assistant', content: welcome, created_at: new Date() }], isNew: true, sessionExpired: false };
+    // return welcome message inline only when loadMessages true (otherwise FE will fetch lazily)
+    if (loadMessages) {
+      return { sessionId, messages: [{ role: 'assistant', content: welcome, created_at: new Date() }], hasMore: false, isNew: true, sessionExpired: false };
+    }
+    return { sessionId, messages: [], hasMore: false, isNew: true, sessionExpired: false };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
+  } finally {
+    client.release();
+  }
+};
+
+//helper: load paged messages for a session (cursor)
+exports.loadSessionMessages = async (sessionId, opts = {}) => {
+  const client = await pool.connect();
+  try {
+    const limit = Math.min(100, Number(opts.limit) || 20);
+    // before cursor: if provided use created_at < before, otherwise start from latest
+    const before = opts.before ? new Date(opts.before) : null;
+    const params = [sessionId, limit + 1];
+    let sql;
+    if (before) {
+      params.splice(1, 0, before); // [sessionId, before, limit+1]
+      sql = `
+        SELECT role, content, metadata, created_at
+        FROM ai_chat_messages
+        WHERE session_id = $1 AND created_at < $2
+        ORDER BY created_at DESC
+        LIMIT $3
+      `;
+    } else {
+      sql = `
+        SELECT role, content, metadata, created_at
+        FROM ai_chat_messages
+        WHERE session_id = $1
+        ORDER BY created_at DESC
+        LIMIT $2
+      `;
+    }
+    const q = await client.query(sql, params);
+    const rows = q.rows || [];
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit).reverse(); // chronological order
+    const oldest = page.length ? page[0].created_at.toISOString() : null; // cursor for next page (fetch messages before this)
+    return { messages: page, hasMore, nextCursor: oldest };
   } finally {
     client.release();
   }
