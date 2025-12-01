@@ -77,11 +77,14 @@ exports.startChatSession = async (userId, providedSessionId = null, opts = {}) =
             LIMIT $2`,
             [providedSessionId, messageLimit + 1] // +1 để kiểm tra có thêm tin nhắn không
           );
-        }
-        const rows = mQ.rows || [];
+
+           const rows = mQ.rows || [];
         const hasMore = rows.length > messageLimit;
         const sliced = rows.slice(0, messageLimit).reverse(); // chronological order
         messages = sliced;
+        await client.query('COMMIT');
+        return { sessionId: providedSessionId, messages: [], hasMore: false, isNew: false, sessionExpired: false };
+        }
         await client.query('COMMIT');
         return { sessionId: providedSessionId, messages: [], hasMore: false, isNew: false, sessionExpired: false };
       }

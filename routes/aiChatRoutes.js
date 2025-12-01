@@ -59,4 +59,8 @@ module.exports = router;
         "created_at": "2025-11-22T10:25:32.799Z"
     }
 }
+
+*/
+/*Khi mở chat: POST /api/ai/session/start với body { session_id, loadMessages: true, messagesLimit: 20 } → nhận messages (latest N), hasMore.
+Khi user bấm "load more": GET /api/ai/chat/load-messages?session_id=...&before=<oldestMessageCreatedAt>&limit=20 → nhận messages (older page), hasMore, nextCursor.
 */
