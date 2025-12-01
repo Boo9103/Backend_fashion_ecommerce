@@ -66,24 +66,23 @@ exports.startChatSession = async (userId, providedSessionId = null, opts = {}) =
         [providedSessionId, userId]
       );
       if (sRes.rowCount > 0) {
-        //chỉ load tối thiểu n tin nhắn khi có requested (lazy load)
+        // Only load a limited page of messages when requested (lazy load)
         let messages = [];
-        if(loadMessages){
+        if (loadMessages) {
           const mQ = await client.query(
-            `SELECT role, content, metadata, created_at 
-            FROM ai_chat_messages
-            WHERE session_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2`,
-            [providedSessionId, messageLimit + 1] // +1 để kiểm tra có thêm tin nhắn không
+            `SELECT role, content, metadata, created_at
+             FROM ai_chat_messages
+             WHERE session_id = $1
+             ORDER BY created_at DESC
+             LIMIT $2`,
+            [providedSessionId, messageLimit + 1] // fetch one extra to compute hasMore
           );
-
-           const rows = mQ.rows || [];
-        const hasMore = rows.length > messageLimit;
-        const sliced = rows.slice(0, messageLimit).reverse(); // chronological order
-        messages = sliced;
-        await client.query('COMMIT');
-        return { sessionId: providedSessionId, messages: [], hasMore: false, isNew: false, sessionExpired: false };
+          const rows = mQ.rows || [];
+          const hasMore = rows.length > messageLimit;
+          const sliced = rows.slice(0, messageLimit).reverse(); // chronological order
+          messages = sliced;
+          await client.query('COMMIT');
+          return { sessionId: providedSessionId, messages, hasMore, isNew: false, sessionExpired: false };
         }
         await client.query('COMMIT');
         return { sessionId: providedSessionId, messages: [], hasMore: false, isNew: false, sessionExpired: false };
