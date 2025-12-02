@@ -68,6 +68,8 @@ exports.startChatSession = async (userId, providedSessionId = null, opts = {}) =
       if (sRes.rowCount > 0) {
         // Only load a limited page of messages when requested (lazy load)
         let messages = [];
+        let hasMore = false;
+        let nextCursor = null;
         if (loadMessages) {
           const mQ = await client.query(
             `SELECT role, content, metadata, created_at
@@ -81,11 +83,12 @@ exports.startChatSession = async (userId, providedSessionId = null, opts = {}) =
           const hasMore = rows.length > messagesLimit;
           const sliced = rows.slice(0, messagesLimit).reverse(); // chronological order
           messages = sliced;
+          nextCursor = sliced.length ? (sliced[0].created_at ? new Date(sliced[0].created_at).toISOString() : null) : null;
           await client.query('COMMIT');
-          return { sessionId: providedSessionId, messages, hasMore, isNew: false, sessionExpired: false };
+          return { sessionId: providedSessionId, messages, hasMore, nextCursor, isNew: false, sessionExpired: false };
         }
         await client.query('COMMIT');
-        return { sessionId: providedSessionId, messages: [], hasMore: false, isNew: false, sessionExpired: false };
+        return { sessionId: providedSessionId, messages: [], hasMore: false, nextCursor: null, isNew: false, sessionExpired: false };
       }
     }
 
@@ -109,11 +112,12 @@ exports.startChatSession = async (userId, providedSessionId = null, opts = {}) =
         const rows = mQ.rows || [];
         const hasMore = rows.length > messagesLimit;
         const messages = rows.slice(0, messagesLimit).reverse();
+        const nextCursor = messages.length ? (messages[0].created_at ? new Date(messages[0].created_at).toISOString() : null) : null;
         await client.query('COMMIT');
-        return { sessionId, messages, hasMore, isNew: false, sessionExpired: false };
+        return { sessionId, messages, hasMore, nextCursor, isNew: false, sessionExpired: false };
       }
       await client.query('COMMIT');
-      return { sessionId, messages: [], hasMore: false, isNew: false, sessionExpired: false };
+      return { sessionId, messages: [], hasMore: false, nextCursor: null, isNew: false, sessionExpired: false };
     }
 
     // 3) No existing session -> create a new persistent session for this user
@@ -138,9 +142,10 @@ exports.startChatSession = async (userId, providedSessionId = null, opts = {}) =
     await client.query('COMMIT');
     // return welcome message inline only when loadMessages true (otherwise FE will fetch lazily)
     if (loadMessages) {
-      return { sessionId, messages: [{ role: 'assistant', content: welcome, created_at: new Date() }], hasMore: false, isNew: true, sessionExpired: false };
+      const createdAt = new Date().toISOString();
+      return { sessionId, messages: [{ role: 'assistant', content: welcome, created_at: new Date() }], hasMore: false, nextCursor: createdAt, isNew: true, sessionExpired: false };
     }
-    return { sessionId, messages: [], hasMore: false, isNew: true, sessionExpired: false };
+    return { sessionId, messages: [], hasMore: false, nextCursor: null, isNew: true, sessionExpired: false };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
