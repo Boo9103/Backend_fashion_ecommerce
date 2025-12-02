@@ -7,7 +7,7 @@ function safeDate(d, fallback){
     return date.toISOString().splice(0, 10);
 }
 
-exports.getRevenueByPeriod = async({ unit = 'week', start = null, end = null} = {}) =>{
+exports.revenueByPeriod = async({ unit = 'week', start = null, end = null} = {}) =>{
     const s = safeDate(start, null);
     const e = safeDate(end, null);
 
@@ -37,7 +37,7 @@ exports.getRevenueByPeriod = async({ unit = 'week', start = null, end = null} = 
 
 exports.topProducts = async({ start, end, limit = 10}) => {
     const sql = `
-        SELECT variant_id, nảm_snapshot, SUM(revenue)::numeric(14,2) AS revenues, SUM(qty_sold)::bigint AS qty_sold
+        SELECT variant_id, name_snapshot, SUM(revenue)::numeric(14,2) AS revenues, SUM(qty_sold)::bigint AS qty_sold
         FROM vw_product_revenue_by_day
         WHERE day BETWEEN $1::date AND $2::date
         GROUP BY variant_id, name_snapshot

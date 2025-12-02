@@ -24,7 +24,8 @@ async function buildOrderSummaryHtml(orderId, client) {
       const name = r.name_snapshot || '';
       const color = r.color_snapshot ? ` / ${r.color_snapshot}` : '';
       const size = r.size_snapshot ? ` / ${r.size_snapshot}` : '';
-      const lineTotal = (Number(r.final_price || 0) * Number(r.qty || 0)) || 0;
+      const unitPrice = Number(r.unit_price || 0);
+      const lineTotal = Number(r.final_price || 0);
       html += `<tr>
         <td style="padding:8px 6px;border-bottom:1px solid #f5f5f5">${name}${color}${size}</td>
         <td style="padding:8px 6px;border-bottom:1px solid #f5f5f5;text-align:right">${Number(r.final_price || 0).toLocaleString('vi-VN')} ₫</td>
