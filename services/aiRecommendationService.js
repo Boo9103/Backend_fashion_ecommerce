@@ -54,7 +54,7 @@ exports.getUserProfileAndBehavior = async (userId) => {
 exports.startChatSession = async (userId, providedSessionId = null, opts = {}) => {
   const client = await pool.connect();
   const loadMessages = Boolean(opts.loadMessages);
-  const messageLimit = Number(opts.messageLimit) || 20;
+  const messagesLimit = Number((opts && (opts.messageLimit ?? opts.messagesLimit)) || 0) || 20;
   
   try {
     await client.query('BEGIN');
@@ -75,11 +75,11 @@ exports.startChatSession = async (userId, providedSessionId = null, opts = {}) =
              WHERE session_id = $1
              ORDER BY created_at DESC
              LIMIT $2`,
-            [providedSessionId, messageLimit + 1] // fetch one extra to compute hasMore
+            [providedSessionId, messagesLimit + 1] // fetch one extra to compute hasMore
           );
           const rows = mQ.rows || [];
-          const hasMore = rows.length > messageLimit;
-          const sliced = rows.slice(0, messageLimit).reverse(); // chronological order
+          const hasMore = rows.length > messagesLimit;
+          const sliced = rows.slice(0, messagesLimit).reverse(); // chronological order
           messages = sliced;
           await client.query('COMMIT');
           return { sessionId: providedSessionId, messages, hasMore, isNew: false, sessionExpired: false };
@@ -87,12 +87,11 @@ exports.startChatSession = async (userId, providedSessionId = null, opts = {}) =
         await client.query('COMMIT');
         return { sessionId: providedSessionId, messages: [], hasMore: false, isNew: false, sessionExpired: false };
       }
-      // providedSessionId invalid -> fallthrough to create/resume default below
     }
 
     // 2) Persistent-per-user strategy:
     // If user already has an existing session, reuse it so FE can keep a single permanent ssid.
-    const existingRes = await client.query(
+      const existingRes = await client.query(
       `SELECT id FROM ai_chat_sessions WHERE user_id = $1 ORDER BY last_message_at DESC LIMIT 1`,
       [userId]
     );
@@ -116,6 +115,14 @@ exports.startChatSession = async (userId, providedSessionId = null, opts = {}) =
       await client.query('COMMIT');
       return { sessionId, messages: [], hasMore: false, isNew: false, sessionExpired: false };
     }
+
+    // 3) No existing session -> create a new persistent session for this user
+    const sIns = await client.query(
+      `INSERT INTO ai_chat_sessions (user_id, context, started_at, last_message_at)
+       VALUES ($1, '{}'::jsonb, NOW(), NOW()) RETURNING id`,
+      [userId]
+    );
+    const sessionId = sIns.rows[0].id;
 
     // personalized welcome
     const uQ = await client.query(`SELECT full_name FROM users WHERE id = $1 LIMIT 1`, [userId]);
@@ -244,7 +251,7 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
   }
 
   // if wants accessories but no gender -> ask for gender
-  if ((opts.inferredWantsAccessories || /phụ kiện|túi|ví|kính|jewelry|vòng|dây chuyền|belt/i.test(String(opts.message||''))) && !opts.inferredGender && !opts.gender) {
+  if ((opts.inferredWantsAccessories || /phụ kiện|túi|ví|kính/i.test(String(opts.message||''))) && !opts.inferredGender && !opts.gender) {
     return { ask: 'Bạn là nam hay nữ để mình chọn phụ kiện phù hợp?' };
   }
 
@@ -271,6 +278,7 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
       }
     }
 
+    //--XỬ LÝ: chuẩn bị dữ liệu và gọi OpenAI để tạo gợi ý outfit --//
     // fetch user + measurements (sequential because needed)
     const userQ = await client.query(`SELECT id, full_name, phone, height, weight, bust, waist, hip, gender FROM users WHERE id = $1 LIMIT 1`, [userId]);
     const user = userQ.rows[0];
@@ -279,10 +287,10 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
     const finalGender = opts.gender || opts.inferredGender || user.gender || null;
     opts._resolvedGender = finalGender;
     // detect accessories intent (from parsed rule or raw message)
-    const wantsAccessories = Boolean(opts.inferredWantsAccessories) || /\b(phụ kiện|túi|ví|kính|jewelry|vòng|dây chuyền|belt)\b/i.test(String(opts.message || ''));
+    const wantsAccessories = Boolean(opts.inferredWantsAccessories) || /\b(phụ kiện|túi|ví|kính)\b/i.test(String(opts.message || ''));
     if (wantsAccessories && !finalGender) {
       // ask for gender before generating outfit with accessories
-      return { ask: 'Bạn là nam hay nữ để mình chọn phụ kiện phù hợp?' };
+      return { ask: 'Bạn cần phụ kiện nam hay nữ để mình chọn phù hợp nhé?' };
     }
 
     // prepare products query (same as before)
@@ -344,7 +352,7 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
       }
     }
 
-    // load session history if provided (last N)
+    // load session history để giữ ngữ cảnh (nếu có)
     //const sessionHistory = await loadSessionHistory(client, opts.sessionId, 60);
     let sessionHistory = [];
     try {
@@ -354,20 +362,23 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
       sessionHistory = [];
     }
     // Build compactProducts as before (after filteredProducts computed)
-    const maxProductsForAI = 120;
-    const excludedSet = new Set((opts.excludeVariantIds || []).map(v => String(v)));
+    const maxProductsForAI = 120; //chỉ dùng 120 sản phẩm để tránh quá tải
+    const excludedSet = new Set((opts.excludeVariantIds || []).map(v => String(v))); //tạo set loại trừ các variant_id mà user đã xem
     console.debug('[aiService] excludeVariantIds count:', excludedSet.size);
     console.debug('[aiService] total products fetched:', products.length);
     let filteredProducts = products.filter(p => !excludedSet.has(String(p.variant_id)));
     console.debug('[aiService] products after exclude filter:', filteredProducts.length);
 
-    // ensure keepVariantIds (items we must keep in new outfit) are present and prioritized
+    //duy trì các variant_id trong opts.keepVariantIds ở đầu danh sách (nếu có)
     const keepSet = new Set((opts.keepVariantIds || []).map(v => String(v)));
+
+    //danh sách cuối cùng sau khi xử lý giữ nguyên thứ tự cho các mục trong keepSet
     if (keepSet.size > 0) {
       // bring keep items to the front (if they exist in products)
       const keepItems = [];
-      const rest = [];
       const prodByVid = new Map(products.map(p => [String(p.variant_id), p]));
+
+      //lấy ra những sản phẩm nằm trong keepSet
       for (const vid of keepSet) {
         if (prodByVid.has(vid)) {
           keepItems.push(prodByVid.get(vid));
@@ -378,7 +389,7 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
       if (keepItems.length) filteredProducts.unshift(...keepItems);
     }
 
-    // shuffle remaining (but keep preprended keepItems at start)
+    // xáo trộn ngẫu nhiên phần còn lại (ngoại trừ các mục trong keepSet đã được đưa lên đầu)
     if (filteredProducts.length > 1) {
       const startIdx = keepSet.size > 0 ? Math.min(keepSet.size, filteredProducts.length) : 0;
       for (let i = filteredProducts.length - 1; i > startIdx; i--) {
@@ -398,6 +409,7 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
        price: p.price
      }));
 
+    //tạo tập hợp variant_id hợp lệ để xác thực sau khi nhận kết quả từ AI
     const validVariants = new Set(compactProducts.map(p => String(p.variant_id)));
 
     // System prompt: persona + strict JSON schema + rules (IMPROVED)
@@ -421,7 +433,7 @@ QUY TẮC TRẢ VỀ:
 - Mỗi description phải có 4-6 câu; kết thúc bằng 1 CTA (ví dụ: "Bạn muốn mình chọn size phù hợp?").
 - Tối đa: ${opts.maxOutfits || 3} outfits.
 - Nếu thiếu thông tin tối thiểu (occasion hoặc weather) -> trả {"ask":"<câu hỏi ngắn, thân thiện>"} và KHÔNG trả outfits.
-- Nếu user yêu cầu phụ kiện (túi, kính, jewelry...), và server chưa có giới tính, trả {"ask":"Bạn là nam hay nữ để mình chọn phụ kiện phù hợp?"}.
+- Nếu user yêu cầu phụ kiện (túi, kính, ví...), và server chưa có giới tính, trả {"ask":"Bạn cần phụ kiện nam hay nữ để mình chọn phù hợp nhé?"}.
 - Nếu AI không thể chọn items hợp lệ từ products thì trả {"outfits":[]} hoặc {"ask":"..."}.
 
 DỮ LIỆU ĐƯỢC CẤP:
@@ -532,7 +544,7 @@ Task: Gợi 1 outfit.`;
       console.debug('[aiService] aiOutfits raw:', JSON.stringify(aiOutfits).slice(0,2000));
        const sanitized = [];
        for (const o of aiOutfits.slice(0, opts.maxOutfits || 3)) {
-         if (!o || !Array.isArray(o.items)) continue;
+        if (!o || !Array.isArray(o.items)) continue;
 
         // Normalize items: try direct acceptance, else try fuzzy matching to known compactProducts
         const items = [];
