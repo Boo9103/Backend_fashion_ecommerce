@@ -203,11 +203,20 @@ exports.createOrder = async (userId, orderData) => {
 
         // record user usage (audit)
         try {
-          await client.query(
-            `INSERT INTO user_promotions (id, user_id, promotion_id, action, code, created_at)
-             VALUES (public.uuid_generate_v4(), $1, $2, 'used', $3, NOW())`,
-            [userId, appliedPromotion.id, appliedPromotion.code || null]
-          );
+          if (promotionId) {
+            try {
+              await client.query(
+                `INSERT INTO user_promotions (id, user_id, promotion_id, action, created_at, code)
+                VALUES (gen_random_uuid(), $1, $2, $3, NOW(), $4)
+                ON CONFLICT (user_id, promotion_id, action) DO NOTHING`,
+                [userId, promotionId, 'apply', promoCode]
+              );
+            } catch (e) {
+              // log chi tiết nhưng không làm abort toàn bộ transaction
+              console.warn('[createOrder] user_promotions insert non-fatal error, continuing', e && e.stack ? e.stack : e);
+              // nếu muốn rollback chỉ phần này, có thể dùng SAVEPOINT/ROLLBACK TO SAVEPOINT
+            }
+          }
         } catch (e) {
           // best-effort: don't fail entire order if user_promotion insert conflicts
           console.error('[createOrder] user_promotions insert failed', e && e.stack ? e.stack : e);

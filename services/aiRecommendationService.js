@@ -417,6 +417,53 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
     //tạo tập hợp variant_id hợp lệ để xác thực sau khi nhận kết quả từ AI
     const validVariants = new Set(compactProducts.map(p => String(p.variant_id)));
 
+    const makeOneTopOneBottom = (items = [], namesByVariantLocal = {}, accessoryCategoryIdSetLocal = new Set()) => {
+      if (!Array.isArray(items) || items.length === 0) return null;
+      const topReLocal = /\b(áo|top|shirt|tee|blouse|sơ mi|áo len|hoodie|polo|t-shirt|jacket|coat|đầm|dress)\b/i;
+      const bottomReLocal = /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki|chino)\b/i;
+
+      const getText = (vid) => {
+        const info = namesByVariantLocal[String(vid)] || {};
+        if (info && (info.category_name || info.name)) return (((info.category_name || '') + ' ' + (info.name || '')).toString()).toLowerCase();
+        // fallback to compactProducts snapshot
+        const p = compactProducts.find(pp => String(pp.variant_id) === String(vid));
+        if (p) return (((p.category || '') + ' ' + (p.name || '')).toLowerCase());
+        return String(vid).toLowerCase();
+      };
+
+      let top = null, bottom = null;
+      for (const v of items) {
+        const t = getText(v);
+        if (!top && topReLocal.test(t)) top = v;
+        if (!bottom && bottomReLocal.test(t)) bottom = v;
+        if (top && bottom) break;
+      }
+
+      // fallback: search compactProducts pool for missing piece(s)
+      if (!top) {
+        const cand = compactProducts.find(p => {
+          const combined = (((p.category || '') + ' ' + (p.name || '')).toLowerCase());
+          // absolute reject accessories
+          if (p.category_id && accessoryCategoryIdSetLocal.has(String(p.category_id))) return false;
+          if (/\b(kính|kinh|túi|tui|ví|vi|phụ kiện|phukien|clutch|wallet|bag|handbag|sunglass|jewelry|jewellery)\b/i.test(combined)) return false;
+          return topReLocal.test(combined) && validVariants.has(String(p.variant_id));
+        });
+        if (cand) top = String(cand.variant_id);
+      }
+      if (!bottom) {
+        const cand = compactProducts.find(p => {
+          const combined = (((p.category || '') + ' ' + (p.name || '')).toLowerCase());
+          if (p.category_id && accessoryCategoryIdSetLocal.has(String(p.category_id))) return false;
+          if (/\b(kính|kinh|túi|tui|ví|vi|phụ kiện|phukien|clutch|wallet|bag|handbag|sunglass|jewelry|jewellery)\b/i.test(combined)) return false;
+          return bottomReLocal.test(combined) && validVariants.has(String(p.variant_id));
+        });
+        if (cand) bottom = String(cand.variant_id);
+      }
+
+      if (top && bottom && top !== bottom) return [top, bottom];
+      return null;
+    };
+
     // System prompt: persona + strict JSON schema + rules (IMPROVED)
     const systemPrompt = `
 Bạn là "Luna" — Fashion Stylist AI thân thiện, xưng "Luna" hoặc "mình", gọi khách là "bạn"/"cậu". Giọng vui vẻ, nhẹ nhàng, dùng emoji tiết chế (ví dụ: 😊, 👍), KHÔNG lố. 
@@ -498,50 +545,53 @@ Task: Gợi 1 outfit.`;
       }) }
     ];
 
-    // call OpenAI - outside of any DB transaction (avoid keeping locks while waiting)
-     let assistantText = null;
-     let aiOutfits = null;
-     try {
-       if (openai && typeof openai.createChatCompletion === 'function') {
-         const resp = await callOpenAIWithRetry(() => openai.createChatCompletion({
-           model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-           messages,
-           temperature: 0.25,
-           top_p: 0.95,
-           max_tokens: 800
-         }));
-         assistantText = (resp && (resp.choices?.[0]?.message?.content || resp.choices?.[0]?.text || '')) || '';
-         console.debug('[aiService] OpenAI raw assistantText:', String(assistantText).slice(0, 2000));
-       } else if (openai && typeof openai.chat === 'function') {
-         const resp = await callOpenAIWithRetry(() => openai.chat({
-           messages,
-           max_tokens: 800,
-           temperature: 0.25,
-           top_p: 0.95
-         }));
-         assistantText = resp?.content || '';
-         console.debug('[aiService] OpenAI raw assistantText (chat):', String(assistantText).slice(0, 2000));
-       } else {
-         throw new Error('openai.createChatCompletion not available');
-       }
-
-       // extract JSON block (unchanged)
-       const jsonMatch = assistantText.match(/\{[\s\S]*\}/);
-       console.debug('[aiService] OpenAI jsonMatch present:', Boolean(jsonMatch));
-       if (jsonMatch) {
-         try {
-          const parsed = JSON.parse(jsonMatch[0]);
-          console.debug('[aiService] OpenAI parsed JSON (outfits count):', Array.isArray(parsed.outfits) ? parsed.outfits.length : 0);
-           if (Array.isArray(parsed.outfits)) aiOutfits = parsed.outfits;
-         } catch (e) {
-           console.warn('AI JSON parse failed:', e.message);
-         }
-       }
-
-    } catch (err) {
-      console.warn('OpenAI request failed or timed out, falling back to DB heuristic:', err && err.message ? err.message : err);
+    let assistantText = null;
+    let aiOutfits = null;
+    // RELEASE DB CLIENT before making slow external call to avoid exhausting pool
+    try {
+      // snapshot messages to local var (already built)
+      const messagesForAI = messages;
+      // log pool status (helpful to diagnose exhaustion)
+      try { pool.logStatus('before-openai'); } catch(e) {}
+      // release client now
+      try { if (client) { client.release(); client = null; } } catch(e){ /* ignore */ }
+      // call OpenAI (no DB client held)
+      if (openai && typeof openai.createChatCompletion === 'function') {
+        const resp = await callOpenAIWithRetry(() => openai.createChatCompletion({
+          model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+          messages: messagesForAI,
+          temperature: 0.25,
+          top_p: 0.95,
+          max_tokens: 800
+        }));
+        assistantText = (resp && (resp.choices?.[0]?.message?.content || resp.choices?.[0]?.text || '')) || '';
+        console.debug('[aiService] OpenAI raw assistantText:', String(assistantText).slice(0, 2000));
+      } else if (openai && typeof openai.chat === 'function') {
+        const resp = await callOpenAIWithRetry(() => openai.chat({
+          messages: messagesForAI,
+          max_tokens: 800,
+          temperature: 0.25,
+          top_p: 0.95
+        }));
+        assistantText = resp?.content || '';
+        console.debug('[aiService] OpenAI raw assistantText (chat):', String(assistantText).slice(0, 2000));
+      } else {
+        throw new Error('openai.createChatCompletion not available');
+      }
+    } catch (errOpenAI) {
+      console.warn('OpenAI request failed or timed out, falling back to DB heuristic:', errOpenAI && (errOpenAI.message || errOpenAI));
       assistantText = null;
       aiOutfits = null;
+    } finally {
+      // reacquire a DB client for the remainder of the function (if needed)
+      try {
+        if (!client) client = await pool.connectWithLogging ? await pool.connectWithLogging() : await pool.connect();
+        try { pool.logStatus('after-openai-reconnect'); } catch(e) {}
+      } catch (reconErr) {
+        console.error('[aiService] failed to reconnect DB after OpenAI call', reconErr && (reconErr.stack || reconErr.message || reconErr));
+        // safe fallback: return friendly error so FE shows message instead of crashing
+        return { reply: 'Lỗi kết nối! Bạn thử lại sau vài giây nha!', outfits: [], sessionId: opts.sessionId || null };
+      }
     }
 
     // If AI returned outfits, validate and sanitize (with fuzzy matching fallback)
@@ -603,6 +653,30 @@ Task: Gợi 1 outfit.`;
           };
         }
 
+        let accessoryCategoryIdSet = new Set();
+        try {
+          const accessorySlugsToCheck = [
+            'phu-kien', 'phu-kien/kinh-mat', 'phu-kien/gong-kinh',
+            'tui-xach-nu/tui-xach', 'phu-kien/vi-nu', 'phu-kien/vi-nam'
+          ];
+          const namePatterns = ['%phu kien%','%phụ kiện%','%kính%','%kinh%','%eyewear%','%glasses%','%sunglass%','%ví%','%vi%','%túi%','%bag%','%handbag%'];
+          const catQ = await client.query(
+            `WITH seeds AS (
+               SELECT id FROM categories WHERE slug = ANY($1::text[]) OR LOWER(name) ILIKE ANY($2::text[])
+             ), rec AS (
+               SELECT id, parent_id FROM categories WHERE id IN (SELECT id FROM seeds)
+               UNION
+               SELECT c.id, c.parent_id FROM categories c JOIN rec ON c.parent_id = rec.id
+             )
+             SELECT DISTINCT id FROM rec`,
+            [accessorySlugsToCheck, namePatterns]
+          );
+          for (const r of (catQ.rows || [])) accessoryCategoryIdSet.add(String(r.id));
+          if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService] accessoryCategoryIdSet prebuilt', Array.from(accessoryCategoryIdSet));
+        } catch (e) {
+          accessoryCategoryIdSet = new Set();
+        }
+
         // Ensure we have DB metadata for any variant IDs AI returned but were not in the products snapshot
         const aiVariantIds = new Set();
         for (const o of aiOutfits || []) {
@@ -636,9 +710,9 @@ Task: Gợi 1 outfit.`;
  
         // Enhanced filtering & ensure top+bottom (avoid accessory-only outfits)
         const accessoryRe = /\b(kính|kinh|túi|tui|ví|vi|phụ kiện|phukien|clutch|wallet|bag|handbag|sunglass|jewelry|jewellery)\b/i;
-        const topRe = /\b(áo|top|shirt|tee|blouse|sơ mi|áo len|hoodie|polo|t-shirt|jacket|coat|áo khoác|đầm|dress)\b/i;
+        const topRe = /\b(áo|top|shirt|tee|blouse|sơ mi|hoodie|polo|t-shirt|jacket|coat|áo khoác|đầm|dress)\b/i;
         const bottomRe = /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki|chino)\b/i;
-
+        
         const getCombinedTextForVid = (vid) => {
           const info = namesByVariant[String(vid)] || {};
           const cat = (info.category_name || '').toString();
@@ -661,20 +735,27 @@ Task: Gợi 1 outfit.`;
 
           // try to add missing pieces from compactProducts using combined name/category matching
           const newItems = items.slice();
+          const safeProductCandidate = (pred) => {
+            return compactProducts.find(p => {
+              const vid = String(p.variant_id);
+              if (newItems.includes(vid)) return false;
+              // absolute reject: category_id mapped in namesByVariant or product.category belongs to accessoryCategoryIdSet
+              const prodCatId = p.category_id || null;
+              if (prodCatId && accessoryCategoryIdSet.has(String(prodCatId))) return false;
+              const combined = (((p.category || '') + ' ' + (p.name || '')).toLowerCase());
+              if (accessoryRe.test(combined)) return false;
+              return pred(combined, p);
+            });
+          };
+
           if (!hasTop) {
-            const cand = compactProducts.find(p => !newItems.includes(String(p.variant_id)) &&
-              (topRe.test(((p.category || '') + ' ' + (p.name || '')).toLowerCase())) &&
-              !accessoryRe.test(((p.category || '') + ' ' + (p.name || '')).toLowerCase()));
+            const cand = safeProductCandidate((combined) => topRe.test(combined));
             if (cand) newItems.unshift(String(cand.variant_id));
           }
           if (!hasBottom) {
-            const cand = compactProducts.find(p => !newItems.includes(String(p.variant_id)) &&
-              (bottomRe.test(((p.category || '') + ' ' + (p.name || '')).toLowerCase())) &&
-              !accessoryRe.test(((p.category || '') + ' ' + (p.name || '')).toLowerCase()));
+            const cand = safeProductCandidate((combined) => bottomRe.test(combined));
             if (cand) newItems.push(String(cand.variant_id));
           }
-
-
 
           // final validation & normalize
           const normalized = normalizeOutfitItemsGlobal(newItems, namesByVariant, maxItems);
@@ -689,9 +770,30 @@ Task: Gợi 1 outfit.`;
         for (const out of sanitized) {
           // if user didn't request accessories, filter accessory categories out first
           if (!opts.inferredWantsAccessories) {
-            out.items = (out.items || []).filter(vid => {
-              const c = (namesByVariant[String(vid)]?.category_name || '').toLowerCase();
-              return !accessoryRe.test(c);
+            // remove all accessory category items (category_id check preferred)
+            out.items = out.items.filter(vid => {
+              const info = namesByVariant[String(vid)] || {};
+              const cid = info.category_id ? String(info.category_id) : null;
+              if (cid && accessoryCategoryIdSet.has(cid)) return false;
+              return !accessoryRe.test(((info.category_name||'') + ' ' + (info.name||'')).toLowerCase());
+            });
+          } else {
+            // If accessories allowed, dedupe accessories by category_name/name AND cap accessories to 1
+            const accessoriesSeen = new Set();
+            let accessoryCount = 0;
+            out.items = out.items.filter(vid => {
+              const info = namesByVariant[String(vid)] || {};
+              const combined = (((info.category_name||'') + ' ' + (info.name||'')).toLowerCase()).trim();
+              const isAccessory = accessoryRe.test(combined);
+              if (!isAccessory) return true;
+              // canonical key to dedupe similar accessories (fallback to name)
+              const key = (info.category_name || info.name || '').toLowerCase().replace(/\s+/g,' ').trim();
+              if (accessoriesSeen.has(key)) return false;
+              // only allow a single accessory per outfit (keep first encountered)
+              if (accessoryCount >= 1) return false;
+              accessoriesSeen.add(key);
+              accessoryCount++;
+              return true;
             });
           }
 
@@ -705,29 +807,18 @@ Task: Gợi 1 outfit.`;
           if (Array.isArray(out.items) && out.items.length) filteredSanitized.push(out);
         }
 
-        let accessoryCategoryIdSet = new Set();
-        try {
-          const accessorySlugsToCheck = [
-            'phu-kien', 'phu-kien/kinh-mat', 'phu-kien/gong-kinh',
-            'tui-xach-nu/tui-xach', 'phu-kien/vi-nu', 'phu-kien/vi-nam', 'phu-kien/kinh-mat'
-          ];
-          const catQ = await client.query(`SELECT id FROM categories WHERE slug = ANY($1::text[])`, [accessorySlugsToCheck]);
-          for (const r of (catQ.rows || [])) accessoryCategoryIdSet.add(String(r.id));
-        } catch (e) {
-          // non-fatal: keep empty set and fallback to name-regex filtering below
-          accessoryCategoryIdSet = new Set();
-        }
-
         // When removing accessories, prefer explicit category_id check; fallback to text regex
         for (const out of filteredSanitized) {
           if (!opts.inferredWantsAccessories) {
             out.items = (out.items || []).filter(vid => {
               const info = namesByVariant[String(vid)] || {};
               const cid = info.category_id ? String(info.category_id) : null;
+              
               if (cid && accessoryCategoryIdSet.has(cid)) return false;
-              // fallback: original text-based check
               const combined = (((info.category_name || '') + ' ' + (info.name || '')).toString()).toLowerCase();
-              return !accessoryRe.test(combined);
+              if (accessoryRe.test(combined)) return false;
+              
+              return true;
             });
           }
           // debug: if outfit still lacks a Top after filtering, warn with details (helps reproduce)
@@ -744,36 +835,45 @@ Task: Gợi 1 outfit.`;
           }
         }
          // Enforce EXACTLY 1 Top + 1 Bottom per outfit (try to pick from outfit, else pick from product pool)
-        const makeOneTopOneBottom = (items = []) => {
-          if (!Array.isArray(items) || items.length === 0) return null;
-          const topReLocal = /\b(áo|top|shirt|tee|blouse|sơ mi|áo len|hoodie|polo|t-shirt|jacket|coat|đầm|dress)\b/i;
-          const bottomReLocal = /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki|chino)\b/i;
-          const getText = (vid) => {
-            const info = namesByVariant[String(vid)] || {};
-            return (((info.category_name || '') + ' ' + (info.name || '')).toString()).toLowerCase();
-          };
+        // const makeOneTopOneBottom = (items = []) => {
+        //   if (!Array.isArray(items) || items.length === 0) return null;
+        //   const topReLocal = /\b(áo|top|shirt|tee|blouse|sơ mi|áo len|hoodie|polo|t-shirt|jacket|coat|đầm|dress)\b/i;
+        //   const bottomReLocal = /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki|chino)\b/i;
+        //   const getText = (vid) => {
+        //     const info = namesByVariant[String(vid)] || {};
+        //     return (((info.category_name || '') + ' ' + (info.name || '')).toString()).toLowerCase();
+        //   };
 
-          let top = null, bottom = null;
-          for (const v of items) {
-            const t = getText(v);
-            if (!top && topReLocal.test(t)) top = v;
-            if (!bottom && bottomReLocal.test(t)) bottom = v;
-            if (top && bottom) break;
-          }
+        //   let top = null, bottom = null;
+        //   for (const v of items) {
+        //     const t = getText(v);
+        //     if (!top && topReLocal.test(t)) top = v;
+        //     if (!bottom && bottomReLocal.test(t)) bottom = v;
+        //     if (top && bottom) break;
+        //   }
 
-          // fallback: search compactProducts pool for missing piece(s)
-          if (!top) {
-            const cand = compactProducts.find(p => topReLocal.test(((p.category||'') + ' ' + (p.name||'')).toLowerCase()) && validVariants.has(String(p.variant_id)));
-            if (cand) top = String(cand.variant_id);
-          }
-          if (!bottom) {
-            const cand = compactProducts.find(p => bottomReLocal.test(((p.category||'') + ' ' + (p.name||'')).toLowerCase()) && validVariants.has(String(p.variant_id)));
-            if (cand) bottom = String(cand.variant_id);
-          }
+        //   // fallback: search compactProducts pool for missing piece(s)
+        //   if (!top) {
+        //     const cand = compactProducts.find(p => {
+        //       const combined = (((p.category||'') + ' ' + (p.name||'')).toLowerCase());
+        //       // absolute reject accessories
+        //       if (accessoryCategoryIdSet.has(String(p.category_id || '')) || accessoryRe.test(combined)) return false;
+        //       return topReLocal.test(combined) && validVariants.has(String(p.variant_id));
+        //     });
+        //     if (cand) top = String(cand.variant_id);
+        //   }
+        //   if (!bottom) {
+        //     const cand = compactProducts.find(p => {
+        //       const combined = (((p.category||'') + ' ' + (p.name||'')).toLowerCase());
+        //       if (accessoryCategoryIdSet.has(String(p.category_id || '')) || accessoryRe.test(combined)) return false;
+        //       return bottomReLocal.test(combined) && validVariants.has(String(p.variant_id));
+        //     });
+        //     if (cand) bottom = String(cand.variant_id);
+        //   }
 
-          if (top && bottom && top !== bottom) return [top, bottom];
-          return null;
-        };
+        //   if (top && bottom && top !== bottom) return [top, bottom];
+        //   return null;
+        // };
 
         const processedSanitized = [];
         for (const out of filteredSanitized) {
@@ -785,8 +885,30 @@ Task: Gợi 1 outfit.`;
 
         // limit final outfits (server generally returns 1; keep opts.maxOutfits fallback)
         const limitedSanitized = processedSanitized.slice(0, Math.max(1, opts.maxOutfits || 1));
-        // --- NEW: build canonical descriptions from DB metadata to avoid LLM hallucination ---
+        //const accessoryRe = /\b(kính|kinh|túi|tui|ví|vi|phụ kiện|phukien|clutch|wallet|bag|handbag|sunglass|jewelry|jewellery)\b/i;
+        const finalCleaned = [];
         for (const out of limitedSanitized) {
+          const enforced = makeOneTopOneBottom(out.items || []);
+          if (!enforced || enforced.length < 2) continue; // drop if we still can't get top+bottom
+          // if accessories allowed, try to add a single accessory (prefer those already present in out.items)
+          if (opts.inferredWantsAccessories) {
+            const acc = (out.items || []).find(vid => {
+              const info = namesByVariant[String(vid)] || {};
+              const combined = (((info.category_name||'') + ' ' + (info.name||'')).toLowerCase());
+              const cid = info.category_id ? String(info.category_id) : null;
+              if (cid && accessoryCategoryIdSet.has(cid)) return true;
+              return accessoryRe.test(combined);
+            });
+            if (acc && !enforced.includes(acc)) enforced.push(acc);
+          }
+          // ensure max 3 items (top,bottom,maybe accessory)
+          out.items = enforced.slice(0, 3);
+          finalCleaned.push(out);
+        }
+
+        // use finalCleaned instead of limitedSanitized downstream
+        const finalOutfitsToReturn = finalCleaned;
+        for (const out of finalOutfitsToReturn) {
           // create readable fragment per item
           const firstTwo = (out.items || []).slice(0, 2);
           const fragments = firstTwo.map((vid) => {
@@ -854,9 +976,9 @@ Task: Gợi 1 outfit.`;
          }
 
         // === TÁCH RIÊNG TEXT + FOLLOW-UP ===
-        let cleanReply = limitedSanitized.length
-                ? limitedSanitized.map((o, idx) => `${o.name} — ${o.description}`).join('\n\n')
-                : `Mình đã gợi ý ${limitedSanitized.length} set cho bạn.`;
+        let cleanReply = finalOutfitsToReturn.length
+                ? finalOutfitsToReturn.map((o, idx) => `${o.name} — ${o.description}`).join('\n\n')
+                 : `Mình đã gợi ý ${limitedSanitized.length} set cho bạn.`;
         if (userHasMeasurements && sizeHints.length > 0) {
           cleanReply += ' ' + sizeHints.join(' ');
         }
@@ -888,12 +1010,12 @@ Task: Gợi 1 outfit.`;
             [
               opts.sessionId,
               cleanReply,
-              JSON.stringify({ outfits: limitedSanitized, followUp, context: { occasion, weather } }) // lưu cả followUp để FE load lại
+              JSON.stringify({ outfits: finalOutfitsToReturn, followUp, context: { occasion, weather } }) // lưu cả followUp để FE load lại
             ]
           );
           await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [opts.sessionId]);
         }
-        const storedOutfits = limitedSanitized.map(o => {
+        const storedOutfits = finalOutfitsToReturn.map(o => {
           const itemsStrings = o.items.map(vid => String(vid));
           const itemsMeta = o.items.map(vid => {
             const p = namesByVariant[String(vid)] || {};
@@ -917,7 +1039,7 @@ Task: Gợi 1 outfit.`;
         return {
           type: 'outfit_suggestions',
           reply: cleanReply, 
-          outfits: limitedSanitized, 
+          outfits: finalOutfitsToReturn, 
           followUp, 
           sessionId: opts.sessionId || null,
           _persistedByGenerator: Boolean(opts.sessionId)
@@ -992,8 +1114,15 @@ Task: Gợi 1 outfit.`;
       });
     }
 
-// After loop, ensure only single outfit returned
-    const finalOutfits = outfits.length ? [outfits[0]] : [];
+    const cleanedFallback = [];
+    for (const o of (outfits.length ? [outfits[0]] : [])) {
+      const enforced = makeOneTopOneBottom(o.items || []);
+      if (!enforced || enforced.length < 2) continue;
+      // try to avoid accessory picks in fallback: remove accessory-like items
+      o.items = enforced;
+      cleanedFallback.push(o);
+    }
+    const finalOutfits = cleanedFallback.length ? [cleanedFallback[0]] : [];
 
     // Persist fallback recommendation in a short transaction
     await client.query('BEGIN');
@@ -1016,12 +1145,12 @@ Task: Gợi 1 outfit.`;
    }
  };
  
-// --- OPENAI: improved retry + timeout wrapper (supports Retry-After header) ---
-const OPENAI_TIMEOUT_MS = parseInt(process.env.OPENAI_TIMEOUT_MS || '10000'); // default 10s
-const OPENAI_MAX_RETRIES = parseInt(process.env.OPENAI_MAX_RETRIES || '3');
-const OPENAI_BASE_DELAY_MS = parseInt(process.env.OPENAI_BASE_DELAY_MS || '800');
+  // --- OPENAI: improved retry + timeout wrapper (supports Retry-After header) ---
+  const OPENAI_TIMEOUT_MS = parseInt(process.env.OPENAI_TIMEOUT_MS || '10000'); // default 10s
+  const OPENAI_MAX_RETRIES = parseInt(process.env.OPENAI_MAX_RETRIES || '3');
+  const OPENAI_BASE_DELAY_MS = parseInt(process.env.OPENAI_BASE_DELAY_MS || '800');
 
-const callOpenAIWithRetry = async (fn, opts = {}) => {
+  const callOpenAIWithRetry = async (fn, opts = {}) => {
   const maxRetries = typeof opts.maxRetries === 'number' ? opts.maxRetries : OPENAI_MAX_RETRIES;
   const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : OPENAI_TIMEOUT_MS;
 
@@ -1346,6 +1475,11 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       }
     } catch (logErr) { /* ignore logging errors */ }
     
+    let lastAccessoryRec = null;
+    try {
+      lastAccessoryRec = await exports.getLastRecommendationForUser(userId, 'accessories');
+    } catch (e) { lastAccessoryRec = null; }
+
     const lowerMsg = String(message || '').toLowerCase();
     const slotHints = (typeof extractSlotsFromMessage === 'function') ? extractSlotsFromMessage(message || '') : {};
 
@@ -2345,22 +2479,6 @@ const normalizeOutfitItemsGlobal = (items = [], namesByVariant = {}, maxItems = 
   return out.length ? out : [items[0]];
 };
 
-// --- ADDED HELPERS: resolve stored recommendation + variant helpers ---
-exports.getLastRecommendationForUser = async (userId) => {
-  if (!userId) return null;
-  const client = await pool.connect();
-  try {
-    // include context so callers can reuse occasion/weather without extra queries
-    const q = await client.query(
-      `SELECT id, items, context, created_at FROM ai_recommendations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
-      [userId]
-    );
-    return q.rowCount ? q.rows[0] : null;
-  } finally {
-    client.release();
-  }
-};
-
 const checkVariantAvailability = async (variantId) => {
   const client = await pool.connect();
   try {
@@ -2436,7 +2554,7 @@ function inferAccessorySlugsFromMessage(message = '') {
     .replace(/[\u0300-\u036f]/g, '')
     .trim();
 
-  const slugs = new Set();
+  const slugs = new Set(); // dùng Set để tránh trùng lặp
 
   // TÚI XÁCH NỮ
   if (/\b(tui|túi|xach|xách|bag|handbag|tote|shoulder|clutch)\b/.test(m)) {
@@ -2464,421 +2582,242 @@ function inferAccessorySlugsFromMessage(message = '') {
   return Array.from(slugs);
 }
 
-// exports.suggestAccessories = async (userId, message = '', sessionId = null, opts = {}) => {
-//   const client = await pool.connect();
-//   try {
-//     const lowerMsg = String(message || '').toLowerCase();
-//     const max = parseInt(opts.max || 6, 10);
+function extractColor(text = '') {
+  if (!text || typeof text !== 'string') return null;
+  const s = text.toLowerCase();
+  const colors = ['đen','trắng','xanh','xanh dương','xanh lá','đỏ','hồng','tím','vàng','kem','be','nâu','xám','ghi','orange','brown','black','white','red','blue','green','pink','purple','yellow','beige','navy','grey','gray'];
+  for (const c of colors) {
+    if (s.includes(c)) return c;
+  }
+  return null;
+}
 
-//     // ===================================================================
-//     // 1. Trường hợp user hỏi quá chung chung → hỏi lại kiểu phụ kiện
-//     // ===================================================================
-//     const veryBroad = /\b(phụ kiện|phukien|accessory|phối phụ kiện|thêm phụ kiện|đeo gì|túi ví kính)\b/i.test(lowerMsg) &&
-//                       !/\b(nam|nữ|da|tote|kẹp nách|kính mát|ví nam|ví nữ|túi xách nữ|túi đeo chéo|đen|trắng|xanh)\b/i.test(lowerMsg);
+// Helper: simple gender extractor (returns 'nam' | 'nữ' | null)
+function extractGender(text = '') {
+  if (!text || typeof text !== 'string') return null;
+  const s = text.toLowerCase();
+  if (/\b(nam|men|male|boy)\b/.test(s)) return 'nam';
+  if (/\b(nữ|nu|women|female|girl)\b/.test(s)) return 'nữ';
+  return null;
+}
 
-//     if (veryBroad) {
-//       const reply = 'Dạ để phối thêm với outfit này thì bên mình có rất nhiều phụ kiện đẹp nè: '
-//                   + 'túi xách nữ, túi đeo chéo, ví nam, ví nữ, kính mát, thắt lưng… '
-//                   + 'Bạn đang muốn tìm kiểu phụ kiện nào để mình gợi ý cho hợp nhất ạ?';
+const parseAccessoryQuery = (text) => {
+  const types = [];
+  const map = {
+    'tui': ['túi', 'tui', 'bag', 'handbag', 'tote', 'crossbody', 'đeo chéo', 'clutch'],
+    'vi': ['ví', 'vi', 'bóp', 'wallet'],
+    'kinh': ['kính', 'kinh', 'kính mát', 'sunglass', 'eyewear']
+  };
+  for (const [key, keywords] of Object.entries(map)) {
+    if (keywords.some(k => text.includes(k))) types.push(key);
+  }
+  // màu, giới tính giữ nguyên như cũ...
+  return { types, color: extractColor(text), gender: extractGender(text) };
+};
 
-//       if (sessionId) {
-//         await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, metadata) VALUES ($1,'assistant',$2, $3::JSONB)`, [sessionId, reply, JSON.stringify( { accessorySlugs : [] })]);
-//         await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//       }
-//       return { reply, accessories: [], askForType: true };
-//     }
-
-//     // ===================================================================
-//     // 2. Phát hiện user đang hỏi về MÀU (đen, trắng, nâu, xanh...)
-//     // ===================================================================
-//     const colorMatch = lowerMsg.match(/\b(màu\s*(đen|trắng|be|xám|nâu|xanh|đỏ|hồng|vàng|kem|trắng kem|đen bóng))\b/i) ||
-//                        lowerMsg.match(/\b(đen|trắng|be|xám|nâu|xanh|đỏ|hồng|vàng|kem)\b/i);
-
-//     if (colorMatch) {
-//       const requestedColor = colorMatch[0].replace(/màu\s*/i, '').trim();
-
-//       // Lấy context từ session: user vừa hỏi về phụ kiện nào?
-//       let lastAccessoryType = null;
-//       if (sessionId) {
-//         const lastMsg = await client.query(`
-//           SELECT content FROM ai_chat_messages 
-//           WHERE session_id = $1 AND role = 'assistant' 
-//           ORDER BY created_at DESC LIMIT 1
-//         `, [sessionId]);
-//         if (lastMsg.rowCount > 0) {
-//           const lastText = lastMsg.rows[0].content.toLowerCase();
-//           if (lastText.includes('kính')) lastAccessoryType = 'kính';
-//           else if (lastText.includes('túi')) lastAccessoryType = 'túi';
-//           else if (lastText.includes('ví')) lastAccessoryType = 'ví';
-//         }
-//       }
-
-//       // Nếu không có context → hỏi lại
-//       if (!lastAccessoryType) {
-//         const reply = 'Bạn đang muốn tìm phụ kiện màu ' + requestedColor + ' đúng không ạ? Là túi, ví hay kính vậy ạ?';
-//         if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content) VALUES ($1,'assistant',$2)`, [sessionId, reply]);
-//         return { reply, accessories: [], askForType: true };
-//       }
-
-//       // Tìm sản phẩm theo loại + màu
-//       const colorKeywords = {
-//         đen: ['Đen', 'Black'],
-//         trắng: ['Trắng', 'White'],
-//         be: ['Be', 'Kem'],
-//         nâu: ['Nâu', 'Brown'],
-//         xanh: ['Xanh', 'Green', 'Blue'],
-//         đỏ: ['Đỏ', 'Red'],
-//         hồng: ['Hồng', 'Pink'],
-//         vàng: ['Vàng', 'Gold'],
-//         xám: ['Xám', 'Gray']
-//       };
-
-//       const searchColors = colorKeywords[requestedColor] || [requestedColor];
-
-//       const q = await client.query(`
-//         SELECT pv.id AS variant_id, pv.product_id, p.name, pv.color_name, pi.url AS image_url
-//         FROM product_variants pv
-//         JOIN products p ON pv.product_id = p.id
-//         LEFT JOIN product_images pi ON pi.variant_id = pv.id AND pi."position" = 1
-//         WHERE p.status = 'active'
-//           AND pv.color_name ILIKE ANY($1)
-//           AND pv.stock_qty > 0
-//           AND (
-//             (p.name ILIKE '%${lastAccessoryType}%') OR
-//             (p.category_id IN (
-//               SELECT id FROM categories WHERE slug LIKE '%${lastAccessoryType === 'kính' ? 'kinh' : lastAccessoryType === 'túi' ? 'tui' : 'vi'}%')
-//             )
-//           )
-//         ORDER BY p.sequence_id DESC
-//         LIMIT $2
-//       `, [searchColors.map(c => `%${c}%`), max]);
-
-//       if (q.rows.length === 0) {
-//         const reply = `Dạ hiện tại mình chưa có phụ kiện ${lastAccessoryType} màu ${requestedColor} còn hàng ạ. Bạn muốn xem màu khác không?`;
-//         if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content) VALUES ($1,'assistant',$2)`, [sessionId, reply]);
-//         return { reply, accessories: [] };
-//       }
-
-//       const accessories = q.rows.map(r => ({
-//         variant_id: String(r.variant_id),
-//         product_id: String(r.product_id),
-//         name: r.name,
-//         color: r.color_name,
-//         image: r.image_url
-//       }));
-
-//       const reply = `Mình tìm được ${accessories.length} mẫu ${lastAccessoryType} màu ${requestedColor} đây ạ: `
-//                   + accessories.map(a => a.name).join(', ') + '. '
-//                   + 'Bạn thích mẫu nào nhất để mình show chi tiết nè?';
-
-//       if (sessionId) {
-//         await client.query(`INSERT INTO ai_chat_messages (session_id, role, content) VALUES ($1,'assistant',$2)`, [sessionId, reply]);
-//       }
-
-//       return { reply, accessories };
-//     }
-
-//     // ===================================================================
-//     // 3. Trường hợp bình thường: user hỏi rõ loại phụ kiện → gợi ý danh sách (không hiện "còn hàng")
-//     // ===================================================================
-//     const inferredSlugs = inferAccessorySlugsFromMessage(message);
-//     const categorySlugs = opts.categoryIds?.length ? opts.categoryIds : inferredSlugs;
-
-//     if (!categorySlugs.length) {
-//       const reply = 'Bạn muốn mình gợi ý loại phụ kiện nào ạ? (ví dụ: túi xách, ví da, kính mát…)';
-//       if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content) VALUES ($1,'assistant',$2)`, [sessionId, reply]);
-//       return { reply, accessories: [] };
-//     }
-
-//     const { rows: catRows } = await client.query(
-//       `SELECT id FROM categories WHERE slug = ANY($1)`, [categorySlugs]
-//     );
-//     if (!catRows.length) {
-//       const reply = 'Mình chưa tìm thấy loại phụ kiện đó. Bạn thử nói rõ hơn được không ạ?';
-//       if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content) VALUES ($1,'assistant',$2)`, [sessionId, reply]);
-//       return { reply, accessories: [] };
-//     }
-
-//     const catIds = catRows.map(r => r.id);
-
-//     const { rows } = await client.query(`
-//       SELECT pv.id AS variant_id, pv.product_id, p.name, pv.color_name, pi.url AS image_url
-//       FROM product_variants pv
-//       JOIN products p ON pv.product_id = p.id
-//       LEFT JOIN product_images pi ON pi.variant_id = pv.id AND pi."position" = 1
-//       WHERE p.status = 'active'
-//         AND p.category_id = ANY($1)
-//         AND pv.stock_qty > 0
-//       ORDER BY COALESCE(p.sequence_id, 0) DESC, pv.sold_qty DESC
-//       LIMIT $2
-//     `, [catIds, max]);
-
-//     if (rows.length === 0) {
-//       const reply = 'Hiện tại mình chưa có mẫu nào còn hàng. Bạn muốn mình gợi ý kiểu khác không ạ?';
-//       if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content) VALUES ($1,'assistant',$2)`, [sessionId, reply]);
-//       return { reply, accessories: [] };
-//     }
-
-//     const accessories = rows.map(r => ({
-//       variant_id: String(r.variant_id),
-//       product_id: String(r.product_id),
-//       name: r.name,
-//       color: r.color_name || null,
-//       image: r.image_url
-//     }));
-
-//     // Không hiện "còn hàng" nữa — sạch sẽ, chuyên nghiệp
-//     const names = accessories.map(a => `${a.name}${a.color ? ` (${a.color})` : ''}`);
-//         const reply = `Mình gợi ý bạn ${accessories.length} mẫu đây ạ: ${names.join(', ')}.`;
-
-//     const followUp = {
-//       question: 'Bạn thích mẫu nào nhất để mình show chi tiết nè?',
-//       quickReplies: accessories.slice(0, 5).map((a, i) => `Mẫu ${i + 1}`) // Mẫu 1, Mẫu 2...
-//     };
-//     followUp.quickReplies.push('Xem thêm kiểu khác');
-
-//     if (sessionId) {
-//       await client.query(
-//         `INSERT INTO ai_chat_messages (session_id, role, content, metadata) 
-//          VALUES ($1, 'assistant', $2, $3::jsonb)`,
-//         [sessionId, reply, JSON.stringify({ accessories, followUp })]
-//       );
-//       await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//     }
-
-//     return { reply, accessories, followUp };
-
-//   } catch (err) {
-//     console.error('suggestAccessories error:', err);
-//     return { reply: 'Mình đang hơi chậm, bạn thử lại sau vài giây nha!', accessories: [] };
-//   } finally {
-//     client.release();
-//   }
-// };
-
-// Retrieve last recommendation details and resolve variant/product info for caller (used by quick retrieval intents)
-// ...existing code...
-exports.suggestAccessories = async (userId, message = '', sessionId = null, opts = {}) => {
-  const client = await pool.connect();
+exports.suggestAccessories = async (userId, message, opts = {}) => {
+  const sessionId = opts.sessionId || null;
+  let client = null;
   try {
-    const lowerMsg = String(message || '').toLowerCase();
-    const max = Math.min( parseInt(opts.max || 6, 10), 20 );
-
-    // Helper: parse accessory query -> types, colors, gender, style, priceRange
-    const parseAccessoryQuery = (text = '') => {
-      const t = String(text || '').toLowerCase();
-      const types = [];
-      if (/\b(tui|túi|tui xach|túi xách|bag|handbag|tote|clutch|crossbody|đeo cheo|đeo chéo)\b/.test(t)) types.push('túi xách');
-      if (/\b(vi|ví|bóp|wallet|purse)\b/.test(t)) types.push('ví');
-      if (/\b(kinh|kính|kính mát|sunglass|eyewear|gọng)\b/.test(t)) types.push('kính');
-      if (/\b(than|thắt lưng|belt)\b/.test(t)) types.push('thắt lưng');
-      if (/\b(dây chuyền|jewelry|jewellery|vòng cổ)\b/.test(t)) types.push('jewelry');
-
-      const colorMatch = t.match(/\b(màu\s*)?(đen|trắng|be|kem|nâu|xanh|xám|đỏ|hồng|vàng|kem|cream)\b/);
-      const color = colorMatch ? colorMatch[2] : null;
-
-      let gender = null;
-      if (/\b(nam|men|boy)\b/.test(t)) gender = 'nam';
-      if (/\b(nữ|nu|girl|women)\b/.test(t)) gender = 'nữ';
-
-      // style hints
-      const styles = [];
-      if (/\b(công sở|văn phòng|office)\b/.test(t)) styles.push('công sở');
-      if (/\b(casual|thoải mái|đơn giản|minimal)\b/.test(t)) styles.push('casual');
-      if (/\b(sang trọng|formal|party|dự tiệc)\b/.test(t)) styles.push('sang trọng');
-
-      // budget hints (basic)
-      let priceRange = null;
-      const pMatch = t.match(/(\d{3,6})\s*(k|k|đ|d|vnd)/);
-      if (pMatch) {
-        const n = Number(pMatch[1]);
-        if (!Number.isNaN(n)) priceRange = { approx: n * (pMatch[2] && /k/i.test(pMatch[2]) ? 1000 : 1) };
-      }
-
-      return { types, color, gender, styles, priceRange };
-    };
-
+    client = await pool.connect();
+  } catch (connErr) {
+    console.error('[suggestAccessories] db connect failed', connErr && connErr.stack ? connErr.stack : connErr);
+    // trả về message thân thiện cho FE (không throw để tránh crash caller)
+    return { reply: 'Lỗi kết nối! Bạn thử lại sau vài giây nha!', accessories: [] };
+  }
+  try {
+    const lowerMsg = (message || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    // 1. Parse thông minh hơn (dùng cả regex + từ điển)
     const parsed = parseAccessoryQuery(lowerMsg);
-    const inferredSlugs = opts.categoryIds?.length ? opts.categoryIds : inferAccessorySlugsFromMessage(message);
-    const explicitTypes = parsed.types.length ? parsed.types : [];
-
-    // If very broad and no hint -> ask clarifying q (keep previous UX)
-    const veryBroad = /\b(phụ kiện|phukien|accessory|phối phụ kiện|thêm phụ kiện|đeo gì)\b/i.test(lowerMsg) &&
-                      !parsed.types.length && !parsed.color && !parsed.gender && !inferredSlugs.length;
-    if (veryBroad) {
-      const reply = 'Dạ để phối thêm với outfit này thì bên mình có nhiều phụ kiện: túi xách, ví, kính mát, thắt lưng, dây chuyền... Bạn đang muốn tìm loại nào hoặc màu gì cụ thể không ạ?';
-      if (sessionId) {
-        try { await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, metadata) VALUES ($1,'assistant',$2,$3::jsonb)`, [sessionId, reply, JSON.stringify({ accessoryTypes: [] })]); } catch(e){/*non-fatal*/}
-      }
-      return { reply, accessories: [], askForType: true };
+    
+    // 2. Lấy context từ session nếu có (gender, occasion)
+    let gender = opts.context?.gender || null;
+    if (!gender && userId) {
+      const u = await client.query(`SELECT gender FROM users WHERE id = $1`, [userId]);
+      gender = u.rows[0]?.gender || null;
     }
 
-    // Resolve candidate category IDs: prefer explicit slugs, else try matching categories by name (ILIKE)
-    let categoryIds = [];
-    try {
-      if (inferredSlugs.length) {
-        const q = await client.query(`SELECT id FROM categories WHERE slug = ANY($1) LIMIT 20`, [inferredSlugs]);
-        categoryIds = q.rows.map(r => r.id);
-      }
-      if (categoryIds.length === 0 && explicitTypes.length) {
-        // try find categories whose name ILIKE any of types (parameterized)
-        const typePatterns = explicitTypes.map(s => `%${s}%`);
-        const q2 = await client.query(`SELECT id FROM categories WHERE LOWER(name) ILIKE ANY($1::text[]) LIMIT 20`, [typePatterns]);
-        categoryIds = q2.rows.map(r => r.id);
-      }
-    } catch (e) {
-      console.error('[aiService.suggestAccessories] resolve categories failed', e && e.stack ? e.stack : e);
-      categoryIds = [];
-    }
-
-    // Build product search: prefer by categoryIds if available, otherwise search product name/description by types/colors/styles
-    const whereClauses = [`p.status = 'active'`, `pv.stock_qty > 0`];
-    const params = [];
-    let paramIndex = 1;
-
-    if (categoryIds.length) {
-      params.push(categoryIds);
-      whereClauses.push(`p.category_id = ANY($${paramIndex}::uuid[])`);
-      paramIndex++;
-    } else {
-      // fallback: search product name/description by types words
-      const textSearchTerms = [];
-      for (const tt of explicitTypes.concat(parsed.styles)) if (tt) textSearchTerms.push(`%${tt}%`);
-      if (textSearchTerms.length) {
-        params.push(textSearchTerms);
-        whereClauses.push(`(LOWER(p.name) ILIKE ANY($${paramIndex}::text[]) OR LOWER(p.description) ILIKE ANY($${paramIndex}::text[]))`);
-        paramIndex++;
-      }
-    }
-
-    // color filter (optional): don't exclude if absent; prefer via scoring later
-    const colorPatterns = parsed.color ? [`%${parsed.color}%`] : null;
-    if (colorPatterns) {
-      params.push(colorPatterns);
-      // allow color match OR color_name presence; we'll boost via scoring; but include as filter to increase relevance
-      whereClauses.push(`(pv.color_name ILIKE ANY($${paramIndex}::text[]) OR LOWER(p.name) ILIKE ANY($${paramIndex}::text[]))`);
-      paramIndex++;
-    }
-
-    // price filter if provided (approx)
-    if (parsed.priceRange && parsed.priceRange.approx) {
-      const low = Math.max(0, parsed.priceRange.approx - 200000);
-      const high = parsed.priceRange.approx + 200000;
-      params.push(low, high);
-      whereClauses.push(`(COALESCE(p.final_price, p.price) BETWEEN $${paramIndex} AND $${paramIndex+1})`);
-      paramIndex += 2;
-    }
-
-    const whereSql = whereClauses.length ? ('WHERE ' + whereClauses.join(' AND ')) : '';
-
-    // query candidate variants with some base ordering; we'll compute richer score in JS
-    const sql = `
-      SELECT pv.id AS variant_id, pv.product_id, p.name, p.description, pv.color_name, pv.sizes, pv.stock_qty, p.final_price AS price, pi.url AS image_url, COALESCE(p.sequence_id,0) AS sequence_id, pv.sold_qty
-      FROM product_variants pv
-      JOIN products p ON pv.product_id = p.id
-      LEFT JOIN product_images pi ON pi.variant_id = pv.id AND pi."position" = 1
-      ${whereSql}
-      ORDER BY sequence_id DESC NULLS LAST
-      LIMIT $${paramIndex}
-    `;
-    params.push(max);
-    // execute
-    const q = await client.query(sql, params);
-    if (!q.rows || q.rows.length === 0) {
-      const reply = 'Mình chưa tìm thấy phụ kiện phù hợp với yêu cầu đó. Bạn thử chỉnh lại từ khóa (ví dụ: "túi đeo chéo màu đen") được không ạ?';
-      if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content) VALUES ($1,'assistant',$2)`, [sessionId, reply]).catch(()=>{});
-      return { reply, accessories: [] };
-    }
-
-    // Score results with lightweight heuristics: name match, color match, style match, stock & sold
-    const scoreRow = (row) => {
-      let score = 0;
-      const name = String(row.name || '').toLowerCase();
-      const desc = String(row.description || '').toLowerCase();
-      const colorName = String(row.color_name || '').toLowerCase();
-
-      // type / style match
-      for (const tt of explicitTypes) {
-        if (!tt) continue;
-        if (name.includes(tt) || desc.includes(tt)) score += 30;
-        if (name.startsWith(tt) || desc.startsWith(tt)) score += 10;
-      }
-      for (const st of parsed.styles) {
-        if (!st) continue;
-        if (name.includes(st) || desc.includes(st)) score += 8;
-      }
-
-      // color match
-      if (parsed.color) {
-        if (colorName.includes(parsed.color)) score += 20;
-        if (name.includes(parsed.color) || desc.includes(parsed.color)) score += 8;
-      }
-
-      // gender hint: prefer product name with genders
-      if (parsed.gender) {
-        if (/\b(nam|men|boy)\b/i.test(name) && parsed.gender === 'nam') score += 6;
-        if (/\b(nữ|nu|women|girl)\b/i.test(name) && parsed.gender === 'nữ') score += 6;
-      }
-
-      // popularity + stock
-      if (typeof row.sold_qty === 'number') score += Math.min(10, Math.floor(row.sold_qty / 5));
-      if (typeof row.stock_qty === 'number' && row.stock_qty > 0) score += row.stock_qty > 20 ? 6 : Math.min(4, Math.floor(row.stock_qty / 5));
-
-      // small boost for sequence
-      score += (row.sequence_id || 0) > 0 ? 3 : 0;
-
-      return score;
-    };
-
-    const rows = q.rows.map(r => ({ ...r, score: scoreRow(r) }));
-    // dedupe by product_id keeping top scoring variant per product
-    const byProduct = new Map();
-    for (const r of rows) {
-      const pid = String(r.product_id || r.variant_id);
-      if (!byProduct.has(pid) || (byProduct.get(pid).score || 0) < (r.score || 0)) byProduct.set(pid, r);
-    }
-    const candidates = Array.from(byProduct.values())
-      .sort((a,b) => (b.score - a.score) || (b.sequence_id - a.sequence_id) || ((b.stock_qty||0) - (a.stock_qty||0)))
-      .slice(0, max);
-
-    // Format accessories result
-    const accessories = candidates.map(r => ({
-      variant_id: String(r.variant_id),
-      product_id: String(r.product_id),
-      name: r.name,
-      color: r.color_name || null,
-      size: r.sizes || null,
-      price: r.price || null,
-      image: r.image_url || null,
-      score: r.score
-    }));
-
-    // Build followUp suggestions (quickReplies) prioritized by top items
-    const followUp = {
-      question: accessories.length ? 'Bạn thích mẫu nào nhất để mình show chi tiết?' : 'Mình chưa tìm được mẫu phù hợp, muốn thử màu/loại khác không?',
-      quickReplies: accessories.slice(0, 5).map((a, i) => `Mẫu ${i+1}`)
-    };
-    if (accessories.length) followUp.quickReplies.push('Xem thêm kiểu khác');
-
-    // persist assistant message and metadata
-    const names = accessories.map(a => `${a.name}${a.color ? ` (${a.color})` : ''}`);
-    const reply = accessories.length ? `Mình gợi ý ${accessories.length} mẫu: ${names.join(', ')}.` : 'Mình chưa tìm thấy mẫu phù hợp.';
-
-    if (sessionId) {
+    // 3. Nếu vẫn quá chung chung → hỏi lại (nhưng thông minh hơn)
+    if (!parsed.types.length && !parsed.color && !parsed.gender && !gender) {
+      const promptText = 'Bạn đang muốn tìm loại phụ kiện nào ạ? Túi xách, ví, kính mát hay gì khác không, mình sẵn lòng tìm giúp cho nè?';
+      const quickReplies = ['Túi xách', 'Ví da', 'Kính mát', 'Xem tất cả'];
+      // persist assistant ask so FE / history shows it
       try {
-        await client.query(
-          `INSERT INTO ai_chat_messages (session_id, role, content, metadata) VALUES ($1,'assistant',$2,$3::jsonb)`,
-          [sessionId, reply, JSON.stringify({ accessories, followUp })]
-        );
-        await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-      } catch (e) { /* non-fatal */ }
+        if (sessionId) {
+          await client.query(
+            `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+             VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
+            [sessionId, promptText, JSON.stringify({ type: 'accessories.ask', quickReplies })]
+          );
+          await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+        }
+      } catch (e) {
+        console.warn('[suggestAccessories] failed to persist clarification ask (non-fatal)', e && e.stack ? e.stack : e);
+      }
+      return {
+        reply: promptText,
+        ask: true,
+        quickReplies
+      };
     }
 
-    return { reply, accessories, followUp };
+    // 4. Build query cực mạnh + ưu tiên sản phẩm hot
+    const where = ['p.status = $1', 'pv.stock_qty > 0'];
+    const params = ['active'];
+    let idx = 2;
+
+    // Loại phụ kiện
+    if (parsed.types.length) {
+      const synonymMap = {
+        'tui': ['tui','túi','bag','handbag','tote','clutch','purse'],
+        'vi': ['vi','ví','bóp','wallet','purse'],
+        'kinh': ['kinh','kính','sunglass','eyewear','glass']
+      };
+      const tokens = parsed.types.flatMap(t => (synonymMap[t] || [t]));
+      const patterns = Array.from(new Set(tokens.map(s => `%${s}%`)));
+      // search product name/description AND category name/slug
+      where.push(`(LOWER(p.name) ILIKE ANY($${idx}::text[]) OR LOWER(p.description) ILIKE ANY($${idx}::text[]) OR LOWER(c.name) ILIKE ANY($${idx}::text[]) OR LOWER(c.slug) ILIKE ANY($${idx}::text[]))`);
+      params.push(patterns);
+      idx++;
+    }
+
+    // Màu sắc
+    if (parsed.color) {
+      // use parameterized LIKE pattern to avoid SQL syntax issues / injection
+      where.push(`(LOWER(pv.color_name) ILIKE $${idx} OR LOWER(p.name) ILIKE $${idx})`);
+      params.push('%' + parsed.color + '%');
+      idx++;
+    }
+
+    // Giới tính (nếu biết)
+    if (gender || parsed.gender) {
+      const g = (gender || parsed.gender).toLowerCase();
+      if (g === 'nam') {
+        where.push(`(LOWER(p.name) ~ 'nam|men|unisex' OR LOWER(c.name) ~ 'nam|men')`);
+      }
+      if (g === 'nữ') {
+        where.push(`(LOWER(p.name) ~ 'nữ|nu|women|unisex|girl' OR LOWER(c.name) ~ 'nữ|women')`);
+      }
+    }
+
+    const sql = `
+      SELECT 
+        pv.id::text AS variant_id,
+        p.id::text AS product_id,
+        p.name,
+        pv.color_name AS color,
+        COALESCE(p.final_price, p.price) AS price,
+        pi.url AS image_url,
+        pv.stock_qty,
+        pv.sold_qty AS sold_qty,
+        p.created_at
+      FROM product_variants pv
+      JOIN products p ON p.id = pv.product_id
+      LEFT JOIN product_images pi ON pi.variant_id = pv.id AND pi.position = 1
+      LEFT JOIN categories c ON c.id = p.category_id
+      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      ORDER BY 
+        pv.sold_qty DESC NULLS LAST,
+        p.created_at DESC
+      LIMIT 12
+    `;
+
+     let res = await client.query(sql, params);
+    if (res.rows.length === 0) {
+      console.debug('[suggestAccessories] primary query returned 0 rows', { sql: String(sql).slice(0,1000), params });
+
+      // Fallback: if category slugs / ids were provided in opts, try resolving categories and query by category tree
+      if (Array.isArray(opts.categoryIds) && opts.categoryIds.length) {
+        try {
+          const slugPatterns = opts.categoryIds.map(s => `%${String(s).toLowerCase()}%`);
+          const catQ = await client.query(
+            `SELECT id FROM categories WHERE slug = ANY($1::text[]) OR LOWER(name) ILIKE ANY($2::text[])`,
+            [opts.categoryIds, slugPatterns]
+          );
+          if (catQ.rowCount > 0) {
+            const catIds = catQ.rows.map(r => r.id);
+            const altQ = await client.query(
+              `SELECT 
+                 pv.id::text AS variant_id,
+                 p.id::text AS product_id,
+                 p.name,
+                 pv.color_name AS color,
+                 COALESCE(p.final_price, p.price) AS price,
+                 pi.url AS image_url,
+                 pv.stock_qty,
+                 pv.sold_qty AS sold_qty,
+                 p.created_at
+               FROM product_variants pv
+               JOIN products p ON p.id = pv.product_id
+               LEFT JOIN product_images pi ON pi.variant_id = pv.id AND pi.position = 1
+               WHERE p.status = 'active' AND pv.stock_qty > 0 AND p.category_id = ANY($1::uuid[])
+               ORDER BY pv.sold_qty DESC NULLS LAST, p.created_at DESC
+               LIMIT 12`,
+              [catIds]
+            );
+            if (altQ.rows.length > 0) {
+              res = altQ; // use fallback result set
+              console.debug('[suggestAccessories] fallback by category returned rows', { count: res.rows.length });
+            }
+          }
+        } catch (e) {
+          console.warn('[suggestAccessories] fallback by category failed', e && e.stack ? e.stack : e);
+        }
+      }
+
+      // still empty -> return friendly message
+      if (!res || res.rows.length === 0) {
+        return { reply: 'Hic, hiện tại shop hết mẫu bạn thích rồi ạ. Bạn muốn mình gợi ý màu/kiểu khác không?', accessories: [] };
+      }
+    }
+
+    // 5. Trả về tối đa 6 mẫu đẹp nhất + reply ngắn gọn, dễ render
+    const top = res.rows.slice(0, 6);
+    const names = top.map((x, i) => `${i+1}. ${x.name}${x.color ? ` (${x.color})` : ''}`).join('\n');
+
+    const reply = `Mình tìm được ${top.length} mẫu${parsed.types.length ? ' ' + parsed.types[0] : ''} đẹp đây ạ:\n${names}\nBạn thích mẫu nào nhất mình show chi tiết nè?`;
+
+    const followUp = {
+      quickReplies: top.slice(0, 5).map((_, i) => `Mẫu ${i+1}`),
+      extra: top.length > 5 ? ['Xem thêm'] : []
+    };
+    followUp.quickReplies.push('Không thích cái nào');
+
+    // Lưu tin nhắn assistant
+    if (sessionId) {
+      await client.query(
+        `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+         VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
+        [sessionId, reply, JSON.stringify({ type: 'accessories', items: top, followUp })]
+      );
+    }
+
+    try {
+      await client.query(
+        `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
+         VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
+        [
+          userId,
+          JSON.stringify({ message: message || '', type: 'accessories' }),
+          JSON.stringify({ accessories: top.map(t => ({
+            variant_id: String(t.variant_id),
+            product_id: String(t.product_id || ''),
+            name: t.name,
+            color: t.color,
+            price: t.price
+          })) }),
+          'luna-accessories-v1'
+        ]
+      );
+    } catch (e) {
+      console.warn('[suggestAccessories] failed to persist ai_recommendations (non-fatal)', e && e.stack ? e.stack : e);
+    }
+
+    return { reply, accessories: top, followUp };
 
   } catch (err) {
-    console.error('suggestAccessories error:', err && err.stack ? err.stack : err);
-    return { reply: 'Mình đang hơi chậm, bạn thử lại sau vài giây nha!', accessories: [] };
+    console.error('[suggestAccessories] error', err);
+    return { reply: 'Luna đang chọn phụ kiện, bạn đợi xíu nha~', accessories: [] };
   } finally {
     client.release();
   }
@@ -3032,4 +2971,84 @@ exports.retrieveLastItemDetails = async (userId, sessionId = null, message = '',
   }
 };
 
+exports.saveRecommendation = async (userId, recommendationData = {}) => {
+  const {
+    type = 'outfit',
+    items = {},
+    context = {},
+    sessionId = null,
+    model_version = 'luna-v1'
+  } = recommendationData;
 
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `INSERT INTO ai_recommendations
+        (user_id, context, items, model_version, created_at)
+      VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())
+      RETURNING id`,
+      [
+        userId,
+        JSON.stringify(context || {}),
+        JSON.stringify(items || []),
+        model_version
+      ]
+    );
+
+    const recommendationId = result.rowCount ? result.rows[0].id : null;
+
+    //nếu có sessionid -> lưu luôn message assistant để fe hiển thị
+    if(sessionId && items && items.length > 0){
+      try {
+        await client.query(
+          `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+           VALUES ($1,'assistant',$2,$3::jsonb,NOW())`,
+           [
+            sessionId,
+            'Luna đã gợi ý cho bạn rồi nè ✨',
+            JSON.stringify({
+              type: type === 'accessories' ? 'accessories_recommendation' : 'outfit_recommendation',
+              recommendation_id: recommendationId,
+              items: items
+            })
+           ]
+        );
+      } catch (e) {
+        console.warn('[saverecommendation failed to save assistant message]', e && e.stack ? e.stack : e);
+      }
+      await client.query('COMMIT');
+    }
+    return { success: true, recommendationId }; 
+  } catch (err) {
+    console.error('[aiService.saveRecommendation] error:', err);
+    return { success: false, error: err.message };
+  } finally {
+    client.release();
+  }
+};
+
+//Khi user hỏi "cái túi lần trước"
+exports.getLastRecommendationForUser = async (userId, type = null) => {
+  const client = await pool.connect();
+  try {
+    let sql = `
+      SELECT items, context, created_at 
+      FROM ai_recommendations 
+      WHERE user_id = $1
+    `;
+    const params = [userId];
+
+    if (type) {
+      sql += ` AND (context->>'type') = $2`;
+      params.push(type);
+    }
+
+    sql += ` ORDER BY created_at DESC LIMIT 1`;
+
+    const res = await client.query(sql, params);
+    return res.rows[0] || null;
+  } finally {
+    client.release();
+  }
+};

@@ -1,3 +1,4 @@
+const { context } = require('@pinecone-database/pinecone/dist/assistant/data/context');
 const aiService = require('../services/aiRecommendationService');
 
 const detectSimpleIntent = (message) => {
@@ -171,7 +172,47 @@ exports.handleChat = async (req, res) => {
          console.error('[aiRecommendationController.handleChat] generateOutfitRecommendation (more) error', err && err.stack ? err.stack : err);
          return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
        }
-     }
+    }
+
+    const lowerMessage = (message || '').toLowerCase();
+    let lastRec = null;
+    try {
+      lastRec = typeof aiService.getLastRecommendationForUser === 'function' ? await aiService.getLastRecommendationForUser(userId) : null;
+    } catch (e) {
+      console.error('[aiRecommendationController.handleChat] load lastRec failed', e && e.stack ? e.stack : e);
+      lastRec = null;
+    }
+
+    if(/(túi|ví|kính|thắt lưng|phụ kiện|bag|wallet|sunglass|belt)/i.test(lowerMessage)){
+      try {
+        const accRes = await aiService.suggestAccessories(userId, message, {
+          sessionId: session_id || null,
+          //truyền thêm context để tận dụng gender, occasion, weather nếu có
+          context: lastRec?.context ? (typeof lastRec.context === 'string' ? JSON.parse(lastRec.context) : lastRec.context) : null
+        });
+
+        //lưu luôn vào ai_recommendations giống như outfit
+        if(accRes.accessories && accRes.accessories.length > 0){
+          await aiService.saveRecommendation(userId, {
+            type: 'accessory',
+            items: accRes.accessories,
+            context: { occasion, weather, message },
+            sessionId: session_id || null
+          });
+        }
+
+        return res.json({
+          success: true,
+          message: accRes.reply,
+          data: accRes.accessories || [],
+          followUp: accRes.followUp || null,
+          sessionId: accRes.sessionId || session_id
+        });
+      }catch (err) {
+        console.error('[handleChat] suggestAccessories error', err);
+        return res.status(500).json({ success: false, message: 'Luna đang chọn túi, thử lại sau nha!' });
+      }
+    }
 
     // default: general / contextual question
     try {
