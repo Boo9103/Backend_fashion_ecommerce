@@ -408,6 +408,7 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
        product_id: String(p.product_id),
        name: p.name,
        category: p.category_name,
+       category_id: p.category_id || null,
        color: p.color_name,
        sizes: p.sizes,
        stock: p.stock_qty,
@@ -547,28 +548,36 @@ Task: Gợi 1 outfit.`;
 
     let assistantText = null;
     let aiOutfits = null;
-    // RELEASE DB CLIENT before making slow external call to avoid exhausting pool
     try {
-      // snapshot messages to local var (already built)
-      const messagesForAI = messages;
-      // log pool status (helpful to diagnose exhaustion)
-      try { pool.logStatus('before-openai'); } catch(e) {}
-      // release client now
-      try { if (client) { client.release(); client = null; } } catch(e){ /* ignore */ }
-      // call OpenAI (no DB client held)
       if (openai && typeof openai.createChatCompletion === 'function') {
         const resp = await callOpenAIWithRetry(() => openai.createChatCompletion({
           model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-          messages: messagesForAI,
+          messages,
           temperature: 0.25,
           top_p: 0.95,
           max_tokens: 800
         }));
         assistantText = (resp && (resp.choices?.[0]?.message?.content || resp.choices?.[0]?.text || '')) || '';
         console.debug('[aiService] OpenAI raw assistantText:', String(assistantText).slice(0, 2000));
+         try {
+          const jsonMatch = String(assistantText || '').match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            if (parsed && Array.isArray(parsed.outfits)) {
+              aiOutfits = parsed.outfits;
+              console.debug('[aiService] parsed aiOutfits length=', aiOutfits.length);
+            } else {
+              console.warn('[aiService] assistantText JSON parsed but outfits missing or invalid');
+            }
+          } else {
+            console.debug('[aiService] no JSON block found in assistantText');
+          }
+        } catch (ex) {
+          console.warn('[aiService] failed to parse assistantText JSON', ex && ex.message ? ex.message : ex);
+        }
       } else if (openai && typeof openai.chat === 'function') {
         const resp = await callOpenAIWithRetry(() => openai.chat({
-          messages: messagesForAI,
+          messages,
           max_tokens: 800,
           temperature: 0.25,
           top_p: 0.95
@@ -578,22 +587,9 @@ Task: Gợi 1 outfit.`;
       } else {
         throw new Error('openai.createChatCompletion not available');
       }
-    } catch (errOpenAI) {
-      console.warn('OpenAI request failed or timed out, falling back to DB heuristic:', errOpenAI && (errOpenAI.message || errOpenAI));
-      assistantText = null;
-      aiOutfits = null;
-    } finally {
-      // reacquire a DB client for the remainder of the function (if needed)
-      try {
-        if (!client) client = await pool.connectWithLogging ? await pool.connectWithLogging() : await pool.connect();
-        try { pool.logStatus('after-openai-reconnect'); } catch(e) {}
-      } catch (reconErr) {
-        console.error('[aiService] failed to reconnect DB after OpenAI call', reconErr && (reconErr.stack || reconErr.message || reconErr));
-        // safe fallback: return friendly error so FE shows message instead of crashing
-        return { reply: 'Lỗi kết nối! Bạn thử lại sau vài giây nha!', outfits: [], sessionId: opts.sessionId || null };
-      }
+    } catch (err) {
+      console.warn('OpenAI request failed or timed out, falling back to DB heuristic:', err && err.message ? err.message : err);
     }
-
     // If AI returned outfits, validate and sanitize (with fuzzy matching fallback)
     if (Array.isArray(aiOutfits) && aiOutfits.length > 0) {
       console.debug('[aiService] aiOutfits raw:', JSON.stringify(aiOutfits).slice(0,2000));
@@ -1928,7 +1924,8 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
     // if slotHints indicates accessories intent, prefer accessory path BEFORE calling outfit generator
     if (slotHints.wantsAccessories) {
       console.debug('[aiService.handleGeneralMessage] slotHints indicates wantsAccessories, delegating to suggestAccessories', { message: String(message).slice(0,200) });
-      const accResult = await exports.suggestAccessories(userId, message, sessionId, {
+      const accResult = await exports.suggestAccessories(userId, message, {
+        sessionId,
         categoryIds: inferAccessorySlugsFromMessage(message),
         max: 6,
         _userMessagePersisted
@@ -1937,15 +1934,16 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
         return { reply: accResult.reply, accessories: accResult.accessories, followUp: accResult.followUp || null, sessionId };
       }
       return { reply: accResult.reply || 'Mình chưa thấy mẫu phụ kiện nào phù hợp, bạn muốn tìm kiểu gì ạ?', accessories: [], followUp: accResult.followUp || null, sessionId };
-    }
-    const accessorySlugs = inferAccessorySlugsFromMessage(message);
-    if(accessorySlugs.length > 0) {
-      console.debug('[AI] Accessory intent detected ', {message, slugs: accessorySlugs});
+      }
+      const accessorySlugs = inferAccessorySlugsFromMessage(message);
+      if(accessorySlugs.length > 0) {
+        console.debug('[AI] Accessory intent detected ', {message, slugs: accessorySlugs});
 
-      const accResult = await exports.suggestAccessories(userId, message, sessionId, {
-        categoryIds: accessorySlugs,
-        max: 5,
-        _userMessagePersisted: _userMessagePersisted
+      const accResult = await exports.suggestAccessories(userId, message, {
+          sessionId,
+          categoryIds: accessorySlugs,
+          max: 5,
+          _userMessagePersisted: _userMessagePersisted
       });
 
       if(accResult.accessories?.length > 0){
@@ -2617,14 +2615,23 @@ const parseAccessoryQuery = (text) => {
 
 exports.suggestAccessories = async (userId, message, opts = {}) => {
   const sessionId = opts.sessionId || null;
-  let client = null;
+  const client = await pool.connect();
+
   try {
-    client = await pool.connect();
-  } catch (connErr) {
-    console.error('[suggestAccessories] db connect failed', connErr && connErr.stack ? connErr.stack : connErr);
-    // trả về message thân thiện cho FE (không throw để tránh crash caller)
-    return { reply: 'Lỗi kết nối! Bạn thử lại sau vài giây nha!', accessories: [] };
+    if (sessionId && !opts._userMessagePersisted && message && String(message).trim().length) {
+      await client.query(
+        `INSERT INTO ai_chat_messages (session_id, role, content, created_at)
+         VALUES ($1, 'user', $2, NOW())`,
+        [sessionId, String(message).trim()]
+      );
+      // keep caller informed that message was persisted
+      opts._userMessagePersisted = true;
+      await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+    }
+  } catch (e) {
+    console.warn('[suggestAccessories] non-fatal: failed to persist incoming user message', e && e.stack ? e.stack : e);
   }
+
   try {
     const lowerMsg = (message || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     // 1. Parse thông minh hơn (dùng cả regex + từ điển)
@@ -2710,7 +2717,9 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
         pi.url AS image_url,
         pv.stock_qty,
         pv.sold_qty AS sold_qty,
-        p.created_at
+        p.created_at,
+       p.category_id,
+       c.name AS category_name
       FROM product_variants pv
       JOIN products p ON p.id = pv.product_id
       LEFT JOIN product_images pi ON pi.variant_id = pv.id AND pi.position = 1
@@ -2719,10 +2728,10 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
       ORDER BY 
         pv.sold_qty DESC NULLS LAST,
         p.created_at DESC
-      LIMIT 12
+      LIMIT 48
     `;
 
-     let res = await client.query(sql, params);
+    let res = await client.query(sql, params);
     if (res.rows.length === 0) {
       console.debug('[suggestAccessories] primary query returned 0 rows', { sql: String(sql).slice(0,1000), params });
 
@@ -2772,17 +2781,22 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
     }
 
     // 5. Trả về tối đa 6 mẫu đẹp nhất + reply ngắn gọn, dễ render
-    const top = res.rows.slice(0, 6);
+    // Prioritize actual accessories (avoid returning pants/áo when user asked "túi/xách")
+    const accessoryRe = /\b(kính|kinh|túi|tui|ví|vi|phụ[ -]?kiện|phukien|clutch|wallet|bag|handbag|sunglass|jewelry|purse|shoulder|tote|crossbody)\b/i;
+    const rows = res.rows || [];
+    const accessoryRows = rows.filter(r => accessoryRe.test(((r.category_name || '') + ' ' + (r.name || '')).toLowerCase()));
+    const nonAccessoryRows = rows.filter(r => !accessoryRe.test(((r.category_name || '') + ' ' + (r.name || '')).toLowerCase()));
+    const top = accessoryRows.concat(nonAccessoryRows).slice(0, 6);
     const names = top.map((x, i) => `${i+1}. ${x.name}${x.color ? ` (${x.color})` : ''}`).join('\n');
-
+ 
     const reply = `Mình tìm được ${top.length} mẫu${parsed.types.length ? ' ' + parsed.types[0] : ''} đẹp đây ạ:\n${names}\nBạn thích mẫu nào nhất mình show chi tiết nè?`;
 
-    const followUp = {
-      quickReplies: top.slice(0, 5).map((_, i) => `Mẫu ${i+1}`),
-      extra: top.length > 5 ? ['Xem thêm'] : []
-    };
-    followUp.quickReplies.push('Không thích cái nào');
-
+    // quickReplies: Mẫu 1..Mẫu N (N = top.length, up to 6) then "Không thích cái nào"
+    const quickReplies = top.map((_, i) => `Mẫu ${i+1}`);
+    if (top.length === 7) quickReplies.push('Xem thêm');
+    quickReplies.push('Không thích cái nào');
+    const followUp = { quickReplies, extra: [] };
+ 
     // Lưu tin nhắn assistant
     if (sessionId) {
       await client.query(
