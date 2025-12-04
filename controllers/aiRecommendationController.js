@@ -6,6 +6,11 @@ const detectSimpleIntent = (message) => {
   if (/^(xem thêm|xem tiếp|thêm|show more|more)/i.test(m) || /xem thêm|xem tiếp|thêm|show more|more/.test(m)) {
     return { type: 'more' };
   }
+  const sampleSel = m.match(/(?:mẫu|mau)(?:\s*(?:số|thứ)?)?\s*(\d+)/i);
+  if (sampleSel && sampleSel[1]) {
+    const idx = parseInt(sampleSel[1], 10);
+    if (!Number.isNaN(idx) && idx > 0) return { type: 'select', index: idx };
+  }
   const sel = m.match(/(?:chọn|mình thích|mình thấy|thích).*(?:thứ\s*)?(\d+)/i) || m.match(/(?:chọn|select)\s*(\d+)/i);
   if (sel && sel[1]) {
     const idx = parseInt(sel[1], 10);
@@ -106,6 +111,64 @@ exports.handleChat = async (req, res) => {
 
     if (intent.type === 'select') {
       try {
+        // handle accessory follow-up selection first (e.g. "mẫu 1", "mẫu 2", "mau 1" ...)
+        let lastRec = null;
+        try {
+          lastRec = typeof aiService.getLastRecommendationForUser === 'function' ? await aiService.getLastRecommendationForUser(userId) : null;
+        } catch (e) {
+          console.error('[aiRecommendationController.handleChat] load lastRec failed (select)', e && e.stack ? e.stack : e);
+          lastRec = null;
+        }
+
+        const selIndex = Number.isFinite(intent.index) ? intent.index : null;
+
+        // Normalize and detect accessory list robustly from lastRec
+        if (selIndex && lastRec) {
+          let recItems = lastRec.items;
+          try { recItems = (typeof recItems === 'string') ? JSON.parse(recItems) : recItems; } catch (e) { /* ignore parse error */ }
+
+          let accessoryList = [];
+          if (Array.isArray(recItems)) accessoryList = recItems;
+          else if (recItems && Array.isArray(recItems.accessories)) accessoryList = recItems.accessories;
+          else if (recItems && Array.isArray(recItems.items)) accessoryList = recItems.items;
+
+          // also consider context.type stored as 'accessories' or 'accessory'
+          if ((!accessoryList || accessoryList.length === 0) && lastRec.context) {
+            try {
+              const ctx = (typeof lastRec.context === 'string') ? JSON.parse(lastRec.context) : lastRec.context;
+              if (ctx && (ctx.type === 'accessories' || ctx.type === 'accessory')) {
+                // try to interpret lastRec.items anyway
+                if (recItems && Array.isArray(recItems.accessories)) accessoryList = recItems.accessories;
+                else if (recItems && Array.isArray(recItems.items)) accessoryList = recItems.items;
+              }
+            } catch (e) { /* ignore context parse errors */ }
+          }
+
+          if (Array.isArray(accessoryList) && accessoryList.length >= selIndex && selIndex > 0) {
+            const chosen = accessoryList[selIndex - 1];
+            // persist user's selection as a new/single-item recommendation (best-effort)
+            try {
+              await aiService.saveRecommendation(userId, {
+                type: 'accessory',
+                items: [chosen],
+                context: lastRec.context ? (typeof lastRec.context === 'string' ? JSON.parse(lastRec.context) : lastRec.context) : null,
+                sessionId: session_id || lastRec.session_id || null
+              });
+            } catch (e) {
+              console.error('[aiRecommendationController.handleChat] saveRecommendation (accessory select) failed', e && e.stack ? e.stack : e);
+            }
+
+            // reply with selected accessory
+            return res.json({
+              success: true,
+              message: `Mình đã chọn mẫu ${selIndex} cho bạn.`,
+              selected: chosen,
+              sessionId: session_id || lastRec.session_id || null
+            });
+          }
+        }
+
+        // fallback to outfit selection flow
         const sel = await aiService.handleOutfitSelection(userId, session_id || null, intent.index);
         if (!sel) {
           console.error('[aiRecommendationController.handleChat] handleOutfitSelection returned empty');

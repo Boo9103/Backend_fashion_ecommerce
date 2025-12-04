@@ -2869,13 +2869,14 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
     // Loại phụ kiện
     if (parsed.types.length) {
       const synonymMap = {
-        'tui': ['tui','túi','bag','handbag','tote','clutch','purse'],
-        'vi': ['vi','ví','bóp','wallet','purse'],
+        'tui': ['tui','túi','bag','handbag','tote','clutch'],
+        'vi': ['vi','ví','bóp','wallet'], // do NOT include 'bag' here
         'kinh': ['kinh','kính','sunglass','eyewear','glass']
       };
-      const tokens = parsed.types.flatMap(t => (synonymMap[t] || [t]));
+      const primaryType = String(parsed.types[0] || '').toLowerCase();
+      const tokens = (synonymMap[primaryType] || [primaryType]).map(s => String(s).toLowerCase());
       const patterns = Array.from(new Set(tokens.map(s => `%${s}%`)));
-      // search product name/description AND category name/slug
+      // search product name/description AND category name/slug (parameterized)
       where.push(`(LOWER(p.name) ILIKE ANY($${idx}::text[]) OR LOWER(p.description) ILIKE ANY($${idx}::text[]) OR LOWER(c.name) ILIKE ANY($${idx}::text[]) OR LOWER(c.slug) ILIKE ANY($${idx}::text[]))`);
       params.push(patterns);
       idx++;
@@ -3227,28 +3228,6 @@ exports.saveRecommendation = async (userId, recommendationData = {}) => {
     );
 
     const recommendationId = result.rowCount ? result.rows[0].id : null;
-
-    //nếu có sessionid -> lưu luôn message assistant để fe hiển thị
-    if(sessionId && items && items.length > 0){
-      try {
-        await client.query(
-          `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
-           VALUES ($1,'assistant',$2,$3::jsonb,NOW())`,
-           [
-            sessionId,
-            'Luna đã gợi ý cho bạn rồi nè ✨',
-            JSON.stringify({
-              type: type === 'accessories' ? 'accessories_recommendation' : 'outfit_recommendation',
-              recommendation_id: recommendationId,
-              items: items
-            })
-           ]
-        );
-      } catch (e) {
-        console.warn('[saverecommendation failed to save assistant message]', e && e.stack ? e.stack : e);
-      }
-      await client.query('COMMIT');
-    }
     return { success: true, recommendationId }; 
   } catch (err) {
     console.error('[aiService.saveRecommendation] error:', err);
