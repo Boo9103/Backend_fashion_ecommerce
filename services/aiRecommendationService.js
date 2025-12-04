@@ -238,7 +238,15 @@ exports.generateOutfitRecommendation = async (userId, occasion, weather, opts = 
         weather = weather || aiParsed.weather || null;
         opts.inferredStyle = opts.inferredStyle || aiParsed.style || null;
         opts.inferredGender = opts.inferredGender || aiParsed.gender || null;
-        opts.inferredWantsAccessories = opts.inferredWantsAccessories || aiParsed.wantsAccessories || false;
+         const accessoryKeywordsRe = /\b(phụ kiện|túi|ví|kính|kính mát|wallet|bag|tui|sunglass|clutch|purse)\b/i;
+        const explicitMention = accessoryKeywordsRe.test(String(opts.message || '')) || (ruleSlots && ruleSlots.wantsAccessories) || Boolean(opts.inferredWantsAccessories);
+        if (aiParsed.wantsAccessories && explicitMention) {
+          opts.inferredWantsAccessories = true;
+        } else {
+          // keep any previous true value, otherwise stay false
+          opts.inferredWantsAccessories = Boolean(opts.inferredWantsAccessories);
+        }
+        if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService.generateOutfitRecommendation.DEBUG] aiParsed:', aiParsed, 'explicitAccessoryMention:', explicitMention, 'final.inferredWantsAccessories:', opts.inferredWantsAccessories);
       }
     }
   }
@@ -649,29 +657,39 @@ Task: Gợi 1 outfit.`;
           };
         }
 
+        const accessoryRe = /\b(kính|kinh|túi|tui|ví|vi|phụ[ -]?kiện|phukien|clutch|wallet|bag|handbag|sunglass|eyewear|purse|jewelry|jewellery)\b/i;
+        const topRe = /\b(áo|top|shirt|tee|blouse|sơ mi|hoodie|polo|t-shirt|jacket|coat|áo khoác|đầm|dress)\b/i;
+        const bottomRe = /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki|chino)\b/i;
+        // use `let` because we reassign finalOutfitsToReturn later
+        let finalOutfitsToReturn = [];
+
+        // Build accessoryCategoryIdSet robustly:
+        // 1) primary: categories with accessory-like slugs/names (fast check)
+        // 2) fallback: scan namesByVariant.category_name / product name for accessory keywords
         let accessoryCategoryIdSet = new Set();
         try {
-          const accessorySlugsToCheck = [
-            'phu-kien', 'phu-kien/kinh-mat', 'phu-kien/gong-kinh',
-            'tui-xach-nu/tui-xach', 'phu-kien/vi-nu', 'phu-kien/vi-nam'
-          ];
-          const namePatterns = ['%phu kien%','%phụ kiện%','%kính%','%kinh%','%eyewear%','%glasses%','%sunglass%','%ví%','%vi%','%túi%','%bag%','%handbag%'];
+          const namePatterns = ['%phu-kien%','%phụ kiện%','%kính%','%kinh%','%eyewear%','%glasses%','%sunglass%','%ví%','%vi%','%túi%','%bag%','%handbag%'];
           const catQ = await client.query(
-            `WITH seeds AS (
-               SELECT id FROM categories WHERE slug = ANY($1::text[]) OR LOWER(name) ILIKE ANY($2::text[])
-             ), rec AS (
-               SELECT id, parent_id FROM categories WHERE id IN (SELECT id FROM seeds)
-               UNION
-               SELECT c.id, c.parent_id FROM categories c JOIN rec ON c.parent_id = rec.id
-             )
-             SELECT DISTINCT id FROM rec`,
-            [accessorySlugsToCheck, namePatterns]
+            `SELECT id FROM categories WHERE LOWER(slug) ILIKE ANY($1::text[]) OR LOWER(name) ILIKE ANY($1::text[]) LIMIT 50`,
+            [namePatterns]
           );
           for (const r of (catQ.rows || [])) accessoryCategoryIdSet.add(String(r.id));
-          if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService] accessoryCategoryIdSet prebuilt', Array.from(accessoryCategoryIdSet));
         } catch (e) {
           accessoryCategoryIdSet = new Set();
         }
+        // fallback: if categories failed to detect, check products' category_name/name text for accessory cues
+        try {
+          const accessoryTextRe = /\b(kính|kinh|túi|tui|ví|vi|phụ[ -]?kiện|clutch|wallet|bag|handbag|sunglass|eyewear|purse)\b/i;
+          for (const [vid, info] of Object.entries(namesByVariant)) {
+            const catName = (info.category_name || '').toString();
+            const prodName = (info.name || '').toString();
+            if (accessoryTextRe.test(catName + ' ' + prodName) && info.category_id) {
+              accessoryCategoryIdSet.add(String(info.category_id));
+            }
+          }
+        } catch (e) { /* ignore */ }
+        if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService] accessoryCategoryIdSet built', Array.from(accessoryCategoryIdSet));
+
 
         // Ensure we have DB metadata for any variant IDs AI returned but were not in the products snapshot
         const aiVariantIds = new Set();
@@ -704,11 +722,6 @@ Task: Gợi 1 outfit.`;
           }
         }
  
-        // Enhanced filtering & ensure top+bottom (avoid accessory-only outfits)
-        const accessoryRe = /\b(kính|kinh|túi|tui|ví|vi|phụ kiện|phukien|clutch|wallet|bag|handbag|sunglass|jewelry|jewellery)\b/i;
-        const topRe = /\b(áo|top|shirt|tee|blouse|sơ mi|hoodie|polo|t-shirt|jacket|coat|áo khoác|đầm|dress)\b/i;
-        const bottomRe = /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki|chino)\b/i;
-        
         const getCombinedTextForVid = (vid) => {
           const info = namesByVariant[String(vid)] || {};
           const cat = (info.category_name || '').toString();
@@ -830,46 +843,6 @@ Task: Gợi 1 outfit.`;
             });
           }
         }
-         // Enforce EXACTLY 1 Top + 1 Bottom per outfit (try to pick from outfit, else pick from product pool)
-        // const makeOneTopOneBottom = (items = []) => {
-        //   if (!Array.isArray(items) || items.length === 0) return null;
-        //   const topReLocal = /\b(áo|top|shirt|tee|blouse|sơ mi|áo len|hoodie|polo|t-shirt|jacket|coat|đầm|dress)\b/i;
-        //   const bottomReLocal = /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki|chino)\b/i;
-        //   const getText = (vid) => {
-        //     const info = namesByVariant[String(vid)] || {};
-        //     return (((info.category_name || '') + ' ' + (info.name || '')).toString()).toLowerCase();
-        //   };
-
-        //   let top = null, bottom = null;
-        //   for (const v of items) {
-        //     const t = getText(v);
-        //     if (!top && topReLocal.test(t)) top = v;
-        //     if (!bottom && bottomReLocal.test(t)) bottom = v;
-        //     if (top && bottom) break;
-        //   }
-
-        //   // fallback: search compactProducts pool for missing piece(s)
-        //   if (!top) {
-        //     const cand = compactProducts.find(p => {
-        //       const combined = (((p.category||'') + ' ' + (p.name||'')).toLowerCase());
-        //       // absolute reject accessories
-        //       if (accessoryCategoryIdSet.has(String(p.category_id || '')) || accessoryRe.test(combined)) return false;
-        //       return topReLocal.test(combined) && validVariants.has(String(p.variant_id));
-        //     });
-        //     if (cand) top = String(cand.variant_id);
-        //   }
-        //   if (!bottom) {
-        //     const cand = compactProducts.find(p => {
-        //       const combined = (((p.category||'') + ' ' + (p.name||'')).toLowerCase());
-        //       if (accessoryCategoryIdSet.has(String(p.category_id || '')) || accessoryRe.test(combined)) return false;
-        //       return bottomReLocal.test(combined) && validVariants.has(String(p.variant_id));
-        //     });
-        //     if (cand) bottom = String(cand.variant_id);
-        //   }
-
-        //   if (top && bottom && top !== bottom) return [top, bottom];
-        //   return null;
-        // };
 
         const processedSanitized = [];
         for (const out of filteredSanitized) {
@@ -879,8 +852,89 @@ Task: Gợi 1 outfit.`;
           processedSanitized.push(out);
         }
 
+        finalOutfitsToReturn = [];
+        for (const out of processedSanitized) {
+          // normalize and re-verify Top/Bottom
+          const namesForItems = out.items.map(vid => ({ vid, text: ((namesByVariant[String(vid)]?.category_name || '') + ' ' + (namesByVariant[String(vid)]?.name || '')).toLowerCase() }));
+          const hasTop = namesForItems.some(x => /\b(áo|top|shirt|tee|blouse|sơ mi|áo len|hoodie|polo|t-shirt|jacket|coat|đầm|dress)\b/i.test(x.text));
+          const hasBottom = namesForItems.some(x => /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki|chino)\b/i.test(x.text));
+          // if missing top or bottom -> try to pull from compactProducts (non-accessory)
+          if (!hasTop || !hasBottom) {
+            const neededTop = !hasTop;
+            const neededBottom = !hasBottom;
+            const added = [];
+            if (neededTop) {
+              const cand = compactProducts.find(p => {
+                if (!validVariants.has(String(p.variant_id))) return false;
+                if (p.category_id && accessoryCategoryIdSet.has(String(p.category_id))) return false;
+                return /\b(áo|top|shirt|tee|blouse|sơ mi|áo len|hoodie|polo|t-shirt|jacket|coat|đầm|dress)\b/i.test(((p.category||'') + ' ' + (p.name||'')).toLowerCase());
+              });
+              if (cand) added.push(String(cand.variant_id));
+            }
+            if (neededBottom) {
+              const cand = compactProducts.find(p => {
+                if (!validVariants.has(String(p.variant_id))) return false;
+                if (p.category_id && accessoryCategoryIdSet.has(String(p.category_id))) return false;
+                return /\b(quần|pants|jean|short|skirt|váy|legging|trousers|kaki|chino)\b/i.test(((p.category||'') + ' ' + (p.name||'')).toLowerCase());
+              });
+              if (cand) added.push(String(cand.variant_id));
+            }
+            out.items = [...new Set([...added, ...out.items])];
+          }
+          // now remove accessory items if user didn't request accessories
+          if (!opts.inferredWantsAccessories) {
+            out.items = out.items.filter(vid => {
+              const info = namesByVariant[String(vid)] || {};
+              const cid = info.category_id ? String(info.category_id) : null;
+              if (cid && accessoryCategoryIdSet.has(cid)) return false;
+              const combined = (((info.category_name || '') + ' ' + (info.name || '')).toString()).toLowerCase();
+              if (accessoryRe.test(combined)) return false;
+              return true;
+            });
+          } else {
+            // cap accessories to 1 and dedupe similar accessories
+            const accSeen = new Set();
+            const newItems = [];
+            for (const vid of out.items) {
+              const info = namesByVariant[String(vid)] || {};
+              const combined = (((info.category_name || '') + ' ' + (info.name || '')).toString()).toLowerCase();
+              const isAcc = accessoryRe.test(combined) || (info.category_id && accessoryCategoryIdSet.has(String(info.category_id)));
+              if (isAcc) {
+                const key = (info.category_name || info.name || '').toLowerCase().replace(/\s+/g,' ').trim();
+                if (accSeen.has(key)) continue;
+                if (accSeen.size >= 1) continue;+                accSeen.add(key);
+                accSeen.add(key);
+                newItems.push(vid);
+              } else {
+                newItems.push(vid);
+              }
+            }
+            out.items = newItems;
+          }
+
+          // final Top+Bottom check -> normalize to exactly one top+one bottom (keep order)
+          const enforced = makeOneTopOneBottom(out.items || [], namesByVariant, accessoryCategoryIdSet);
+          if (enforced && enforced.length >= 2) {
+            // attach accessory (if allowed and exists among original items) up to 1
+            if (opts.inferredWantsAccessories) {
+              const acc = (out.items || []).find(vid => {
+                const info = namesByVariant[String(vid)] || {};
+                const combined = (((info.category_name||'') + ' ' + (info.name||'')).toLowerCase());
+                const cid = info.category_id ? String(info.category_id) : null;
+                if (cid && accessoryCategoryIdSet.has(cid)) return true;
+                return accessoryRe.test(combined);
+              });
+              if (acc && !enforced.includes(acc)) enforced.push(acc);
+            }
+            out.items = enforced.slice(0, 3);
+            finalOutfitsToReturn.push(out);
+          }
+        }
+        // limited final set
+        const limitedSanitized = finalOutfitsToReturn.slice(0, Math.max(1, opts.maxOutfits || 1));
+
         // limit final outfits (server generally returns 1; keep opts.maxOutfits fallback)
-        const limitedSanitized = processedSanitized.slice(0, Math.max(1, opts.maxOutfits || 1));
+        //const limitedSanitized = processedSanitized.slice(0, Math.max(1, opts.maxOutfits || 1));
         //const accessoryRe = /\b(kính|kinh|túi|tui|ví|vi|phụ kiện|phukien|clutch|wallet|bag|handbag|sunglass|jewelry|jewellery)\b/i;
         const finalCleaned = [];
         for (const out of limitedSanitized) {
@@ -903,7 +957,7 @@ Task: Gợi 1 outfit.`;
         }
 
         // use finalCleaned instead of limitedSanitized downstream
-        const finalOutfitsToReturn = finalCleaned;
+        finalOutfitsToReturn = finalCleaned;
         for (const out of finalOutfitsToReturn) {
           // create readable fragment per item
           const firstTwo = (out.items || []).slice(0, 2);
@@ -974,11 +1028,7 @@ Task: Gợi 1 outfit.`;
         // === TÁCH RIÊNG TEXT + FOLLOW-UP ===
         let cleanReply = finalOutfitsToReturn.length
                 ? finalOutfitsToReturn.map((o, idx) => `${o.name} — ${o.description}`).join('\n\n')
-                 : `Mình đã gợi ý ${limitedSanitized.length} set cho bạn.`;
-        if (userHasMeasurements && sizeHints.length > 0) {
-          cleanReply += ' ' + sizeHints.join(' ');
-        }
-
+                : `Mình đã gợi ý ${limitedSanitized.length} set cho bạn.`;
         // Tạo followUp riêng cho FE render nút bấm
         const followUp = {
           question: '',
@@ -1424,6 +1474,7 @@ exports.handleOutfitSelection = async (userId, sessionId, index) => {
 // Robust handleGeneralMessage: always returns an object and logs helpful info
 exports.handleGeneralMessage = async (userId, opts = {}) => {
   const client = await pool.connect();
+  
   try {
     const { message = '', sessionId = null, lastRecommendationAllowed = true } = opts || {};
     console.log('[aiService.handleGeneralMessage] start (no early persist)', { userId, sessionId, message: String(message).slice(0,120) });
@@ -1479,6 +1530,15 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
     const lowerMsg = String(message || '').toLowerCase();
     const slotHints = (typeof extractSlotsFromMessage === 'function') ? extractSlotsFromMessage(message || '') : {};
 
+    if (process.env.DEBUG_AI_SERVICE) {
+      try {
+        console.debug('[aiService.handleGeneralMessage.DEBUG] incoming message (raw):', String(message).slice(0,1000));
+        console.debug('[aiService.handleGeneralMessage.DEBUG] lowerMsg:', lowerMsg);
+        console.debug('[aiService.handleGeneralMessage.DEBUG] slotHints:', slotHints);
+        console.debug('[aiService.handleGeneralMessage.DEBUG] lastRec (preview):', lastRec ? { id: lastRec.id, context: lastRec.context } : null);
+        console.debug('[aiService.handleGeneralMessage.DEBUG] lastAccessoryRec (preview):', lastAccessoryRec ? { id: lastAccessoryRec.id, itemsPreview: (typeof lastAccessoryRec.items === "string" ? lastAccessoryRec.items.slice(0,200) : JSON.stringify(lastAccessoryRec.items || {}).slice(0,200)) } : null);
+      } catch (e) { console.error('[aiService.DEBUG] safe debug log failed', e && e.stack ? e.stack : e); }
+    }
     let sessionHistory = [];
     try {
       sessionHistory = await loadSessionHistory(client, sessionId, 60) || [];
@@ -1689,8 +1749,28 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
                         return { variant_id: String(vid), suggested_size: sz };
                       });
 
-                      const lines = suggestions.map(s => `${s.variant_id} → ${s.suggested_size || 'Không rõ (cần số đo chi tiết)'}`);
-                      const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}. Nếu bạn muốn mặc rộng hơn thì tăng lên 1 size nhé!`;
+                      // Lấy tên + màu cho các variant để hiển thị thân thiện
+                      const vIds = suggestions.map(s => s.variant_id);
+                      let namesMap = {};
+                      try {
+                        const nQ = await client.query(
+                          `SELECT pv.id AS variant_id, p.name AS product_name, pv.color_name
+                           FROM product_variants pv JOIN products p ON pv.product_id = p.id
+                           WHERE pv.id = ANY($1::uuid[])`,
+                          [vIds]
+                        );
+                        for (const r of (nQ.rows || [])) {
+                          namesMap[String(r.variant_id)] = { product_name: r.product_name, color: r.color_name };
+                        }
+                      } catch (e) { /* ignore */ }
+
+                      const lines = suggestions.map(s => {
+                        const info = namesMap[s.variant_id] || {};
+                        const name = info.product_name || s.variant_id;
+                        const color = info.color_name ? ` (${info.color_name})` : '';
+                        return `${name}${color} → ${s.suggested_size || 'Không rõ'}`;
+                      });
+                      const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}. Nếu bạn muốn mặc rộng hơn thì tăng 1 size nhé.`;
                       if (sessionId) {
                         await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`, [sessionId, reply, JSON.stringify({ size_suggestions: suggestions })]);
                         await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
@@ -1846,8 +1926,27 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
           return { variant_id: String(vid), suggested_size: sz };
         });
 
-        const lines = suggestions.map(s => `${s.variant_id} → ${s.suggested_size || 'Không rõ (cần số đo chi tiết)'}`);
-        const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}. Mình nghĩ là nó vừa khít với bạn ấy, nếu bạn muốn mặc rộng 1 tí thì cân nhắc tăng lên 1 size nữa nhe.`;
+        const vIds = suggestions.map(s => s.variant_id);
+        let namesMap = {};
+        try {
+          const nQ = await client.query(
+            `SELECT pv.id AS variant_id, p.name AS product_name, pv.color_name
+             FROM product_variants pv JOIN products p ON pv.product_id = p.id
+             WHERE pv.id = ANY($1::uuid[])`,
+            [vIds]
+          );
+          for (const r of (nQ.rows || [])) {
+            namesMap[String(r.variant_id)] = { product_name: r.product_name, color: r.color_name };
+          }
+        } catch (e) { /* ignore */ }
+
+        const lines = suggestions.map(s => {
+          const info = namesMap[s.variant_id] || {};
+          const name = info.product_name || s.variant_id;
+          const color = info.color_name ? ` (${info.color_name})` : '';
+          return `${name}${color} → ${s.suggested_size || 'Không rõ'}`;
+        });
+        const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}. Nếu bạn muốn mặc rộng hơn thì tăng 1 size nhé.`;
         if (sessionId) {
           await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`, [sessionId, reply, JSON.stringify({ size_suggestions: suggestions })]);
           await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
@@ -1924,12 +2023,21 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
     // if slotHints indicates accessories intent, prefer accessory path BEFORE calling outfit generator
     if (slotHints.wantsAccessories) {
       console.debug('[aiService.handleGeneralMessage] slotHints indicates wantsAccessories, delegating to suggestAccessories', { message: String(message).slice(0,200) });
+      if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService.handleGeneralMessage.DEBUG] accessory branch triggered by slotHints');
       const accResult = await exports.suggestAccessories(userId, message, {
         sessionId,
         categoryIds: inferAccessorySlugsFromMessage(message),
         max: 6,
         _userMessagePersisted
       });
+
+      if (process.env.DEBUG_AI_SERVICE) {
+        console.debug('[aiService.handleGeneralMessage.DEBUG] suggestAccessories result preview:', {
+          reply: accResult && accResult.reply ? String(accResult.reply).slice(0,400) : null,
+          accessoriesCount: Array.isArray(accResult?.accessories) ? accResult.accessories.length : 0,
+          ask: accResult?.ask || false
+        });
+      }
       if (accResult.accessories?.length > 0) {
         return { reply: accResult.reply, accessories: accResult.accessories, followUp: accResult.followUp || null, sessionId };
       }
@@ -2308,6 +2416,54 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       }
     }
 
+    // PRIORITY: nếu user hỏi "thông tin / xem chi tiết" => trả chi tiết món trước, KHÔNG gọi generator
+    const itemDetailIntent = /\b(thông tin chi tiết|thông tin|chi tiết|xem chi tiết|cho mình thông tin|cho mình xem chi tiết|cho mình thông tin của|chi tiết của)\b/i;
+    if (itemDetailIntent.test(lowerMsg)) {
+      try {
+        const itemRes = await exports.retrieveLastItemDetails(userId, sessionId, message);
+        if (itemRes) {
+          if (itemRes.ask) return { ask: itemRes.ask, sessionId };
+          return { reply: itemRes.reply, item: itemRes.item, sessionId };
+        }
+        // if retrieve didn't return useful data, fall through to normal flow
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] retrieveLastItemDetails failed', e && e.stack ? e.stack : e);
+        // fallthrough to recommendation flow
+      }
+    }
+
+    // thì xử lý branch phụ kiện NGAY lập tức (không gọi generator outfit).
+    const accessoryRequestForExistingOutfitRe = /\b(tư vấn thêm phụ kiện|tư vấn phụ kiện|thêm phụ kiện|chọn thêm phụ kiện|phụ kiện cho (?:outfit|bộ)|phụ kiện cho bộ|cho outfit này|cho bộ này|bộ vừa rồi|outfit vừa rồi)\b/i;
+    if (accessoryRequestForExistingOutfitRe.test(String(message || '')) || slotHints.wantsAccessories) {
+       if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService.handleGeneralMessage.DEBUG] accessoryRequestForExistingOutfitRe matched:', String(message).slice(0,200));
+      try {
+        // suggestAccessories đã có logic lấy last recommendation khi detect cụm "outfit này" bên trong nó;
+        // truyền _userMessagePersisted để tránh double-persist nếu cần.
+        const accRes = await exports.suggestAccessories(userId, message, {
+          sessionId,
+          _userMessagePersisted
+        });
+
+        if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService.handleGeneralMessage.DEBUG] suggestAccessories (outfit branch) returned', {
+          reply: accRes && accRes.reply ? String(accRes.reply).slice(0,400) : null,
+          accessoriesCount: Array.isArray(accRes?.accessories) ? accRes.accessories.length : 0,
+          ask: !!accRes?.ask
+        });
+        if (accRes) {
+          if (accRes.ask) return { ask: accRes.ask, sessionId };
+          if (Array.isArray(accRes.accessories) && accRes.accessories.length > 0) {
+            return { reply: accRes.reply, accessories: accRes.accessories, followUp: accRes.followUp || null, sessionId };
+          }
+          // nếu không có accessories nhưng suggestAccessories trả reply/ask thì trả luôn
+          if (accRes.reply) return { reply: accRes.reply, accessories: accRes.accessories || [], sessionId };
+        }
+        // nếu suggestAccessories không tìm được gì, fallthrough để có thể gọi generator nếu cần
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] accessory-priority branch failed', e && e.stack ? e.stack : e);
+        // tiếp tục flow bình thường
+      }
+    }
+
     // If user asked for new recommendation (original flow)
     if (recommendIntentRe.test(lowerMsg) || quickSuggestKeywords.test(lowerMsg) || slotHints.occasion || slotHints.style || (slotHints.productHints && slotHints.productHints.length)) {
       try {
@@ -2636,6 +2792,43 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
     const lowerMsg = (message || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     // 1. Parse thông minh hơn (dùng cả regex + từ điển)
     const parsed = parseAccessoryQuery(lowerMsg);
+    const typeDisplayMap = { tui: 'túi', vi: 'ví', kinh: 'kính' };
+    const requestedType = (parsed.types && parsed.types.length) ? parsed.types[0] : null;
+    const displayType = requestedType ? (typeDisplayMap[requestedType] || requestedType) : null;
+    // 1.a Nếu user yêu cầu phụ kiện "cho outfit này / cho bộ vừa rồi / cho bộ trước",
+    // thì ưu tiên dùng context của last recommendation để tìm phụ kiện tương thích.
+    const accessoryForOutfitRe = /\b(outfit này|bộ này|bộ vừa|bộ vừa rồi|bộ trước|phụ kiện cho (?:outfit|bộ)|phụ kiện cho bộ|thêm phụ kiện cho bộ|tư vấn thêm phụ kiện)\b/i;
+    if (accessoryForOutfitRe.test(String(message || ''))) {
+      try {
+        const last = await exports.getLastRecommendationForUser(userId);
+        if (last && last.items) {
+          let recJson = last.items;
+          if (typeof recJson === 'string') {
+            try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; }
+          }
+          const outfitVariants = (recJson && recJson.outfits && recJson.outfits[0] && Array.isArray(recJson.outfits[0].items))
+            ? recJson.outfits[0].items.map(String)
+            : [];
+          if (outfitVariants.length) {
+            // lấy category_id của các variant trong outfit để ưu tiên query accessory cùng gam màu / cùng nhóm
+            try {
+              const metaQ = await client.query(
+                `SELECT pv.id AS variant_id, p.category_id
+                 FROM product_variants pv
+                 JOIN products p ON pv.product_id = p.id
+                 WHERE pv.id = ANY($1::uuid[])`,
+                [outfitVariants]
+              );
+              const outfitCatIds = Array.from(new Set((metaQ.rows || []).map(r => r.category_id).filter(Boolean)));
+              if (outfitCatIds.length) {
+                opts._fromLastOutfit = true;
+                opts._outfitCategoryIds = outfitCatIds;
+              }
+            } catch (e) { /* ignore */ }
+          }
+        }
+      } catch (e) { /* ignore */ }
+    }
     
     // 2. Lấy context từ session nếu có (gender, occasion)
     let gender = opts.context?.gender || null;
@@ -2707,29 +2900,37 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
       }
     }
 
-    const sql = `
+    let sql = `
       SELECT 
         pv.id::text AS variant_id,
         p.id::text AS product_id,
         p.name,
         pv.color_name AS color,
         COALESCE(p.final_price, p.price) AS price,
-        pi.url AS image_url,
+        COALESCE(
+          (SELECT url FROM product_images WHERE variant_id = pv.id ORDER BY position LIMIT 1),
+          (SELECT url FROM product_images WHERE product_id = p.id ORDER BY position LIMIT 1)
+        ) AS image_url,
         pv.stock_qty,
         pv.sold_qty AS sold_qty,
         p.created_at,
-       p.category_id,
-       c.name AS category_name
+        p.category_id,
+        c.name AS category_name
       FROM product_variants pv
       JOIN products p ON p.id = pv.product_id
-      LEFT JOIN product_images pi ON pi.variant_id = pv.id AND pi.position = 1
       LEFT JOIN categories c ON c.id = p.category_id
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-      ORDER BY 
-        pv.sold_qty DESC NULLS LAST,
-        p.created_at DESC
-      LIMIT 48
     `;
+
+    // If caller passed outfit categories, prefer them first in ordering (descending boolean)
+    if (Array.isArray(opts._outfitCategoryIds) && opts._outfitCategoryIds.length) {
+      params.push(opts._outfitCategoryIds);
+      // params index = idx
+      sql += ` ORDER BY (p.category_id = ANY($${idx}::uuid[])) DESC, pv.sold_qty DESC NULLS LAST, p.created_at DESC LIMIT 48`;
+      idx++;
+    } else {
+      sql += ` ORDER BY pv.sold_qty DESC NULLS LAST, p.created_at DESC LIMIT 48`;
+    }
 
     let res = await client.query(sql, params);
     if (res.rows.length === 0) {
@@ -2786,17 +2987,32 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
     const rows = res.rows || [];
     const accessoryRows = rows.filter(r => accessoryRe.test(((r.category_name || '') + ' ' + (r.name || '')).toLowerCase()));
     const nonAccessoryRows = rows.filter(r => !accessoryRe.test(((r.category_name || '') + ' ' + (r.name || '')).toLowerCase()));
-    const top = accessoryRows.concat(nonAccessoryRows).slice(0, 6);
+
+    const preferredKeywordsByType = {
+      vi: ['vi','ví','bóp','wallet','purse'],
+      tui: ['tui','túi','bag','handbag','clutch','crossbody'],
+      kinh: ['kinh','kính','sunglass','eyewear','glass']
+    };
+    let top = [];
+    if (requestedType && preferredKeywordsByType[requestedType]) {
+      const kws = preferredKeywordsByType[requestedType];
+      const preferredFromAccessory = accessoryRows.filter(r => kws.some(k => ((r.category_name||'') + ' ' + (r.name||'')).toLowerCase().includes(k)));
+      const remainingAccessory = accessoryRows.filter(r => !preferredFromAccessory.includes(r));
+      // merge preferred first, then remaining accessory rows, then non-accessory rows
+      top = preferredFromAccessory.concat(remainingAccessory, nonAccessoryRows).slice(0, 6);
+    } else {
+      top = accessoryRows.concat(nonAccessoryRows).slice(0, 6);
+    }
     const names = top.map((x, i) => `${i+1}. ${x.name}${x.color ? ` (${x.color})` : ''}`).join('\n');
  
-    const reply = `Mình tìm được ${top.length} mẫu${parsed.types.length ? ' ' + parsed.types[0] : ''} đẹp đây ạ:\n${names}\nBạn thích mẫu nào nhất mình show chi tiết nè?`;
+    const reply = `Mình tìm được ${top.length} mẫu${displayType ? ' ' + displayType : ''} đẹp đây ạ:\n${names}\nBạn thích mẫu nào nhất mình show chi tiết nè?`;
 
     // quickReplies: Mẫu 1..Mẫu N (N = top.length, up to 6) then "Không thích cái nào"
     const quickReplies = top.map((_, i) => `Mẫu ${i+1}`);
     if (top.length === 7) quickReplies.push('Xem thêm');
     quickReplies.push('Không thích cái nào');
     const followUp = { quickReplies, extra: [] };
- 
+  
     // Lưu tin nhắn assistant
     if (sessionId) {
       await client.query(

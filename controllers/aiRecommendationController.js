@@ -1,4 +1,4 @@
-const { context } = require('@pinecone-database/pinecone/dist/assistant/data/context');
+//const { context } = require('@pinecone-database/pinecone/dist/assistant/data/context');
 const aiService = require('../services/aiRecommendationService');
 
 const detectSimpleIntent = (message) => {
@@ -92,6 +92,12 @@ exports.handleChat = async (req, res) => {
 
     const { message, product_id, variant_id, occasion, weather, session_id } = req.body || {};
 
+     if (process.env.DEBUG_AI_SERVICE) {
+      try {
+        console.debug('[aiRecommendationController.handleChat.DEBUG] userId:', userId, 'session_id:', session_id);
+        console.debug('[aiRecommendationController.handleChat.DEBUG] incoming message preview:', String(message || '').slice(0,200));
+      } catch(e) { /* ignore */ }
+    }
     if (!message || message.trim() === '') {
       return res.status(400).json({ success: false, message: 'Empty message: call /api/ai/chat/start (startSession) to open chat or provide a message.' });
     }
@@ -184,12 +190,21 @@ exports.handleChat = async (req, res) => {
     }
 
     if(/(túi|ví|kính|thắt lưng|phụ kiện|bag|wallet|sunglass|belt)/i.test(lowerMessage)){
+      if (process.env.DEBUG_AI_SERVICE) console.debug('[aiRecommendationController.handleChat.DEBUG] accessory intent detected in controller (regex matched)', { lowerMessage });
       try {
         const accRes = await aiService.suggestAccessories(userId, message, {
           sessionId: session_id || null,
           //truyền thêm context để tận dụng gender, occasion, weather nếu có
           context: lastRec?.context ? (typeof lastRec.context === 'string' ? JSON.parse(lastRec.context) : lastRec.context) : null
         });
+
+        if (process.env.DEBUG_AI_SERVICE) {
+          console.debug('[aiRecommendationController.handleChat.DEBUG] suggestAccessories returned (preview):', {
+            reply: accRes?.reply ? String(accRes.reply).slice(0,400) : null,
+            accessoriesCount: Array.isArray(accRes?.accessories) ? accRes.accessories.length : 0,
+            sessionId: accRes?.sessionId || session_id || null
+          });
+        }
 
         //lưu luôn vào ai_recommendations giống như outfit
         if(accRes.accessories && accRes.accessories.length > 0){
