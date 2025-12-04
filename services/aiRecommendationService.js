@@ -696,16 +696,22 @@ Task: Gợi 1 outfit.`;
         for (const o of aiOutfits || []) {
           (o.items || []).forEach(v => { if (v) aiVariantIds.add(String(v)); });
         }
-        const missing = Array.from(aiVariantIds).filter(id => !namesByVariant[id]);
-        if (missing.length > 0) {
+        const missingRaw = Array.from(aiVariantIds).filter(id => !namesByVariant[id]);
+        // sanitize: remove surrounding quotes/whitespace and keep only valid UUIDs
+        const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const missingSanitized = missingRaw
+          .map(x => String(x || '').trim().replace(/^"+|"+$/g, '').replace(/^'+|'+$/g, ''))
+          .filter(x => uuidRe.test(x));
+        if (missingSanitized.length > 0) {
           try {
+            // use text ANY comparison to be more tolerant about input types from client
             const metaQ = await client.query(
               `SELECT pv.id AS variant_id, p.id AS product_id, p.name, p.category_id, c.name AS category_name, pv.color_name, p.description
                FROM product_variants pv
                JOIN products p ON pv.product_id = p.id
                LEFT JOIN categories c ON p.category_id = c.id
-               WHERE pv.id = ANY($1::uuid[])`,
-              [missing]
+               WHERE pv.id::text = ANY($1::text[])`,
+              [missingSanitized]
             );
             for (const r of metaQ.rows) {
               namesByVariant[String(r.variant_id)] = {
@@ -902,7 +908,7 @@ Task: Gợi 1 outfit.`;
               if (isAcc) {
                 const key = (info.category_name || info.name || '').toLowerCase().replace(/\s+/g,' ').trim();
                 if (accSeen.has(key)) continue;
-                if (accSeen.size >= 1) continue;+                accSeen.add(key);
+                if (accSeen.size >= 1) continue;                
                 accSeen.add(key);
                 newItems.push(vid);
               } else {
@@ -1986,7 +1992,153 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
         }
       }
 
-      //2.1. Xử lý quickreply "Oke luôn"
+      // 2.1. Xử lý quickreply "Oke luôn"
+    // -- NEW: handle quick replies like "Mẫu 1", "Mẫu 2", ... and "Không thích cái nào"
+    //    - Lưu hành động user vào ai_recommendations (context.items) để audit / reuse
+    //    - Nếu user chọn mẫu N -> trả chi tiết + persist metadata
+    //    - Nếu user "Không thích cái nào" -> gọi suggestAccessories lại với excludeVariantIds
+    const sampleMatch = String(message || '').match(/\bmẫu\s*(\d+)\b/i);
+    if (sampleMatch) {
+      const selIdx = Math.max(0, Number(sampleMatch[1]) - 1);
+      // ensure user quick-reply is persisted at least once
+      if (sessionId && !_userMessagePersisted && message && String(message).trim()) {
+        try {
+          await client.query(
+            `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
+            [sessionId, String(message).trim()]
+          );
+          await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+          _userMessagePersisted = true;
+        } catch (e) {
+          console.warn('[aiService.handleGeneralMessage] persist sample quick-reply user message failed', e && e.stack ? e.stack : e);
+        }
+      }
+
+      try {
+        const last = await exports.getLastRecommendationForUser(userId, 'accessories');
+        if (!last) {
+          const ask = 'Mình chưa tìm mẫu phụ kiện nào trước đó. Bạn muốn mình tìm vài mẫu không?';
+          if (sessionId) {
+            try {
+              await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, ask]);
+              await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+            } catch (e) { /* non-fatal */ }
+          }
+          return { ask, sessionId };
+        }
+
+        let recJson = last.items;
+        if (typeof recJson === 'string') {
+          try { recJson = JSON.parse(recJson); } catch (e) { recJson = recJson || {}; }
+        }
+        const accessories = (recJson && recJson.accessories) ? recJson.accessories : [];
+        if (!accessories || accessories.length === 0) {
+          const ask = 'Mình không tìm thấy mẫu cũ để chọn lại. Bạn muốn mình tìm vài mẫu không?';
+          if (sessionId) {
+            try {
+              await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, ask]);
+              await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+            } catch (e) { /* non-fatal */ }
+          }
+          return { ask, sessionId };
+        }
+
+        if (selIdx < 0 || selIdx >= accessories.length) {
+          const ask = `Mẫu ${selIdx+1} không tồn tại, bạn thử chọn lại nhé.`;
+          if (sessionId) {
+            try {
+              await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, ask]);
+              await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+            } catch (e) { /* ignore */ }
+          }
+          return { ask, sessionId };
+        }
+
+        const chosen = accessories[selIdx];
+        const chosenVariant = String(chosen.variant_id || chosen.variant || chosen.id || '');
+        const chosenName = chosen.name || chosen.product_name || chosen.title || chosenVariant;
+
+        // persist user selection for analytics / reuse
+        try {
+          await client.query(
+            `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
+             VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
+            [
+              userId,
+              JSON.stringify({ action: 'accessory_select', source: 'quick_reply', sessionId }),
+              JSON.stringify({ selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen } }),
+              'user-action'
+            ]
+          );
+        } catch (e) {
+          console.warn('[aiService.handleGeneralMessage] persist user selection to ai_recommendations failed', e && e.stack ? e.stack : e);
+        }
+
+        const reply = `Đã chọn: ${chosenName}. Mình lưu lựa chọn của bạn. Bạn muốn mình show chi tiết (hình/size) hoặc tư vấn thêm phụ kiện khác?`;
+        // persist assistant response (important for ai_chat_messages history)
+        if (sessionId) {
+          try {
+            await client.query(
+              `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+               VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
+              [
+                sessionId,
+                reply,
+                JSON.stringify({ action: 'accessory_selected', selected: { index: selIdx + 1, variant_id: chosenVariant } })
+              ]
+            );
+            await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+          } catch (e) {
+            console.error('[aiService.handleGeneralMessage] persist assistant selection reply failed', e && e.stack ? e.stack : e);
+          }
+        }
+
+        return { reply, selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen }, sessionId };
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] sample quick-reply handler failed', e && e.stack ? e.stack : e);
+        // fallthrough to other handlers
+      }
+    }
+
+    // Handle "Không thích cái nào" — gọi suggestAccessories loại trừ các variant đã hiển thị
+    if (/\b(không thích cái nào|khong thich cai nao|không thích cái nào)\b/i.test(String(message || ''))) {
+      try {
+        const last = await exports.getLastRecommendationForUser(userId, 'accessories');
+        let excludeIds = [];
+        if (last && last.items) {
+          let recJson = last.items;
+          if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch(e){ recJson = null; } }
+          const accessories = recJson && recJson.accessories ? recJson.accessories : [];
+          excludeIds = accessories.map(a => String(a.variant_id || a.variant || a.id)).filter(Boolean);
+        }
+
+        // persist user action
+        try {
+          await client.query(
+            `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
+             VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
+            [userId, JSON.stringify({ action: 'accessory_reject_all', sessionId }), JSON.stringify({ excluded: excludeIds }), 'user-action']
+          );
+        } catch (e) { /* non-fatal */ console.warn('persist reject action failed', e && e.stack ? e.stack : e); }
+
+        // ask suggestAccessories to generate non-duplicate results
+        const accResult = await exports.suggestAccessories(userId, message || 'Không thích cái nào', {
+          sessionId,
+          max: 6,
+          _userMessagePersisted,
+          excludeVariantIds: excludeIds,
+          ignoreClarify: true
+        });
+        if (accResult && accResult.accessories && accResult.accessories.length) {
+          return { reply: accResult.reply, accessories: accResult.accessories, followUp: accResult.followUp || null, sessionId };
+        }
+        return { reply: accResult.reply || 'Mình chưa tìm được mẫu khác giống ý bạn, bạn muốn mô tả khác không?', accessories: [], sessionId };
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] handle "không thích cái nào" failed', e && e.stack ? e.stack : e);
+      }
+    }
+
+      //2.2. Xử lý quickreply "Oke luôn"
       if (/\boke\s*luôn\b/i.test(lowerMsg)) {
         const ask = 'Bạn cho mình biết chiều cao và cân nặng (cm/kg) để mình tư vấn size chính xác nhé?';
         try {
@@ -2837,8 +2989,27 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
       gender = u.rows[0]?.gender || null;
     }
 
+    // Nếu user yêu cầu "túi" hoặc "ví" nhưng không nói rõ nam/nữ và DB cũng không có gender,
+    // hỏi lại thay vì tự mặc định (tránh tư vấn nhầm giới tính)
+    if ((requestedType === 'vi' || requestedType === 'tui') && !parsed.gender && !gender) {
+      const ask = `Bạn cần ${displayType || 'phụ kiện'} cho nam hay nữ để mình chọn phù hợp?`;
+      const quickReplies = ['Nam', 'Nữ', 'Cả hai'];
+      try {
+        if (sessionId) {
+          await client.query(
+            `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+             VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
+            [sessionId, ask, JSON.stringify({ type: 'accessories.ask_gender', quickReplies })]
+          );
+          await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+        }
+      } catch (e) {
+        console.warn('[suggestAccessories] failed to persist gender clarification ask (non-fatal)', e && e.stack ? e.stack : e);
+      }
+      return { ask, quickReplies };
+    }
     // 3. Nếu vẫn quá chung chung → hỏi lại (nhưng thông minh hơn)
-    if (!parsed.types.length && !parsed.color && !parsed.gender && !gender) {
+    if (!parsed.types.length && !parsed.color && !parsed.gender && !gender && !opts.ignoreClarify) {
       const promptText = 'Bạn đang muốn tìm loại phụ kiện nào ạ? Túi xách, ví, kính mát hay gì khác không, mình sẵn lòng tìm giúp cho nè?';
       const quickReplies = ['Túi xách', 'Ví da', 'Kính mát', 'Xem tất cả'];
       // persist assistant ask so FE / history shows it
@@ -2866,19 +3037,32 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
     const params = ['active'];
     let idx = 2;
 
+    let sqlBoostFragment = '';
+    let sqlBoostParams = [];
+
     // Loại phụ kiện
     if (parsed.types.length) {
       const synonymMap = {
         'tui': ['tui','túi','bag','handbag','tote','clutch'],
-        'vi': ['vi','ví','bóp','wallet'], // do NOT include 'bag' here
-        'kinh': ['kinh','kính','sunglass','eyewear','glass']
+        'vi': ['vi','ví','bóp','wallet'],
+        'kinh': ['kinh','kính','sunglass','eyewear','glass'],
+        'belt': ['belt','thắt lưng','thắt-lưng']
       };
       const primaryType = String(parsed.types[0] || '').toLowerCase();
       const tokens = (synonymMap[primaryType] || [primaryType]).map(s => String(s).toLowerCase());
       const patterns = Array.from(new Set(tokens.map(s => `%${s}%`)));
-      // search product name/description AND category name/slug (parameterized)
-      where.push(`(LOWER(p.name) ILIKE ANY($${idx}::text[]) OR LOWER(p.description) ILIKE ANY($${idx}::text[]) OR LOWER(c.name) ILIKE ANY($${idx}::text[]) OR LOWER(c.slug) ILIKE ANY($${idx}::text[]))`);
+
+      // TIGHTENED WHERE: chỉ filter bằng name/Category/slug theo token của loại yêu cầu
+      where.push(`(LOWER(p.name) ILIKE ANY($${idx}::text[]) OR LOWER(c.name) ILIKE ANY($${idx}::text[]) OR LOWER(c.slug) ILIKE ANY($${idx}::text[]))`);
       params.push(patterns);
+      idx++;
+
+      // Prepare an ORDER BY boost so matches that contain the exact keywords surface first.
+      // We'll inject this fragment into the final ORDER BY below.
+      // Use same patterns as an extra param so pg can use parameterized values.
+      sqlBoostFragment = `((LOWER(p.name) ILIKE ANY($${idx}::text[]))::int + (LOWER(c.name) ILIKE ANY($${idx}::text[]))::int) DESC, `;
+      sqlBoostParams.push(patterns);
+      params.push(patterns); // push once so $idx aligns; also keep params array consistent
       idx++;
     }
 
@@ -2901,11 +3085,18 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
       }
     }
 
+    if (Array.isArray(opts.excludeVariantIds) && opts.excludeVariantIds.length) {
+      where.push(`pv.id != ALL($${idx}::uuid[])`);
+      params.push(opts.excludeVariantIds);
+      idx++;
+    }
+
     let sql = `
       SELECT 
         pv.id::text AS variant_id,
         p.id::text AS product_id,
         p.name,
+        p.description AS description,
         pv.color_name AS color,
         COALESCE(p.final_price, p.price) AS price,
         COALESCE(
@@ -2923,17 +3114,20 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
     `;
 
-    // If caller passed outfit categories, prefer them first in ordering (descending boolean)
+    // Inject boost fragment (if any) into ORDER BY to prefer direct matches, then secondary sort by sold/newest.
+    const baseOrder = Array.isArray(opts._outfitCategoryIds) && opts._outfitCategoryIds.length
+      ? ` (p.category_id = ANY($${idx}::uuid[])) DESC, pv.sold_qty DESC NULLS LAST, p.created_at DESC`
+      : ` pv.sold_qty DESC NULLS LAST, p.created_at DESC`;
+
     if (Array.isArray(opts._outfitCategoryIds) && opts._outfitCategoryIds.length) {
       params.push(opts._outfitCategoryIds);
-      // params index = idx
-      sql += ` ORDER BY (p.category_id = ANY($${idx}::uuid[])) DESC, pv.sold_qty DESC NULLS LAST, p.created_at DESC LIMIT 48`;
       idx++;
-    } else {
-      sql += ` ORDER BY pv.sold_qty DESC NULLS LAST, p.created_at DESC LIMIT 48`;
     }
 
+    sql += ` ORDER BY ${sqlBoostFragment || ''}${baseOrder} LIMIT 48`;
+
     let res = await client.query(sql, params);
+    console.debug('[suggestAccessories] primary query sample keys:', res.rows[0] ? Object.keys(res.rows[0]) : 'no rows');
     if (res.rows.length === 0) {
       console.debug('[suggestAccessories] primary query returned 0 rows', { sql: String(sql).slice(0,1000), params });
 
@@ -2957,7 +3151,7 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
                  pi.url AS image_url,
                  pv.stock_qty,
                  pv.sold_qty AS sold_qty,
-                 p.created_at
+                 p.created_at,
                FROM product_variants pv
                JOIN products p ON p.id = pv.product_id
                LEFT JOIN product_images pi ON pi.variant_id = pv.id AND pi.position = 1
@@ -3004,8 +3198,11 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
     } else {
       top = accessoryRows.concat(nonAccessoryRows).slice(0, 6);
     }
-    const names = top.map((x, i) => `${i+1}. ${x.name}${x.color ? ` (${x.color})` : ''}`).join('\n');
- 
+    const names = top.map((x, i) => {
+      const shortDesc = x.description ? (` - ${String(x.description).split('.').slice(0,1).join('.').trim()}`) : '';
+      return `${i+1}. ${x.name}${x.color ? ` (${x.color})` : ''}${shortDesc}`;
+    }).join('\n');
+
     const reply = `Mình tìm được ${top.length} mẫu${displayType ? ' ' + displayType : ''} đẹp đây ạ:\n${names}\nBạn thích mẫu nào nhất mình show chi tiết nè?`;
 
     // quickReplies: Mẫu 1..Mẫu N (N = top.length, up to 6) then "Không thích cái nào"
@@ -3034,6 +3231,7 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
             variant_id: String(t.variant_id),
             product_id: String(t.product_id || ''),
             name: t.name,
+            description: t.description || null,
             color: t.color,
             price: t.price
           })) }),
