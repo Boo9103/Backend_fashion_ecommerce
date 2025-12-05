@@ -410,12 +410,14 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
             }
             if (accRes.ask) {
               const askMessage = (typeof accRes.ask === 'string') ? accRes.ask : (accRes.ask && accRes.ask.prompt) ? accRes.ask.prompt : null;
-              return res.json({
+              const payload = {
                 success: true,
-                ask: accRes.ask,
                 message: accRes.reply || askMessage || 'Mình cần hỏi thêm một chút để gợi ý chính xác hơn.',
                 sessionId: accRes.sessionId || persistSessionId
-              });
+              };
+              // only include ask if it's not a plain boolean true
+              if (typeof accRes.ask !== 'boolean') payload.ask = accRes.ask;
+              return res.json(payload);
             }
             return res.json({
               success: true,
@@ -458,11 +460,12 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
         }
         if (moreRes.ask) {
           const askMessage = (typeof moreRes.ask === 'string') ? moreRes.ask : (moreRes.ask && moreRes.ask.prompt) ? moreRes.ask.prompt : null;
-          return res.json({
+          const payload = {
             success: true,
-            ask: moreRes.ask,
             message: moreRes.reply || askMessage || 'Mình cần hỏi thêm một chút để gợi ý chính xác hơn.'
-          });
+          };
+          if (typeof moreRes.ask !== 'boolean') payload.ask = moreRes.ask;
+          return res.json(payload);
         }
         return res.json({
           success: true,
@@ -517,12 +520,13 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
         // in other suggestAccessories branch (non-"more") add handling if accRes.ask present
         if (accRes && accRes.ask) {
           const askMessage = (typeof accRes.ask === 'string') ? accRes.ask : (accRes.ask && accRes.ask.prompt) ? accRes.ask.prompt : null;
-          return res.json({
+          const payload = {
             success: true,
-            ask: accRes.ask,
             message: accRes.reply || askMessage || 'Mình cần hỏi thêm một chút để gợi ý chính xác hơn.',
             sessionId: accRes?.sessionId || session_id
-          });
+          };
+          if (typeof accRes.ask !== 'boolean') payload.ask = accRes.ask;
+          return res.json(payload);
         }
 
         return res.json({
@@ -551,7 +555,12 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
         return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
       }
 
-      if (result.ask) return res.json({ success: true, ask: result.ask, sessionId: result.sessionId || null });
+      if (result.ask) {
+        const payload = { success: true, sessionId: result.sessionId || null };
+        if (typeof result.ask !== 'boolean') payload.ask = result.ask;
+        if (result.reply) payload.message = result.reply;
+        return res.json(payload);
+      }
       return res.json({
         success: true,
         type: result.type || 'info',
