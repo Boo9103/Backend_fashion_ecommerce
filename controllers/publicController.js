@@ -209,3 +209,21 @@ exports.getNewsById = async (req, res, next) => {
     next(err);
   }
 };
+
+exports.getTopBrandsThisQuarter = async (req, res, next) => {
+  try{
+    const limit = parseInt(req.query.limit) || 3;
+
+    const topBrands = await publicService.getTopBrandsByQuarter({ limit });
+    res.json({
+      success: true,
+      current_quarter: new Date().getFullYear() + '-Q' + Math.floor((new Date().getMonth() / 3) + 1),
+      total_brands: topBrands.length,
+      data: topBrands
+    });
+  }
+  catch (err) {
+    console.error('[getTopBrandsThisQuarter]', err);
+    res.status(500).json({ success: false, message: 'Lỗi server' });
+  }
+};

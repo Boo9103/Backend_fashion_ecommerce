@@ -17,6 +17,9 @@ router.get('/categories-with-products', publicController.getCategoriesWithProduc
 router.get('/news', publicController.getNewList);
 router.get('/news/:id', publicController.getNewsById);
 
+//top brands 
+router.get('/top-brands', publicController.getTopBrandsThisQuarter);
+
 module.exports = router;
 
 //lấy sp supplier dùng offset pagination (page, limit)

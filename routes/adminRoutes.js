@@ -77,7 +77,7 @@ router.put('/news/:id', requireAdmin, adminNewsController.updateNews);
 router.delete('/news/:id', requireAdmin, adminNewsController.removeNews);
 
 //revenue report
-router.get('/stats/revenue', requireAdmin, adminRevenueController.revenue);
+router.get('/stats/revenue', requireAdmin, adminRevenueController.revenue); // nếu k truyền s e thì mặc định là 12 tuần gấn nhất
 router.get('/stats/top-products', requireAdmin, adminRevenueController.topProducts);
 
 module.exports = router;

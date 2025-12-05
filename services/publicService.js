@@ -156,7 +156,7 @@ exports.getCategoriesWithProducts = async (perChildLimit = 10) => {
         for (const p of parents) {
             // lấy category con
             const childrenRes = await client.query(
-                `SELECT id, name, image FROM categories WHERE parent_id = $1 ORDER BY name`,
+                `SELECT id, name, image FROM categories WHERE parent_id = $1 ORDER BY name DESC`,
                 [p.id]
             );
             const children = [];
@@ -192,4 +192,39 @@ exports.getCategoriesWithProducts = async (perChildLimit = 10) => {
     } finally {
         client.release();
     }
+};
+
+exports.getTopBrandsByQuarter = async ({ quarter, year, limit = 3} = {}) => {
+  let sql, params;
+
+  if(quarter && year){
+    // Lấy quý cụ thể: ví dụ 2025-Q4
+    sql = `
+      SELECT 
+          quarter, brand_id, brand_name, brand_logo,
+          revenue::text, total_sold, orders_count
+      FROM vw_brand_revenue_by_quarter
+      WHERE year = $1 AND quarter_num = $2
+      ORDER BY revenue DESC
+      LIMIT $3`;
+    
+    params = [year, quarter, limit];
+  }
+  else{
+    // MẶC ĐỊNH: Lấy quý hiện tại (ví dụ đang là Q4 2025)
+    sql = `
+      SELECT 
+        quarter, brand_id, brand_name, brand_logo,
+        revenue::text, total_sold, orders_count
+      FROM vw_brand_revenue_by_quarter
+      WHERE quarter = (
+        SELECT CONCAT(EXTRACT(YEAR FROM CURRENT_DATE), '-Q', EXTRACT(QUARTER FROM CURRENT_DATE))
+      )
+      ORDER BY revenue DESC
+      LIMIT $1
+    `;
+    params = [limit];
+  }
+  const { rows } = await pool.query(sql, params);
+  return rows;
 };

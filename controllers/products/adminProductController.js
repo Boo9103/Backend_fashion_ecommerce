@@ -14,7 +14,7 @@ exports.getFlashSaleProducts = async (req, res) => {
     is_flash_sale: flash_sale === 'true' ? true : flash_sale === 'false' ? false : undefined,
     min_price: min,
     max_price: max,
-    cursor: cursor || undefined,
+    cursor: cursor || undefined
   };
 
   try {
