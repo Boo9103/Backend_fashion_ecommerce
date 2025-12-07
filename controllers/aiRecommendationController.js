@@ -89,8 +89,36 @@ exports.startSession = async (req, res) => {
     const loadMessages = req.body?.loadMessages === true || req.query?.loadMessages === 'true';
     const messagesLimit = Number(req.body?.messagesLimit || req.query?.messagesLimit) || 20;
 
-    // NOTE: pass messagesLimit as messagesLimit for compatibility with service
-    const sessionRes = await aiService.startChatSession(userId, session_id || null, { loadMessages, messagesLimit });
+    let effectiveSessionId = null;
+    if (session_id) {
+      try {
+        if (typeof aiService.getChatSessionById === 'function') {
+          const userSession = await aiService.getChatSessionById(userId);
+          if (!userSession) {
+            console.warn('[aiRecommendationController.startSession] user has no persisted session; ignoring provided session_id', { userId, provided: session_id });
+          } else if (String(userSession.id) !== String(session_id)) {
+            console.warn('[aiRecommendationController.startSession] provided session_id does not belong to authenticated user; ignoring', { userId, provided: session_id, ownerSessionId: userSession.id });
+            if (process.env.AI_STRICT_SESSION_OWNERSHIP === 'true') {
+              return res.status(403).json({ success: false, message: 'session_id không hợp lệ cho người dùng hiện tại' });
+            }
+          } else {
+            // ownership ok
+            effectiveSessionId = session_id;
+          }
+        } else {
+          // helper missing -> conservative: ignore provided session_id (or reject in strict mode)
+          console.warn('[aiRecommendationController.startSession] aiService.getChatSessionById missing - rejecting client session_id for safety', { userId, session_id });
+          if (process.env.AI_STRICT_SESSION_OWNERSHIP === 'true') {
+            return res.status(403).json({ success: false, message: 'session_id không được phép' });
+          }
+        }
+      } catch (e) {
+        console.error('[aiRecommendationController.startSession] session_id validation error', e && e.stack ? e.stack : e);
+        // on error: ignore provided session_id (safer than returning another user's data)
+      }
+    }
+    
+    const sessionRes = await aiService.startChatSession(userId, effectiveSessionId || null, { loadMessages, messagesLimit });
     return res.json({
       success: true,
       isNew: sessionRes.isNew,

@@ -50,6 +50,21 @@ exports.getUserProfileAndBehavior = async (userId) => {
     }
 };
 
+exports.getChatSessionById = async (user_id) => {
+    const client = await pool.connect();
+    try {
+        const sql = await client.query(
+          `SELECT id FROM ai_chat_sessions WHERE user_id = $1 LIMIT 1 RETURNING id`
+        );
+        const params = [user_id];
+        const res = await client.query(sql, params);
+        if (res.rowCount === 0) return null;
+        return res.rows[0];
+    } finally {
+        client.release();
+    }
+};
+
 //start or resume chat session when user opens chatbox
 exports.startChatSession = async (userId, providedSessionId = null, opts = {}) => {
   const client = await pool.connect();
