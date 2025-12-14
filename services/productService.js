@@ -6,137 +6,6 @@ const {
   validateSoldQuantity
 } = require('../utils/validate');
 
-// exports.getProducts = async function ({
-//     limit = 40,
-//     order = 'asc',
-//     cursor,
-//     search_key,
-//     category_id,
-//     supplier_id,
-//     min_price,
-//     max_price,
-//     is_flash_sale,
-//     status,
-//     page
-// } = {}) {
-//     const client = await pool.connect();
-//     try {
-//         await client.query('BEGIN');
-
-//         // nếu có category_id -> lấy tất cả descendant bằng CTE
-//         let categoryIds = null;
-//         if (category_id) {
-//             const catRes = await client.query(
-//                 `WITH RECURSIVE subcats AS (
-//                     SELECT id FROM categories WHERE id = $1
-//                     UNION ALL
-//                     SELECT c.id FROM categories c JOIN subcats s ON c.parent_id = s.id
-//                 ) SELECT id FROM subcats`,
-//                 [category_id]
-//             );
-//             categoryIds = catRes.rows.map(r => r.id);
-//             if (categoryIds.length === 0) categoryIds = [category_id];
-//         }
-
-//         // Build dynamic WHERE and params
-//         const where = [];
-//         const params = [];
-//         let idx = 1;
-
-//         // Only show active by default if status not provided
-//         if (status) {
-//             where.push(`p.status = $${idx++}`);
-//             params.push(status);
-//         } else {
-//             where.push(`p.status = 'active'`);
-//         }
-
-//         if (search_key) {
-//             where.push(`(p.name ILIKE $${idx} OR p.description ILIKE $${idx})`);
-//             params.push(`%${search_key}%`);
-//             idx++;
-//         }
-
-//         if (categoryIds) {
-//             where.push(`p.category_id = ANY($${idx}::uuid[])`);
-//             params.push(categoryIds);
-//             idx++;
-//         }
-
-//         if (supplier_id) {
-//             where.push(`p.supplier_id = $${idx++}`);
-//             params.push(supplier_id);
-//         }
-
-//         if (typeof min_price !== 'undefined') {
-//             where.push(`p.final_price >= $${idx++}`);
-//             params.push(Number(min_price));
-//         }
-
-//         if (typeof max_price !== 'undefined') {
-//             where.push(`p.final_price <= $${idx++}`);
-//             params.push(Number(max_price));
-//         }
-
-//         if (typeof is_flash_sale !== 'undefined') {
-//             where.push(`p.is_flash_sale = $${idx++}`);
-//             params.push(!!is_flash_sale);
-//         }
-
-//         // Pagination: keyset if cursor provided (or controller set cursor), else offset if page provided
-//         let sql = '';
-//         const limitPlus = Number(limit) + 1; // fetch one extra to detect hasMore
-
-//         if (typeof cursor !== 'undefined' && cursor !== null) {
-//             // keyset pagination by sequence_id
-//             const cmp = (order === 'asc') ? '>' : '<';
-//             where.push(`p.sequence_id ${cmp} $${idx++}`);
-//             params.push(Number(cursor));
-//             const orderBy = `p.sequence_id ${order === 'desc' ? 'DESC' : 'ASC'}`;
-//             sql = `SELECT p.* FROM products p WHERE ${where.join(' AND ')} ORDER BY ${orderBy} LIMIT $${idx++}`;
-//             params.push(limitPlus);
-//         } else if (page && Number.isFinite(Number(page))) {
-//             const pg = Math.max(1, Number(page));
-//             const offset = (pg - 1) * Number(limit);
-//             sql = `SELECT p.* FROM products p WHERE ${where.join(' AND ')} ORDER BY p.sequence_id ${order === 'desc' ? 'DESC' : 'ASC'} LIMIT $${idx++} OFFSET $${idx++}`;
-//             params.push(limit);
-//             params.push(offset);
-//         } else {
-//             // fallback: basic order + limit
-//             sql = `SELECT p.* FROM products p WHERE ${where.join(' AND ')} ORDER BY p.sequence_id ${order === 'desc' ? 'DESC' : 'ASC'} LIMIT $${idx++}`;
-//             params.push(limitPlus);
-//         }
-
-//         const qRes = await client.query(sql, params);
-//         await client.query('COMMIT');
-
-//         const rows = qRes.rows || [];
-//         const hasMore = rows.length > Number(limit);
-//         const products = hasMore ? rows.slice(0, limit) : rows;
-
-//         let nextCursor = null;
-//         if (typeof cursor !== 'undefined' && cursor !== null) {
-//             if (products.length > 0) {
-//                 nextCursor = products[products.length - 1].sequence_id ?? null;
-//             }
-//         } else if (!page && products.length > 0) {
-//             // if controller relied on automatic cursor start (desc case), return last seq as nextCursor
-//             nextCursor = products[products.length - 1]?.sequence_id ?? null;
-//         }
-
-//         return {
-//             products,
-//             nextCursor,
-//             hasMore
-//         };
-//     } catch (err) {
-//         try { await client.query('ROLLBACK'); } catch (e) {}
-//         throw err;
-//     } finally {
-//         client.release();
-//     }
-// };
-
 exports.getProducts = async function ({
     limit = 40,
     order = 'asc',
@@ -369,15 +238,16 @@ exports.createProduct = async (productData) => {
 
     // === 3. INSERT PRODUCT IMAGES (ảnh đầu = chính) ===
     if (images.length > 0) {
-      const params = [];
-      const values = images.map((url) => {
-        // push productId, url for each row and build incremental placeholders
-        const idx = params.length + 1; // 1-based index for placeholder
-        params.push(productId, url);
-        return `($${idx}, $${idx + 1})`;
-      }).join(',');
+      const values = [];
+      const params = [productId]; // $1 = productId
+      images.forEach((url, i) => {
+        const pos = i + 1; // position bắt đầu từ 1
+        params.push(url, pos);
+        values.push(`($1, $${params.length - 1}, $${params.length})`); // product_id, url, position
+      });
       await client.query(
-        `INSERT INTO product_images (product_id, url) VALUES ${values}`,
+        `INSERT INTO product_images (product_id, url, "position")
+         VALUES ${values.join(',')}`,
         params
       );
     }
@@ -417,15 +287,17 @@ exports.createProduct = async (productData) => {
 
       // Insert variant images
       if (variantImages.length > 0) {
-        const paramsImg = [];
-        const placeholders = variantImages.map((url) => {
-          const idx = paramsImg.length + 1;
-          paramsImg.push(variantId, url);
-          return `($${idx}, $${idx + 1})`;
-        }).join(',');
+        const values = [];
+        const params = [variantId];
+        variantImages.forEach((url, i) => {
+          const pos = i + 1;
+          params.push(url, pos);
+          values.push(`($1, $${params.length - 1}, $${params.length})`); // variant_id, url, position
+        });
         await client.query(
-          `INSERT INTO product_images (variant_id, url) VALUES ${placeholders}`,
-          paramsImg
+          `INSERT INTO product_images (variant_id, url, "position")
+           VALUES ${values.join(',')}`,
+          params
         );
       }
     }
@@ -569,10 +441,17 @@ exports.updateProduct = async (productId, data) => {
     //2. Xóa ảnh cũ + thêm mới (product images)
     await client.query('DELETE FROM product_images WHERE product_id = $1 AND variant_id IS NULL', [productId]);
     if(images.length > 0){
-      const values = images.map((_, i)=> `($1, $${i+2})`).join(',');
-      const params = [productId, ...images];
+      let valuesClauses = [];
+      let params = [productId];
+      images.forEach((url, i) => {
+        const position = i + 1;
+        params.push(url, position);
+        const urlIdx = params.length - 1;
+        const posIdx = params.length;
+        valuesClauses.push(`($1, $${urlIdx}, $${posIdx})`);
+      });
       await client.query(
-        `INSERT INTO product_images (product_id, url) VALUES ${values}`,
+        `INSERT INTO product_images (product_id, url, "position") VALUES ${valuesClauses.join(',')}`,
         params
       );
     }
@@ -605,11 +484,20 @@ exports.updateProduct = async (productId, data) => {
       );
       const variantId = variantRes.rows[0].id;
 
-      if(vImages.length > 0){
-        const values = vImages.map((_, i)=> `($1, $${i+2})`).join(',');
-        await client.query(
-          `INSERT INTO product_images (variant_id, url) VALUES ${values}`,
-          [variantId, ...vImages]
+      if (vImages.length > 0) {
+      let valuesClause = [];
+      let params = [variantId]; // $1 = variantId
+      vImages.forEach((url, index) => {
+        const position = index + 1;
+        params.push(url, position);
+        const urlIdx = params.length - 1;
+        const posIdx = params.length;
+        valuesClause.push(`($1, $${urlIdx}, $${posIdx})`);
+      });
+      await client.query(
+        `INSERT INTO product_images (variant_id, url, "position")
+        VALUES ${valuesClause.join(', ')}`,
+        params
         );
       }
     }
@@ -671,7 +559,6 @@ exports.deleteProduct = async (productId) => {
   }
 };
 
-
 exports.getProductById = async (productId) => {
   const q = `
     SELECT 
@@ -685,7 +572,8 @@ exports.getProductById = async (productId) => {
       s.name AS supplier_name,
       COALESCE(
         (
-          SELECT json_agg(json_build_object('url', pi.url) ORDER BY pi.id)
+          SELECT json_agg(json_build_object('url', pi.url) 
+                  ORDER BY COALESCE(pi."position", 999999), pi.id)
           FROM product_images pi
           WHERE pi.product_id = p.id AND pi.variant_id IS NULL
         ), '[]'::json
@@ -701,7 +589,11 @@ exports.getProductById = async (productId) => {
               'sizes', pv.sizes,
               'stock_qty', pv.stock_qty,
               'images', (
-                SELECT COALESCE(json_agg(json_build_object('url', pi2.url) ORDER BY pi2.id), '[]'::json)
+                SELECT COALESCE(
+                  json_agg(json_build_object('url', pi2.url) 
+                            ORDER BY COALESCE(pi2."position", 999999), pi2.id),
+                  '[]'::json
+                )
                 FROM product_images pi2
                 WHERE pi2.variant_id = pv.id
               )
@@ -719,7 +611,6 @@ exports.getProductById = async (productId) => {
   const res = await pool.query(q, [productId]);
   return res.rowCount ? res.rows[0] : null;
 };
-
 
 exports.getAvailableProducts = async () => {
   const result = await pool.query(`
@@ -746,7 +637,7 @@ exports.getAvailableProducts = async () => {
     FROM products p
     JOIN product_variants pv ON pv.product_id = p.id
     LEFT JOIN (
-      SELECT variant_id, json_agg(json_build_object('url', url)) AS urls
+      SELECT variant_id, json_agg(json_build_object('url', url) ORDER BY COALESCE("position", 999999), id) AS urls
       FROM product_images WHERE variant_id IS NOT NULL
       GROUP BY variant_id
     ) pi ON pi.variant_id = pv.id

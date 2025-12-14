@@ -53,11 +53,9 @@ exports.getUserProfileAndBehavior = async (userId) => {
 exports.getChatSessionById = async (user_id) => {
     const client = await pool.connect();
     try {
-        const sql = await client.query(
-          `SELECT id FROM ai_chat_sessions WHERE user_id = $1 LIMIT 1 RETURNING id`
+        const res = await client.query(
+          `SELECT id FROM ai_chat_sessions WHERE user_id = $1 LIMIT 1 RETURNING id`, [user_id]
         );
-        const params = [user_id];
-        const res = await client.query(sql, params);
         if (res.rowCount === 0) return null;
         return res.rows[0];
     } finally {
@@ -3938,6 +3936,86 @@ exports.getLastRecommendationForUser = async (userId, type = null) => {
       context: parsedContext,
       created_at: row.created_at
     };
+  } finally {
+    client.release();
+  }
+};
+
+exports.getRevenueReport = async (opts = {}) => {
+  const client = await pool.connect();
+  try {
+    const { startDate, endDate, breakdown = 'daily' } = opts || {};
+    
+    // Normalize dates (ISO yyyy-mm-dd)
+    const start = startDate ? new Date(startDate) : null;
+    const end = endDate ? new Date(endDate) : null;
+    if (!start || !end) throw new Error('Invalid date range');
+
+    // Hard-code tên cột revenue (truyền thống)
+    const revenueCol = 'revenue';
+
+    // Ưu tiên dùng view vw_revenue_by_day
+    let breakdownRows = [];
+    let total = 0;
+
+    if (breakdown === 'daily') {
+      const bq = await client.query(
+        `SELECT day::date AS day, SUM(${revenueCol}) AS value
+         FROM vw_revenue_by_day
+         WHERE day::date >= $1 AND day::date <= $2
+         GROUP BY day::date
+         ORDER BY day::date`,
+        [start.toISOString().slice(0,10), end.toISOString().slice(0,10)]
+      );
+      breakdownRows = (bq.rows || []).map(r => ({
+        date: r.day.toISOString().slice(0,10),
+        value: Number(r.value || 0)
+      }));
+    } else if (breakdown === 'weekly') {
+      const bq = await client.query(
+        `SELECT date_trunc('week', day)::date AS week_start, SUM(${revenueCol}) AS value
+         FROM vw_revenue_by_day
+         WHERE day::date >= $1 AND day::date <= $2
+         GROUP BY week_start
+         ORDER BY week_start`,
+        [start.toISOString().slice(0,10), end.toISOString().slice(0,10)]
+      );
+      breakdownRows = (bq.rows || []).map(r => ({
+        week_start: r.week_start.toISOString().slice(0,10),
+        value: Number(r.value || 0)
+      }));
+    }
+
+    // Tính total (vẫn dùng view daily nếu có)
+    const totalQ = await client.query(
+      `SELECT SUM(${revenueCol}) AS total 
+       FROM vw_revenue_by_day 
+       WHERE day::date >= $1 AND day::date <= $2`,
+      [start.toISOString().slice(0,10), end.toISOString().slice(0,10)]
+    );
+    total = totalQ.rows[0] ? Number(totalQ.rows[0].total || 0) : 0;
+
+    // Nếu view daily không tồn tại hoặc lỗi → fallback sang mv_revenue_by_week (vẫn hard-code 'revenue')
+    // (Bạn có thể giữ phần fallback này nếu muốn, nhưng đơn giản hơn thì bỏ luôn vì view daily ổn định)
+    if (total === null || total === undefined) {
+      const fallbackQ = await client.query(
+        `SELECT SUM(${revenueCol}) AS total 
+         FROM mv_revenue_by_week 
+         WHERE week_start::date >= $1 AND week_start::date <= $2`,
+        [start.toISOString().slice(0,10), end.toISOString().slice(0,10)]
+      );
+      total = fallbackQ.rows[0] ? Number(fallbackQ.rows[0].total || 0) : 0;
+      // Nếu cần breakdown từ weekly thì thêm logic tương tự
+    }
+
+    return { total, breakdown: breakdownRows };
+
+  } catch (err) {
+    // Nếu view daily lỗi (ví dụ không tồn tại), fallback đơn giản
+    if (err.message.includes('vw_revenue_by_day')) {
+      // Fallback tương tự như trên...
+    }
+    throw err;
   } finally {
     client.release();
   }
