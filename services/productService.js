@@ -370,14 +370,16 @@ exports.createProduct = async (productData) => {
     // === 3. INSERT PRODUCT IMAGES (ảnh đầu = chính) ===
     if (images.length > 0) {
       const params = [];
-      const values = images.map((url) => {
+      const values = images.map((url, index) => {
         // push productId, url for each row and build incremental placeholders
         const idx = params.length + 1; // 1-based index for placeholder
-        params.push(productId, url);
-        return `($${idx}, $${idx + 1})`;
+        params.push(productId, url, (index + 1) );
+        return `($${idx}, $${idx + 1},  $${idx + 2})`;
       }).join(',');
+      console.log("value: ", params);
+      console.log(values);
       await client.query(
-        `INSERT INTO product_images (product_id, url) VALUES ${values}`,
+        `INSERT INTO product_images (product_id, url, position) VALUES ${values}`,
         params
       );
     }
@@ -418,13 +420,13 @@ exports.createProduct = async (productData) => {
       // Insert variant images
       if (variantImages.length > 0) {
         const paramsImg = [];
-        const placeholders = variantImages.map((url) => {
+        const placeholders = variantImages.map((url, index) => {
           const idx = paramsImg.length + 1;
-          paramsImg.push(variantId, url);
-          return `($${idx}, $${idx + 1})`;
+          paramsImg.push(variantId, url, index + 1);
+          return `($${idx}, $${idx + 1}, ${idx + 2})`;
         }).join(',');
         await client.query(
-          `INSERT INTO product_images (variant_id, url) VALUES ${placeholders}`,
+          `INSERT INTO product_images (variant_id, url, position) VALUES ${placeholders}`,
           paramsImg
         );
       }
