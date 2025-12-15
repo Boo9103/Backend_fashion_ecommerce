@@ -456,53 +456,145 @@ exports.updateProduct = async (productId, data) => {
       );
     }
 
-    //3. Xóa variants cũ + ảnh của variants
-    const oldVariants = await client.query('SELECT id FROM product_variants WHERE product_id = $1', [productId]);
-    for (const v of oldVariants.rows){
-      await client.query('DELETE FROM product_images WHERE variant_id = $1', [v.id]);
-    }
-    // fix: thêm dấu '=' cho WHERE
-    await client.query('DELETE FROM product_variants WHERE product_id = $1', [productId]);
+    // //3. Xóa variants cũ + ảnh của variants
+    // const oldVariants = await client.query('SELECT id FROM product_variants WHERE product_id = $1', [productId]);
+    // for (const v of oldVariants.rows){
+    //   await client.query('DELETE FROM product_images WHERE variant_id = $1', [v.id]);
+    // }
+    // // fix: thêm dấu '=' cho WHERE
+    // await client.query('DELETE FROM product_variants WHERE product_id = $1', [productId]);
 
-    //4. Thêm variants mới
-    for(const variant of variants){
-      // use the iterator variable `variant` (was `v` before)
-      const { sku, color_name, color_code, sizes, stock_qty, images: vImages = [] } = variant;
+    // //4. Thêm variants mới
+    // for(const variant of variants){
+    //   // use the iterator variable `variant` (was `v` before)
+    //   const { sku, color_name, color_code, sizes, stock_qty, images: vImages = [] } = variant;
       
-      //kiểm tra sku 
-      const checkSku = await client.query('SELECT 1 FROM product_variants WHERE sku = $1', [sku]);
-      if(checkSku.rowCount > 0){
-        throw new Error (`SKU "${sku}" already exists`);
-      }
+    //   //kiểm tra sku 
+    //   const checkSku = await client.query('SELECT 1 FROM product_variants WHERE sku = $1', [sku]);
+    //   if(checkSku.rowCount > 0){
+    //     throw new Error (`SKU "${sku}" already exists`);
+    //   }
 
-      const variantRes = await client.query(
-        `INSERT INTO product_variants 
-         (product_id, sku, color_name, color_code, sizes, stock_qty)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-         RETURNING id`,
-        [productId, sku, color_name, color_code, JSON.stringify(sizes), stock_qty]
-      );
-      const variantId = variantRes.rows[0].id;
+    //   const variantRes = await client.query(
+    //     `INSERT INTO product_variants 
+    //      (product_id, sku, color_name, color_code, sizes, stock_qty)
+    //      VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+    //      RETURNING id`,
+    //     [productId, sku, color_name, color_code, JSON.stringify(sizes), stock_qty]
+    //   );
+    //   const variantId = variantRes.rows[0].id;
 
-      if (vImages.length > 0) {
-      let valuesClause = [];
-      let params = [variantId]; // $1 = variantId
-      vImages.forEach((url, index) => {
-        const position = index + 1;
-        params.push(url, position);
-        const urlIdx = params.length - 1;
-        const posIdx = params.length;
-        valuesClause.push(`($1, $${urlIdx}, $${posIdx})`);
-      });
-      await client.query(
-        `INSERT INTO product_images (variant_id, url, "position")
-        VALUES ${valuesClause.join(', ')}`,
-        params
+    //   if (vImages.length > 0) {
+    //   let valuesClause = [];
+    //   let params = [variantId]; // $1 = variantId
+    //   vImages.forEach((url, index) => {
+    //     const position = index + 1;
+    //     params.push(url, position);
+    //     const urlIdx = params.length - 1;
+    //     const posIdx = params.length;
+    //     valuesClause.push(`($1, $${urlIdx}, $${posIdx})`);
+    //   });
+    //   await client.query(
+    //     `INSERT INTO product_images (variant_id, url, "position")
+    //     VALUES ${valuesClause.join(', ')}`,
+    //     params
+    //     );
+    //   }
+    // }
+
+    //3. Xử lý variants cũ + mới
+    const existingVariantsRes = await client.query(
+      `SELECT id, sku FROM product_variants WHERE product_id = $1`,
+      [productId]
+    );
+    const existingVariantsMap = new Map();
+    existingVariantsRes.rows.forEach(v => {
+      existingVariantsMap.set(v.id.toString(), v);
+    })
+
+    const processedVariantIds = new Set(); // để theo dõi các variant đã xử lý
+    for (const variant of variants){
+      const { id, sku, color_name, color_code, sizes, stock_qty = 0, images: vImages = [] } = variant;
+
+      if(id && existingVariantsMap.has(id.toString())){
+        //case1: variant cũ -> update (giữ nguyên variant_id)
+        processedVariantIds.add(id.toString());
+
+        //kiểm tra sku trùng(ngoại trừ chính nó)
+        const checkSku = await client.query(
+          `SELECT 1 FROM product_variants WHERE sku = $1 AND id != $2`,
+          [sku, id]
         );
+
+        if(checkSku.rowCount > 0){
+          throw new Error (`SKU "${sku}" already exists in another variant`);
+        }
+
+        //update variant info
+        await client.query(
+          `UPDATE product_variants
+           SET sku = $1, color_name = $2, color_code = $3, sizes = $4::jsonb, stock_qty = $5, updated_at = NOW()
+           WHERE id = $6`,
+          [sku, color_name || null, color_code || null, JSON.stringify(sizes), stock_qty, id]
+        );
+
+        //xóa ảnh cũ của variant này
+        await client.query('DELETE FROM product_images WHERE variant_id = $1', [id]);
+
+        //thêm ảnh mới
+        if(vImages.length > 0){
+          const valuesClauses = [];
+          const params = [id];
+          vImages.forEach((url, i) => {
+            const position = i+1;
+            params.push(url, position);
+            valuesClauses.push(`($1, $${params.length - 1}, $${params.length})`);
+          });
+          await client.query(
+            `INSERT INTO product_images (variant_id, url, "position")
+             VALUES ${valuesClauses.join(', ')}`,
+            params
+          );
+        }
+      }else{
+        //case2: variant mới -> insert
+        //kiểm tra sku trùng
+        const checkSku = await client.query(
+          `SELECT 1 FROM product_variants WHERE sku = $1`,
+          [sku]
+        );
+        if(checkSku.rowCount > 0){
+          throw new Error (`SKU "${sku}" already exists`);
+        }
+        const variantRes = await client.query(
+          `INSERT INTO product_variants 
+           (product_id, sku, color_name, color_code, sizes, stock_qty)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+           RETURNING id`,
+          [productId, sku, color_name || null, color_code || null, JSON.stringify(sizes), stock_qty]
+        );
+        const newVariantId = variantRes.rows[0].id;
+        processedVariantIds.add(newVariantId.toString());
+
+        //thêm ảnh mới
+        if(vImages.length > 0){
+          const valuesClauses = [];
+          const params = [newVariantId];
+          vImages.forEach((url, i) => {
+            const position = i+1;
+            params.push(url, position);
+            valuesClauses.push(`($1, $${params.length - 1}, $${params.length})`);
+          });
+          await client.query(
+            `INSERT INTO product_images (variant_id, url, "position")
+             VALUES ${valuesClauses.join(', ')}`,
+            params
+          );
+        }
       }
     }
 
-    //5. Trả dữ liệu đầy đủ
+    //4. Trả dữ liệu đầy đủ
     const full = await client.query(
       `SELECT * FROM v_product_full WHERE id = $1`, [productId]
     );

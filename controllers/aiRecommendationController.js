@@ -56,7 +56,7 @@ function extractAccessoryList(parsed, rawContext) {
     ctxType = ctx?.type || ctx?.type_name || null;
   } catch (e) { /* ignore */ }
 
-  // heuristic to detect accessory-like item
+  // heuristic to detect accessory-like item (phụ)
   const isAccessoryLike = (it) => {
     if (!it) return false;
     if (typeof it === 'string') return true;
@@ -256,6 +256,7 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
 
               // ALSO persist the user's chat message so conversation shows "Mẫu 1"
               try {
+                //lưu tin nhắn chọn mẫu của user
                 const chatPayload = {
                   sessionId: session_id || lastRec.session_id || null,
                   role: 'user',
@@ -277,6 +278,7 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
 
               // Persist assistant reply so conversation/history shows "Mình đã chọn mẫu X cho bạn."
               try {
+                //lưu tin nhắn phản hồi của assistant
                 const assistantPayload = {
                   sessionId: session_id || lastRec.session_id || null,
                   role: 'assistant',
@@ -344,7 +346,7 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
         // Load last recommendation (use service helper) and reuse its context (occasion/weather)
         const lastRec = typeof aiService.getLastRecommendationForUser === 'function' ? await aiService.getLastRecommendationForUser(userId) : null;
 
-        // Debug: always log lastRec shape so we can see why branch chosen
+        // Debug: luôn log lastRec shape so we can see why branch chosen
         try {
           console.debug('[aiRecommendationController.more] lastRec preview', {
             lastRecId: lastRec?.id || null,
@@ -355,7 +357,7 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
         } catch (e) { /* ignore logging errors */ }
 
         // build excludeVariantIds from lastRec (support legacy arrays, outfits, items, or { excluded: [...] } shape)
-        const excludeVariantIds = [];
+        const excludeVariantIds = []; // danh sách variant_id cần loại trừ
         if (lastRec && lastRec.items) {
           let raw = lastRec.items;
           if (typeof raw === 'string') {
@@ -364,8 +366,8 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
 
           // If object contains "excluded" array (seen in logs), use it
           if (raw && typeof raw === 'object' && Array.isArray(raw.excluded)) {
-            excludeVariantIds.push(...raw.excluded.filter(Boolean));
-          } else {
+            excludeVariantIds.push(...raw.excluded.filter(Boolean)); //nếu có excluded -> dùng luôn
+          } else { //còn k có thì duyệt qua toàn bộ items/outfits để lấy variant_id -> để loại trừ
             const parsed = parseRecommendationItems(raw);
             if (Array.isArray(parsed.outfits) && parsed.outfits.length) {
               for (const o of parsed.outfits) {
@@ -517,7 +519,7 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
       lastRec = null;
     }
 
-    if(/(túi|ví|kính|thắt lưng|phụ kiện|bag|wallet|sunglass|belt)/i.test(lowerMessage)){
+    if(/(túi|ví|kính|phụ kiện|bag|wallet|sunglass)/i.test(lowerMessage)){
       if (process.env.DEBUG_AI_SERVICE) console.debug('[aiRecommendationController.handleChat.DEBUG] accessory intent detected in controller (regex matched)', { lowerMessage });
       try {
         const accRes = await aiService.suggestAccessories(userId, message, {
@@ -570,7 +572,7 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
       }
     }
 
-    // default: general / contextual question
+    // default: xử lý câu hỏi chung
     try {
       const result = await aiService.handleGeneralMessage(userId, {
         message,

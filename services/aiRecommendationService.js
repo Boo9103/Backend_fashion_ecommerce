@@ -1826,19 +1826,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
           }
         }
       }
-
-      // const retrieveOutfitIntent = /\b(gửi lại thông tin outfit|gửi lại thông tin của outfit|cho mình xin lại thông tin|cho mình xin lại thông tin của outfit|gửi lại thông tin|xin lại thông tin outfit)\b/i;
-      // if (retrieveOutfitIntent.test(lowerMsg)) {
-      //   try {
-      //     const res = await exports.retrieveLastOutfitDetails(userId, sessionId);
-      //     if (res.ask) return { ask: res.ask, sessionId };
-      //     return { reply: res.reply, outfit: res.outfit, items: res.items, sessionId };
-      //   } catch (e) {
-      //     console.error('[aiService.handleGeneralMessage] retrieveOutfitIntent failed', e && e.stack ? e.stack : e);
-      //     return { reply: 'Mình không lấy được thông tin outfit lúc này, thử lại sau nhé!', sessionId };
-      //   }
-      // }
-
+      
       const retrieveIntent = /\b(gửi lại thông tin|gửi lại|gửi lại thông tin của|gửi lại thông tin cái|gửi lại thông tin món|gửi lại thông tin mẫu|gửi lại)\b/i;
       if (retrieveIntent.test(lowerMsg)) {
         try {
@@ -3893,7 +3881,7 @@ exports.saveRecommendation = async (userId, recommendationData = {}) => {
   }
 };
 
-//Khi user hỏi "cái túi lần trước"
+//Khi user hỏi "cái túi lần trước" || "bộ outfit mình thích hôm rồi" -> lấy lần gợi ý gần nhất
 exports.getLastRecommendationForUser = async (userId, type = null) => {
   const client = await pool.connect();
   try {
