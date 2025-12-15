@@ -1826,7 +1826,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
           }
         }
       }
-      
+
       const retrieveIntent = /\b(gửi lại thông tin|gửi lại|gửi lại thông tin của|gửi lại thông tin cái|gửi lại thông tin món|gửi lại thông tin mẫu|gửi lại)\b/i;
       if (retrieveIntent.test(lowerMsg)) {
         try {
@@ -2032,7 +2032,120 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
         }
 
         try {
-          // Load last accessory recommendation (no change)
+           // Helper: parse ai_recommendations.items shape for product_search
+          const extractProductsFromRec = (recRow) => {
+            if (!recRow) return [];
+            let items = recRow.items;
+            // parsed items may be stringified JSON
+            if (typeof items === 'string') {
+              try { items = JSON.parse(items); } catch (_) { items = null; }
+            }
+            // shapes we expect:
+            // - array directly
+            // - { products: [...] } or { items: [...] }
+            if (Array.isArray(items)) return items;
+            if (items && Array.isArray(items.products)) return items.products;
+            if (items && Array.isArray(items.items)) return items.items;
+            // fallback: if recRow has top-level products or accessories keys
+            if (recRow && recRow.items && recRow.items.products && Array.isArray(recRow.items.products)) return recRow.items.products;
+            return [];
+          };
+
+          // 1) prefer product_search last recommendation
+          const lastProdRec = await exports.getLastRecommendationForUser(userId, 'product_search');
+          let products = [];
+          if (lastProdRec) {
+            products = extractProductsFromRec(lastProdRec);
+          }
+          if (Array.isArray(products) && products.length > 0) {
+            if (selIdx < 0 || selIdx >= products.length) {
+              const ask = `Mẫu ${selIdx+1} không tồn tại, bạn thử chọn lại nhé.`;
+              if (persistSessionId) {
+                try {
+                  await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [persistSessionId, ask]);
+                  await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
+                } catch (_) { /* ignore */ }
+              }
+              return { ask, sessionId: persistSessionId };
+            }
+
+            const chosen = products[selIdx];
+            const chosenVariant = String(chosen.variant_id || chosen.variant || chosen.id || '');
+            const chosenName = chosen.name || chosen.product_name || chosen.title || chosenVariant;
+
+            // Ensure user's quick-reply is persisted: prefer session + insert, else create session via saveChatMessage
+            let usedSessionId = persistSessionId;
+            if (!usedSessionId) {
+              try {
+                const saved = await exports.saveChatMessage(userId, { sessionId: null, role: 'user', content: String(message || '').trim() });
+                if (saved && saved.success && saved.sessionId) {
+                  usedSessionId = saved.sessionId;
+                  _userMessagePersisted = true;
+                }
+              } catch (e) { /* ignore */ }
+            } else if (!_userMessagePersisted) {
+              try {
+                await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'user',$2,NOW())`, [usedSessionId, String(message || '').trim()]);
+                await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [usedSessionId]);
+                _userMessagePersisted = true;
+              } catch (e) { /* ignore */ }
+            }
+
+            // persist analytics / audit of user selection
+            try {
+              const ctx = { action: 'product_select', source: 'quick_reply', sessionId: usedSessionId };
+              const items = { selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen } };
+              await client.query(
+                `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
+                 VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
+                [userId, ctx, items, 'user-action']
+              );
+            } catch (e) {
+              console.warn('[aiService.handleGeneralMessage] persist product selection to ai_recommendations failed', e && e.stack ? e.stack : e);
+            }
+
+            const reply = `Đã chọn: ${chosenName}. Mình lưu lựa chọn của bạn. Bạn muốn mình show chi tiết (hình/size) hoặc tư vấn thêm phụ kiện khác?`;
+
+            // persist assistant reply into chat history when we have a session
+            if (usedSessionId) {
+              try {
+                await client.query(
+                  `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+                   VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
+                  [usedSessionId, reply, JSON.stringify({ action: 'product_selected', selected: { index: selIdx + 1, variant_id: chosenVariant } })]
+                );
+                await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [usedSessionId]);
+              } catch (e) {
+                console.warn('[aiService.handleGeneralMessage] persist assistant selection reply failed', e && e.stack ? e.stack : e);
+              }
+            }
+
+            return { reply, selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen }, sessionId: usedSessionId };
+          }
+
+          // Fallback: if no ai_recommendations row found, try to read last assistant message metadata (session-aware)
+          if ((!products || products.length === 0) && persistSessionId) {
+            try {
+              const mQ = await client.query(
+                `SELECT metadata FROM ai_chat_messages WHERE session_id = $1 AND role = 'assistant' AND metadata IS NOT NULL ORDER BY created_at DESC LIMIT 8`,
+                [persistSessionId]
+              );
+              for (const row of (mQ.rows || [])) {
+                try {
+                  const meta = (typeof row.metadata === 'string') ? JSON.parse(row.metadata) : row.metadata;
+                  if (!meta) continue;
+                  // metadata saved by searchProducts uses: { type: 'product_search', items: rows } or { type:'product_search', items: { items: [...] } }
+                  if (meta.type === 'product_search') {
+                    if (Array.isArray(meta.items)) { products = meta.items; break; }
+                    if (meta.items && Array.isArray(meta.items.products)) { products = meta.items.products; break; }
+                    if (meta.items && Array.isArray(meta.items.items)) { products = meta.items.items; break; }
+                  }
+                } catch (eMeta) { /* ignore parse error */ }
+              }
+            } catch (eMsg) { /* ignore */ }
+          }
+          
+          //2 fallback: Load last accessory recommendation
           const last = await exports.getLastRecommendationForUser(userId, 'accessories');
           if (!last) {
             const ask = 'Mình chưa tìm mẫu phụ kiện nào trước đó. Bạn muốn mình tìm vài mẫu không?';
@@ -2832,6 +2945,67 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       }
     }
 
+    
+
+    // detect product search intent based on keywords - user hỏi sản phẩm
+    const typeMap = [
+      // ÁO
+      { slug: 'ao-thun',          kws: ['áo thun', 'ao thun', 't-shirt', 'tshirt', 'tee', 'thun'] },
+      { slug: 'ao-so-mi',         kws: ['sơ mi', 'so mi', 'áo sơ mi', 'ao so mi', 'shirt', 'blouse'] },
+      { slug: 'ao-hoodie-sweater',kws: ['hoodie', 'áo hoodie', 'ao hoodie', 'sweater', 'áo sweater', 'áo len', 'ao len'] },
+      { slug: 'ao-varsity-bomber',kws: ['áo khoác', 'ao khoac', 'áo bomber', 'bomber', 'varsity', 'jacket', 'áo jacket', 'coat', 'blazer'] },
+
+      // QUẦN
+      { slug: 'quan-jean',        kws: ['quần jean', 'quan jean', 'jean', 'jeans', 'denim'] },
+      { slug: 'quan-short',       kws: ['quần short', 'quan short', 'short', 'quần đùi', 'quan dui'] },
+      { slug: 'quan-ong-rong',    kws: ['quần ống rộng', 'quan ong rong', 'quần ống suông', 'quan ong suong'] },
+      { slug: 'quan-au-ong-suong',kws: ['quần âu', 'quan au', 'quần tây', 'quan tay', 'trousers', 'chino', 'kaki'] },
+
+      // TÚI XÁCH NỮ
+      { slug: 'tui-xach',         kws: ['túi xách', 'tui xach', 'túi cầm tay', 'bag', 'handbag'] },
+      { slug: 'tui-deo-cheo',     kws: ['túi đeo chéo', 'tui deo cheo', 'túi đeo vai', 'crossbody', 'shoulder bag'] },
+      { slug: 'set-qua-tang',     kws: ['set quà tặng', 'set qua tang', 'bộ quà tặng'] },
+
+      // PHỤ KIỆN
+      { slug: 'vi-nam',           kws: ['ví nam', 'vi nam', 'wallet nam', 'bóp nam'] },
+      { slug: 'vi-nu',            kws: ['ví nữ', 'vi nu', 'wallet nữ', 'bóp nữ'] },
+      { slug: 'kinh-mat',         kws: ['kính mát', 'kinh mat', 'kính râm', 'sunglasses', 'kính nắng'] },
+      { slug: 'gong-kinh',        kws: ['gọng kính', 'gong kinh', 'khung kính'] },
+      { slug: 'kinh-bao-ho',      kws: ['kính bảo hộ', 'kinh bao ho', 'kính an toàn'] }
+    ];
+
+    // Tạo danh sách tất cả từ khóa để detect intent
+    const allKeywords = typeMap.flatMap(item => item.kws);
+    const productSearchIntentRe = new RegExp('\\b(' + allKeywords.join('|') + ')\\b', 'i');
+
+    // Kiểm tra xem tin nhắn có chứa từ khóa tìm kiếm sản phẩm không
+    if (productSearchIntentRe.test(lowerMsg)) {
+      try {
+        const res = await exports.searchProducts(userId, message, {
+          sessionId,
+          limit: 6
+        });
+
+        // searchProducts đã tự persist reply + metadata + recommendation audit
+        // Chỉ cần trả về cho frontend
+        return {
+          reply: res.reply,
+          products: res.products || [],
+          data: res.products || [],  // giữ cả 2 để tương thích FE cũ
+          followUp: res.followUp || null,
+          sessionId: res.sessionId || sessionId
+        };
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] product search failed', e && e.stack ? e.stack : e);
+        return {
+          reply: 'Mình đang tìm hàng mà hơi chậm một chút, bạn thử lại sau vài giây nhé!',
+          products: [],
+          data: [],
+          sessionId
+        };
+      }
+    }
+
     // thì xử lý branch phụ kiện NGAY lập tức (không gọi generator outfit).
     const accessoryRequestForExistingOutfitRe = /\b(tư vấn thêm phụ kiện|tư vấn phụ kiện|thêm phụ kiện|chọn thêm phụ kiện|phụ kiện cho (?:outfit|bộ)|phụ kiện cho bộ|cho outfit này|cho bộ này|bộ vừa rồi|outfit vừa rồi)\b/i;
     if (accessoryRequestForExistingOutfitRe.test(String(message || '')) || slotHints.wantsAccessories) {
@@ -3525,6 +3699,291 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
     client.release();
   }
 };
+
+exports.searchProducts = async (userId, message, opts = {}) => {
+  const sessionId = opts.sessionId || null;
+  const limit = Math.min(12, Number(opts.limit) || 6);
+  const client = await pool.connect();
+
+  //chuẩn hóa query: bỏ dấu, viết thường
+  const qRaw = String(message || '').trim();
+  const q = qRaw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const tokens = q.split(/\s+/).filter(t => t.length >= 2);
+
+  //Mapping từ khóa user nói -> slug category
+  const typeMap = [
+    // ÁO
+    {
+      slug: 'ao-thun',  // ao/ao-thun
+      kws: ['áo thun', 'ao thun', 't-shirt', 'tshirt', 'tee', 'thun']
+    },
+    {
+      slug: 'ao-so-mi',  // ao/ao-so-mi
+      kws: ['sơ mi', 'so mi', 'áo sơ mi', 'ao so mi', 'shirt', 'blouse']
+    },
+    {
+      slug: 'ao-hoodie-sweater',  // ao/ao-hoodie-sweater
+      kws: ['hoodie', 'áo hoodie', 'ao hoodie', 'sweater', 'áo sweater', 'áo len', 'ao len']
+    },
+    {
+      slug: 'ao-varsity-bomber',  // ao/ao-varsity-bomber
+      kws: ['áo khoác', 'ao khoac', 'áo bomber', 'bomber', 'varsity', 'jacket', 'áo jacket', 'coat', 'blazer']
+    },
+
+    // QUẦN
+    {
+      slug: 'quan-jean',  // quan/quan-jean
+      kws: ['quần jean', 'quan jean', 'jean', 'jeans', 'denim']
+    },
+    {
+      slug: 'quan-short',  // quan/quan-short
+      kws: ['quần short', 'quan short', 'short', 'quần đùi', 'quan dui']
+    },
+    {
+      slug: 'quan-ong-rong',  // quan/quan-ong-rong
+      kws: ['quần ống rộng', 'quan ong rong', 'quần ống suông', 'quan ong suong']
+    },
+    {
+      slug: 'quan-au-ong-suong',  // quan/quan-au-ong-suong
+      kws: ['quần âu', 'quan au', 'quần tây', 'quan tay', 'trousers', 'chino', 'kaki']
+    },
+
+    // TÚI XÁCH NỮ (không nằm dưới phu-kien)
+    {
+      slug: 'tui-xach',  // tui-xach-nu/tui-xach
+      kws: ['túi xách', 'tui xach', 'túi cầm tay', 'bag', 'handbag']
+    },
+    {
+      slug: 'tui-deo-cheo',  // tui-xach-nu/tui-deo-cheo
+      kws: ['túi đeo chéo', 'tui deo cheo', 'túi đeo vai', 'crossbody', 'shoulder bag']
+    },
+    {
+      slug: 'set-qua-tang',  // tui-xach-nu/set-qua-tang
+      kws: ['set quà tặng', 'set qua tang', 'bộ quà tặng']
+    },
+
+    // PHỤ KIỆN
+    {
+      slug: 'vi-nam',  // phu-kien/vi-nam
+      kws: ['ví nam', 'vi nam', 'wallet nam', 'bóp nam']
+    },
+    {
+      slug: 'vi-nu',  // phu-kien/vi-nu
+      kws: ['ví nữ', 'vi nu', 'wallet nữ', 'bóp nữ']
+    },
+    {
+      slug: 'kinh-mat',  // phu-kien/kinh-mat
+      kws: ['kính mát', 'kinh mat', 'kính râm', 'sunglasses', 'kính nắng']
+    },
+    {
+      slug: 'gong-kinh',  // phu-kien/gong-kinh
+      kws: ['gọng kính', 'gong kinh', 'khung kính']
+    },
+    {
+      slug: 'kinh-bao-ho',  // phu-kien/kinh-bao-ho
+      kws: ['kính bảo hộ', 'kinh bao ho', 'kính an toàn']
+    }
+  ];
+
+  //tìm các category phù hợp với từ khóa
+  const matchedTypes = typeMap.filter(t => t.kws.some(k => q.includes(k)));
+  const matchedSlugs = matchedTypes.map(t => t.slug);
+
+  //tạo mảng pattern tìm kiếm: ưu tiên slug category + tên sản phẩm
+  const likePatterns = [];
+  // ƯU TIÊN 1: Nếu match được category slug → ưu tiên tìm chính xác slug trước (độ chính xác cao nhất)
+  if (matchedSlugs.length > 0) {
+    // Tìm chính xác slug (ưu tiên cao nhất)
+    matchedSlugs.forEach(slug => likePatterns.push(`%${slug}%`));
+    
+    // Tìm trong tên category và tên sản phẩm với từ khóa chính (chỉ lấy từ khóa mạnh)
+    const strongKeywords = tokens.filter(t => t.length >= 3 && !['mình', 'cần', 'tìm', 'cho', 'mẫu', 'cái'].includes(t));
+    strongKeywords.forEach(token => likePatterns.push(`%${token}%`));
+  } else {
+    // Nếu không match slug → tìm rộng bằng tất cả token
+    tokens.forEach(token => likePatterns.push(`%${token}%`));
+  }
+  try{
+    const where = ['p.status = $1', 'pv.stock_qty > 0'];
+    const params = ['active'];
+    let idx = 2;
+
+    // Nếu đã match slug -> filter theo slug trước, tránh trả quần khác loại
+    if (matchedSlugs.length) {
+      where.push(`c.slug ILIKE ANY($${idx}::text[])`);
+      params.push(matchedSlugs.map(s => `%${s}%`));
+      idx++;
+    }
+
+    // Vẫn giữ ILIKE rộng cho tên/mô tả nhưng chỉ bổ sung, không thay thế slug filter
+    if (likePatterns.length) {
+      where.push(`(LOWER(p.name) ILIKE ANY($${idx}::text[]) OR LOWER(c.name) ILIKE ANY($${idx}::text[]) OR LOWER(c.slug) ILIKE ANY($${idx}::text[]))`);
+      params.push(likePatterns);
+      idx++;
+    }
+
+    if( likePatterns.length === 0 ) {
+      // Query quá chung → hỏi lại
+      const ask = 'Bạn đang muốn tìm món đồ kiểu gì ạ? Ví dụ: "quần jean", "áo thun trắng", "hoodie đen"...';
+      if (sessionId) {
+        await client.query(
+          `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'assistant', $2, NOW())`,
+          [sessionId, ask]
+        );
+      }
+      return {
+        ask,
+        reply: ask,
+        products: [],
+        followUp: { quickReplies: ['Quần jean', 'Áo thun', 'Hoodie', 'Sơ mi', 'Đầm'] }
+      };
+    }
+
+    //tìm trong: tên sản phẩm, tên category, slug category
+    where.push(`
+      (
+        LOWER(p.name) ILIKE ANY($${idx}::text[]) OR
+        LOWER(c.name) ILIKE ANY($${idx}::text[]) OR
+        LOWER(c.slug) ILIKE ANY($${idx}::text[])
+      )
+    `);
+    params.push(likePatterns);
+    idx++;
+
+    const sql = `
+      SELECT
+        pv.id::text AS variant_id,
+        p.id::text AS product_id,
+        p.name,
+        p.description,
+        pv.color_name AS color,
+        COALESCE(p.final_price, p.price)::integer AS price,
+        COALESCE(
+          (SELECT url FROM product_images WHERE variant_id = pv.id ORDER BY position ASC LIMIT 1),
+          (SELECT url FROM product_images WHERE product_id = p.id ORDER BY position ASC LIMIT 1))
+          AS image_url,
+        pv.sizes,
+        pv.stock_qty,
+        pv.sold_qty AS sold_qty,
+        c.name AS category_name,
+        c.slug AS category_slug
+      FROM product_variants pv
+      JOIN products p ON p.id = pv.product_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE ${where.join(' AND ')}
+      ORDER BY
+        pv.sold_qty DESC NULLS LAST, --ưu tiên bán chạy
+        p.created_at DESC
+      LIMIT $${idx}
+    `;
+    params.push(limit);
+
+    const res = await client.query(sql, params);
+    const rows = res.rows || [];
+
+    if( rows.length === 0 ) {
+      const reply = 'Mình chưa tìm thấy sản phẩm phù hợp. Bạn thử nói cụ thể hơn về kiểu dáng hoặc màu sắc nhé?';
+      if (sessionId) {
+        await client.query(
+          `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'assistant', $2, NOW())`,
+          [sessionId, reply]
+        );
+      }
+      return {
+        reply,
+        products: [],
+        followUp: { quickReplies: ['Quần jeans xanh', 'Áo thun trắng', 'Hoodie oversize', 'Đầm suông'] }
+      };
+    }
+
+    // Tạo reply đẹp
+    const names = rows.map((x, i) => {
+      const colorPart = x.color ? ` (${x.color})` : '';
+      const descPart = x.description ? (' - ' + x.description.split('.').shift().trim()) : '';
+      return `${i + 1}. ${x.name}${colorPart}${descPart}`;
+    }).join('\n');
+
+    const reply = `Mình tìm được ${rows.length} sản phẩm phù hợp đây ạ:\n${names}\n\nBạn thích mẫu nào nhất? Mình show chi tiết ngay!`;
+    const quickReplies = rows.slice(0, 6).map((_, i) => `Mẫu ${i + 1}`);
+    const followUp = { quickReplies: [...quickReplies, 'Xem thêm'] };
+
+    // Lưu tin nhắn assistant + metadata
+    if (sessionId) {
+      try {
+        await client.query(
+          `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+           VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
+          [
+            sessionId,
+            reply,
+            JSON.stringify({
+              type: 'product_search',
+              query: qRaw,
+              matched_categories: matchedSlugs,
+              items: rows
+            })
+          ]
+        );
+        await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+      } catch (e) {
+        console.error('Failed to save search message:', e);
+      }
+    }
+
+    // Lưu vào ai_recommendations để audit
+    // Chuẩn bị danh sách sản phẩm đầy đủ thông tin để FE hiển thị chi tiết khi chọn mẫu
+    const fullProducts = rows.map(r => ({
+      variant_id: r.variant_id,
+      product_id: r.product_id,
+      name: r.name,
+      color: r.color || null,
+      price: r.price,
+      image_url: r.image_url,
+      description: r.description || '',           // THÊM MẤU CHỐT
+      sizes: r.sizes || [],                       // THÊM SIZE
+      stock_qty: r.stock_qty || 0,
+      sold_qty: r.sold_qty || 0,
+      category_name: r.category_name || '',
+      category_slug: r.category_slug || ''
+    }));
+
+    // Lưu vào ai_recommendations (đầy đủ để sau này chọn mẫu vẫn có data)
+    try {
+      await client.query(
+        `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
+        VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
+        [
+          userId,
+          JSON.stringify({ 
+            type: 'product_search', 
+            query: qRaw, 
+            matched_categories: matchedSlugs 
+          }),
+          JSON.stringify({ products: fullProducts }),  // Lưu đầy đủ
+          'search-v2'
+        ]
+      );
+    } catch (e) {
+      console.error('Failed to save recommendation audit:', e);
+    }
+    return { 
+      reply, 
+      products: fullProducts,   // FE nhận ngay description, sizes...
+      followUp, 
+      sessionId 
+    };
+  }catch (err) {
+    console.error('[searchProducts] error:', err);
+    return {
+      reply: 'Luna đang tìm hàng, bạn đợi xíu nha!',
+      products: [],
+      sessionId
+    };
+  } finally {
+    client.release();
+  }
+};
+
 
 // Retrieve a single item detail from last recommendation (resolve by "áo/quần/món 1/mẫu 2/đó")
 exports.retrieveLastItemDetails = async (userId, sessionId = null, message = '', opts = {}) => {

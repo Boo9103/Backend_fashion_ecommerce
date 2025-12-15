@@ -190,157 +190,177 @@ exports.handleChat = async (req, res) => {
 
     const intent = typeof detectSimpleIntent === 'function' ? detectSimpleIntent(message) : { type: 'default' };
 console.debug('[aiRecommendationController.handleChat] detected intent:', intent);
+
     if (intent.type === 'select') {
       try {
-        const selIndex = Number.isFinite(intent.index) ? intent.index : null;
-
-        // load last recommendation
-        let lastRec = null;
-        try { lastRec = typeof aiService.getLastRecommendationForUser === 'function' ? await aiService.getLastRecommendationForUser(userId) : null; } catch(e) {
-          console.error('[aiRecommendationController.handleChat] getLastRecommendationForUser failed (select)', e && e.stack ? e.stack : e);
-          lastRec = null;
-        }
-
-        // debug summary
-        try {
-          console.debug('[aiRecommendationController.handleChat] select branch debug', {
-            userId,
-            session_id,
-            selIndex,
-            lastRecId: lastRec?.id || null,
-            lastRecSession: lastRec?.session_id || null,
-            lastRecItemsType: typeof lastRec?.items,
-            lastRecItemsPreview: Array.isArray(lastRec?.items) ? `array(${lastRec.items.length})` : (lastRec?.items ? 'object/string' : null)
-          });
-        } catch (e) { /* ignore */ }
-
-        if (!selIndex) {
+        const selIndex = Number(intent.index);
+        if (!selIndex || selIndex < 1) {
           return res.status(400).json({ success: false, message: 'Chọn mẫu không hợp lệ.' });
         }
 
-        if (lastRec) {
-          // parse items safely and expose for debug
-          const parsed = parseRecommendationItems(lastRec.items);
-          console.debug('[aiRecommendationController.handleChat] parsed recommendation shape', {
-            accessoriesCount: Array.isArray(parsed.accessories) ? parsed.accessories.length : 0,
-            outfitsCount: Array.isArray(parsed.outfits) ? parsed.outfits.length : 0,
-            itemsCount: Array.isArray(parsed.items) ? parsed.items.length : 0
+        // Lấy recommendation mới nhất
+        let lastRec = null;
+        try {
+          lastRec = await aiService.getLastRecommendationForUser(userId);
+        } catch (e) {
+          console.error('[handleChat] getLastRecommendation failed', e);
+        }
+
+        if (!lastRec) {
+          return res.json({
+            success: true,
+            message: 'Mình không thấy danh sách mẫu gần đây. Bạn muốn tìm gì để mình gợi ý lại nha?',
+            sessionId: session_id
           });
+        }
 
-          // build accessory list robustly (use parsed.accessories or fallback to parsed.items)
-          const accessoryList = extractAccessoryList(parsed, lastRec.context);
-          console.debug('[aiRecommendationController.handleChat] accessoryList length', { accessoryListLen: Array.isArray(accessoryList) ? accessoryList.length : 0 });
+        // === ƯU TIÊN CAO NHẤT: Nếu là product_search → xử lý chọn từ danh sách tìm kiếm ===
+        let contextObj = lastRec.context;
+        if (typeof contextObj === 'string') {
+          try { contextObj = JSON.parse(contextObj); } catch (e) { contextObj = {}; }
+        }
 
-          // accessory selection path
-          if (Array.isArray(accessoryList) && accessoryList.length > 0) {
-            if (selIndex <= 0 || selIndex > accessoryList.length) {
-              console.debug('[aiRecommendationController.handleChat] accessory select index out of range', { selIndex, accessoriesLen: accessoryList.length });
-              return res.status(400).json({ success: false, message: `Mẫu ${selIndex} không tồn tại.` });
-            }
+        if (contextObj?.type === 'product_search') {
+          // Lấy danh sách sản phẩm từ lastRec.items (hỗ trợ nhiều format)
+          let productList = [];
+          try {
+            let rawItems = lastRec.items;
+            if (typeof rawItems === 'string') rawItems = JSON.parse(rawItems);
 
-            const chosen = accessoryList[selIndex - 1];
-            console.debug('[aiRecommendationController.handleChat] accessory selection chosen preview', {
-              chosenId: (chosen && (chosen.variant_id || chosen.id)) ? (chosen.variant_id || chosen.id) : null,
-              chosenType: typeof chosen
-            });
-
-            // persist user's selection and log result
-            try {
-              const saveRes = await aiService.saveRecommendation(userId, {
-                type: 'accessory',
-                items: [chosen],
-                context: lastRec.context ? (typeof lastRec.context === 'string' ? JSON.parse(lastRec.context) : lastRec.context) : null,
-                sessionId: session_id || lastRec.session_id || null
-              });
-              console.debug('[aiRecommendationController.handleChat] saveRecommendation result', saveRes);
-
-              // ALSO persist the user's chat message so conversation shows "Mẫu 1"
-              try {
-                //lưu tin nhắn chọn mẫu của user
-                const chatPayload = {
-                  sessionId: session_id || lastRec.session_id || null,
-                  role: 'user',
-                  content: message || `Mẫu ${selIndex}`
-                };
-                if (typeof aiService.saveChatMessage === 'function') {
-                  await aiService.saveChatMessage(userId, chatPayload);
-                  console.debug('[aiRecommendationController.handleChat] saveChatMessage OK', { sessionId: chatPayload.sessionId });
-                } else if (typeof aiService.appendChatMessage === 'function') {
-                  // fallback to alternative name
-                  await aiService.appendChatMessage(userId, chatPayload);
-                  console.debug('[aiRecommendationController.handleChat] appendChatMessage OK', { sessionId: chatPayload.sessionId });
-                } else {
-                  console.debug('[aiRecommendationController.handleChat] no chat-save function available on aiService; skipping chat persist');
+            if (Array.isArray(rawItems)) {
+              productList = rawItems;
+            } else if (rawItems && Array.isArray(rawItems.products)) {
+              productList = rawItems.products;
+            } else if (rawItems && typeof rawItems === 'object') {
+              // fallback: tìm bất kỳ array nào trong object
+              for (const key in rawItems) {
+                if (Array.isArray(rawItems[key])) {
+                  productList = rawItems[key];
+                  break;
                 }
-              } catch (e) {
-                console.error('[aiRecommendationController.handleChat] saving user chat message failed', e && e.stack ? e.stack : e);
               }
-
-              // Persist assistant reply so conversation/history shows "Mình đã chọn mẫu X cho bạn."
-              try {
-                //lưu tin nhắn phản hồi của assistant
-                const assistantPayload = {
-                  sessionId: session_id || lastRec.session_id || null,
-                  role: 'assistant',
-                  content: `Mình đã chọn mẫu ${selIndex} cho bạn.`,
-                  metadata: { action: 'accessory_selected', selected: chosen }
-                };
-                if (typeof aiService.saveChatMessage === 'function') {
-                  await aiService.saveChatMessage(userId, assistantPayload);
-                  console.debug('[aiRecommendationController.handleChat] saved assistant chat message', { sessionId: assistantPayload.sessionId });
-                } else if (typeof aiService.appendChatMessage === 'function') {
-                  await aiService.appendChatMessage(userId, assistantPayload);
-                  console.debug('[aiRecommendationController.handleChat] appended assistant chat message', { sessionId: assistantPayload.sessionId });
-                } else {
-                  console.debug('[aiRecommendationController.handleChat] no chat-save function available on aiService; skipping assistant persist');
-                }
-              } catch (e) {
-                console.error('[aiRecommendationController.handleChat] saving assistant chat message failed', e && e.stack ? e.stack : e);
-              }
-            } catch (e) {
-              console.error('[aiRecommendationController.handleChat] saveRecommendation (accessory select) threw', e && e.stack ? e.stack : e);
             }
+          } catch (e) {
+            console.error('[handleChat] parse product_search items failed', e);
+          }
 
-            // respond with selected accessory
+          if (productList.length === 0 || selIndex > productList.length) {
             return res.json({
               success: true,
-              message: `Mình đã chọn mẫu ${selIndex} cho bạn.`,
-              selected: chosen,
-              sessionId: session_id || lastRec.session_id || null
+              message: `Hiện chỉ có ${productList.length} mẫu thôi ạ. Bạn chọn mẫu khác hoặc nói "xem thêm" nhé!`,
+              sessionId: session_id || lastRec.session_id
             });
           }
 
-          // outfit-selection path (if accessories not present)
-          if (Array.isArray(parsed.outfits) && parsed.outfits.length >= selIndex && selIndex > 0) {
-            try {
-              const sel = await aiService.handleOutfitSelection(userId, session_id || lastRec.session_id || null, selIndex);
-              if (sel.ask) return res.json({ success: true, ask: sel.ask, selected: sel.selected || null, sessionId: sel.sessionId || null });
-              return res.json({ success: true, message: sel.reply || '', selected: sel.selected || null, sessionId: sel.sessionId || null });
-            } catch (e) {
-              console.error('[aiRecommendationController.handleChat] handleOutfitSelection threw', e && e.stack ? e.stack : e);
-              return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
-            }
+          const chosen = productList[selIndex - 1];
+
+          // Lưu lịch sử chat (user + assistant)
+          const persistSessionId = session_id || lastRec.session_id;
+          try {
+            await aiService.saveChatMessage(userId, {
+              sessionId: persistSessionId,
+              role: 'user',
+              content: message || `Mẫu ${selIndex}`
+            });
+
+            await aiService.saveChatMessage(userId, {
+              sessionId: persistSessionId,
+              role: 'assistant',
+              content: `Đây là chi tiết mẫu ${selIndex} bạn chọn nè 😊`,
+              metadata: { action: 'product_selected', selected: chosen }
+            });
+          } catch (e) {
+            console.warn('[handleChat] save chat message failed (product select)', e);
           }
 
-          // no accessories/outfits detected
-          console.debug('[aiRecommendationController.handleChat] no accessories or outfits found in lastRec for select', { lastRecId: lastRec.id });
+          // Lưu recommendation chọn sản phẩm (để audit)
+          try {
+            await aiService.saveRecommendation(userId, {
+              type: 'product_selected',
+              items: [chosen],
+              context: { ...contextObj, selected_index: selIndex },
+              sessionId: persistSessionId
+            });
+          } catch (e) {
+            console.warn('[handleChat] saveRecommendation failed (product select)', e);
+          }
+
+          return res.json({
+            success: true,
+            message: `Đây là chi tiết mẫu ${selIndex} bạn chọn nè 😊`,
+            selected: chosen,
+            sessionId: persistSessionId
+          });
         }
 
-        // fallback delegate to service generic outfit selection as last resort
-        try {
-          const sel = await aiService.handleOutfitSelection(userId, session_id || null, intent.index);
-          if (sel.ask) return res.json({ success: true, ask: sel.ask, selected: sel.selected || null, sessionId: sel.sessionId || null });
-          return res.json({ success: true, message: sel.reply || '', selected: sel.selected || null, sessionId: sel.sessionId || null });
-        } catch (err) {
-          console.error('[aiRecommendationController.handleChat] fallback handleOutfitSelection error', err && err.stack ? err.stack : err);
-          return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
+        // === NHÁNH THỨ 2: Phụ kiện (accessory) ===
+        const parsed = parseRecommendationItems(lastRec.items);
+        const accessoryList = extractAccessoryList(parsed, lastRec.context);
+
+        if (Array.isArray(accessoryList) && accessoryList.length > 0) {
+          if (selIndex > accessoryList.length) {
+            return res.json({
+              success: true,
+              message: `Chỉ có ${accessoryList.length} mẫu phụ kiện thôi ạ!`,
+              sessionId: session_id || lastRec.session_id
+            });
+          }
+
+          const chosen = accessoryList[selIndex - 1];
+
+          // Lưu chat + recommendation
+          const persistSessionId = session_id || lastRec.session_id;
+          try {
+            await aiService.saveChatMessage(userId, { sessionId: persistSessionId, role: 'user', content: message || `Mẫu ${selIndex}` });
+            await aiService.saveChatMessage(userId, {
+              sessionId: persistSessionId,
+              role: 'assistant',
+              content: `Mình đã chọn mẫu ${selIndex} cho bạn.`,
+              metadata: { action: 'accessory_selected', selected: chosen }
+            });
+            await aiService.saveRecommendation(userId, {
+              type: 'accessory',
+              items: [chosen],
+              context: contextObj,
+              sessionId: persistSessionId
+            });
+          } catch (e) { /* non-fatal */ }
+
+          return res.json({
+            success: true,
+            message: `Mình đã chọn mẫu ${selIndex} cho bạn.`,
+            selected: chosen,
+            sessionId: persistSessionId
+          });
         }
+
+        // === NHÁNH THỨ 3: Outfit ===
+        if (Array.isArray(parsed.outfits) && parsed.outfits.length >= selIndex) {
+          try {
+            const result = await aiService.handleOutfitSelection(userId, session_id || lastRec.session_id, selIndex);
+            return res.json({
+              success: true,
+              message: result.reply || `Đây là chi tiết bộ outfit mẫu ${selIndex} nè!`,
+              selected: result.selected || result.outfit,
+              sessionId: result.sessionId || session_id
+            });
+          } catch (e) {
+            console.error('[handleChat] handleOutfitSelection error', e);
+          }
+        }
+
+        // === FALLBACK: Không xác định được danh sách nào ===
+        return res.json({
+          success: true,
+          message: 'Mình không thấy danh sách mẫu nào gần đây. Bạn nói rõ hơn hoặc nói "xem thêm" để mình gợi ý lại nha!',
+          sessionId: session_id || lastRec.session_id
+        });
+
       } catch (err) {
-        console.error('[aiRecommendationController.handleChat] select branch unexpected error', err && err.stack ? err.stack : err);
-        return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
+        console.error('[handleChat] select branch error', err);
+        return res.status(500).json({ success: false, message: 'Luna đang bận, thử lại sau nha!' });
       }
     }
-
     if (intent.type === 'more') {
       try {
         // Load last recommendation (use service helper) and reuse its context (occasion/weather)
@@ -572,7 +592,7 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
       }
     }
 
-    // default: xử lý câu hỏi chung
+    // default: xử lý câu hỏi chung 
     try {
       const result = await aiService.handleGeneralMessage(userId, {
         message,
