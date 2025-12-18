@@ -402,7 +402,7 @@ exports.updateFlashSale = async(productId, { sale_percent, is_flash_sale})=> {
 };
 
 exports.updateProduct = async (productId, data) => {
-  const { name, description, price, images = [], variants = [] } = data;
+  const { name, description, price, images = [], variants = [], category_id, supplier_id } = data;
 
   if (!price || price <= 0) {
     throw new Error('Price must be greater than 0');
@@ -428,13 +428,37 @@ exports.updateProduct = async (productId, data) => {
   try{
     await client.query('BEGIN');
 
+    //đảm bảo sản phẩm tồn tại và lấy để kiểm tra category & supplier hiện tại
+    const existingProductRes = await client.query(
+      `SELECT id, category_id, supplier_id FROM products WHERE id = $1`,
+      [productId]
+    );
+    if(existingProductRes.rowCount === 0) throw new Error('Product not found');
+    const existingProduct = existingProductRes.rows[0];
+
+    //nếu có thay đổi category_id/ supplier_id thì kiểm tra hợp lệ
+    let finalCategoryId = existingProduct.category_id;
+    let finalSupplierId = existingProduct.supplier_id;
+
+    if(typeof category_id !== 'undefined' && category_id !== null){
+      const cat = await client.query('SELECT id FROM categories WHERE id = $1', [category_id]);
+      if(cat.rowCount === 0) throw new Error('Invalid category_id');
+      finalCategoryId = category_id;
+    }
+
+    if(typeof supplier_id !== 'undefined' && supplier_id !== null){
+      const sup = await client.query('SELECT id FROM suppliers WHERE id = $1', [supplier_id]);
+      if(sup.rowCount === 0) throw new Error('Invalid supplier_id');
+      finalSupplierId = supplier_id;
+    }
+
     //1. cập nhật product
     const productRes = await client.query(
       `UPDATE products
-      SET name = $1, description = $2, price = $3, updated_at = NOW()
-      WHERE id = $4
+      SET name = $1, description = $2, price = $3, category_id = $4, supplier_id = $5, updated_at = NOW()
+      WHERE id = $6
       RETURNING *`,
-      [name, description, price, productId]
+      [name, description, price, finalCategoryId, finalSupplierId, productId]
     );
     if (productRes.rowCount === 0) throw new Error ('Product not found');
 
