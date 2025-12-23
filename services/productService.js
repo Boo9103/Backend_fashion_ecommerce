@@ -19,7 +19,8 @@ exports.getProducts = async function ({
     is_flash_sale,
     status,
     page,
-    sort_by = 'sequence' // 'sequence' (default) or 'price'
+    sort_by = 'sequence', // 'sequence' (default) or 'price'
+    only_available = false // nếu true chỉ lấy sp còn hàng (ít nhất 1 variant có stock_qty > 0)
 } = {}) {
     if (limit < 1 || limit > 100) throw new Error('Invalid limit (1-100)');
     if (!['asc', 'desc'].includes(order)) throw new Error('Invalid order (asc/desc)');
@@ -105,6 +106,10 @@ exports.getProducts = async function ({
         if (typeof is_flash_sale !== 'undefined') {
             where.push(`p.is_flash_sale = $${idx++}`);
             params.push(!!is_flash_sale);
+        }
+
+        if(only_available){
+            where.push(`EXISTS (SELECT 1 FROM product_variants pv WHERE pv.product_id = p.id AND pv.stock_qty > 0)`);
         }
 
         let sql = '';
