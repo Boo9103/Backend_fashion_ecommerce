@@ -3286,9 +3286,9 @@ function inferAccessorySlugsFromMessage(message = '') {
 
   // TÚI XÁCH NỮ
   if (/\b(tui|túi|xach|xách|bag|handbag|tote|shoulder|clutch)\b/.test(m)) {
-    slugs.add('tui-xach-nu/tui-xach');
+    slugs.add('tui-xach/tui-xach-nu');
     if (/\b(đeo cheo|crossbody|deo cheo)\b/.test(m)) {
-      slugs.add('tui-xach-nu/tui-deo-cheo');
+      slugs.add('tui-xach/tui-deo-cheo');
     }
   }
 
@@ -3713,76 +3713,49 @@ exports.searchProducts = async (userId, message, opts = {}) => {
   //Mapping từ khóa user nói -> slug category
   const typeMap = [
     // ÁO
-    {
-      slug: 'ao-thun',  // ao/ao-thun
-      kws: ['áo thun', 'ao thun', 't-shirt', 'tshirt', 'tee', 'thun']
-    },
-    {
-      slug: 'ao-so-mi',  // ao/ao-so-mi
-      kws: ['sơ mi', 'so mi', 'áo sơ mi', 'ao so mi', 'shirt', 'blouse']
-    },
-    {
-      slug: 'ao-hoodie-sweater',  // ao/ao-hoodie-sweater
-      kws: ['hoodie', 'áo hoodie', 'ao hoodie', 'sweater', 'áo sweater', 'áo len', 'ao len']
-    },
-    {
-      slug: 'ao-varsity-bomber',  // ao/ao-varsity-bomber
-      kws: ['áo khoác', 'ao khoac', 'áo bomber', 'bomber', 'varsity', 'jacket', 'áo jacket', 'coat', 'blazer']
-    },
+    { slug: 'ao-thun', kws: ['áo thun', 'ao thun', 't-shirt', 'tshirt', 'tee', 'thun'] },
+    { slug: 'ao-so-mi', kws: ['sơ mi', 'so mi', 'áo sơ mi', 'ao so mi', 'shirt', 'blouse'] },
+    { slug: 'ao-hoodie-sweater', kws: ['hoodie', 'áo hoodie', 'ao hoodie', 'sweater', 'áo sweater', 'áo len', 'ao len'] },
+    { slug: 'ao-varsity-bomber', kws: ['áo khoác', 'ao khoac', 'áo bomber', 'bomber', 'varsity', 'jacket', 'áo jacket', 'coat', 'blazer'] },
 
     // QUẦN
-    {
-      slug: 'quan-jean',  // quan/quan-jean
-      kws: ['quần jean', 'quan jean', 'jean', 'jeans', 'denim']
-    },
-    {
-      slug: 'quan-short',  // quan/quan-short
-      kws: ['quần short', 'quan short', 'short', 'quần đùi', 'quan dui']
-    },
-    {
-      slug: 'quan-ong-rong',  // quan/quan-ong-rong
-      kws: ['quần ống rộng', 'quan ong rong', 'quần ống suông', 'quan ong suong']
-    },
-    {
-      slug: 'quan-au-ong-suong',  // quan/quan-au-ong-suong
-      kws: ['quần âu', 'quan au', 'quần tây', 'quan tay', 'trousers', 'chino', 'kaki']
-    },
+    { slug: 'quan-jean', kws: ['quần jean', 'quan jean', 'jean', 'jeans', 'denim'] },
+    { slug: 'quan-short', kws: ['quần short', 'quan short', 'short', 'quần đùi', 'quan dui'] },
+    { slug: 'quan-ni', kws: ['quần nỉ', 'quan ni', 'nỉ'] },
+    { slug: 'quan-kaki', kws: ['quần kaki', 'quan kaki', 'kaki', 'chino'] },
+    { slug: 'quan-au', kws: ['quần âu', 'quan au', 'quần tây', 'quan tay'] },
 
     // TÚI XÁCH NỮ (không nằm dưới phu-kien)
-    {
-      slug: 'tui-xach',  // tui-xach-nu/tui-xach
-      kws: ['túi xách', 'tui xach', 'túi cầm tay', 'bag', 'handbag']
-    },
-    {
-      slug: 'tui-deo-cheo',  // tui-xach-nu/tui-deo-cheo
-      kws: ['túi đeo chéo', 'tui deo cheo', 'túi đeo vai', 'crossbody', 'shoulder bag']
-    },
-    {
-      slug: 'set-qua-tang',  // tui-xach-nu/set-qua-tang
-      kws: ['set quà tặng', 'set qua tang', 'bộ quà tặng']
-    },
+    // {
+    //   slug: 'tui-xach-nu',  // tui-xach/tui-xach-nu
+    //   kws: ['túi xách nữ', 'tui xach nu', 'túi cầm tay', 'bag', 'handbag', 'túi đeo chéo', 'clutch']
+    // },
+    // {
+    //   slug: 'tui-xach-nam',  // tui-xach/tui-xach-nam
+    //   kws: ['túi xách nam', 'tui xach nam', 'túi cầm tay', 'bag', 'handbag', 'túi đeo chéo', 'clutch']
+    // },
+    // {
+    //   slug: 'set-qua-tang',  // tui-xach-nu/set-qua-tang
+    //   kws: ['set quà tặng', 'set qua tang', 'bộ quà tặng']
+    // },
 
     // PHỤ KIỆN
-    {
-      slug: 'vi-nam',  // phu-kien/vi-nam
-      kws: ['ví nam', 'vi nam', 'wallet nam', 'bóp nam']
-    },
-    {
-      slug: 'vi-nu',  // phu-kien/vi-nu
-      kws: ['ví nữ', 'vi nu', 'wallet nữ', 'bóp nữ']
-    },
-    {
-      slug: 'kinh-mat',  // phu-kien/kinh-mat
-      kws: ['kính mát', 'kinh mat', 'kính râm', 'sunglasses', 'kính nắng']
-    },
-    {
-      slug: 'gong-kinh',  // phu-kien/gong-kinh
-      kws: ['gọng kính', 'gong kinh', 'khung kính']
-    },
-    {
-      slug: 'kinh-bao-ho',  // phu-kien/kinh-bao-ho
-      kws: ['kính bảo hộ', 'kinh bao ho', 'kính an toàn']
-    }
+    // {
+    //   slug: 'vi-nam',  // phu-kien/vi-nam
+    //   kws: ['ví nam', 'vi nam', 'wallet nam', 'bóp nam']
+    // },
+    // {
+    //   slug: 'vi-nu',  // phu-kien/vi-nu
+    //   kws: ['ví nữ', 'vi nu', 'wallet nữ', 'bóp nữ']
+    // },
+    // {
+    //   slug: 'kinh-mat',  // phu-kien/kinh-mat
+    //   kws: ['kính mát', 'kinh mat', 'kính râm', 'sunglasses', 'kính nắng']
+    // },
+    // {
+    //   slug: 'gong-kinh',  // phu-kien/gong-kinh
+    //   kws: ['gọng kính', 'gong kinh', 'khung kính']
+    // }
   ];
 
   //tìm các category phù hợp với từ khóa

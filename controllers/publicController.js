@@ -181,7 +181,7 @@ exports.getNewList = async (req, res, next) => {
     const transformed = items.map(it => {
       const cb = it.content_blocks || [];
       const firstText = cb.find(b => b.type === 'text')?.text || null;
-      const firstImage = (cb.find(b => b.type === 'image' && Array.isArray(b.urls))?.urls?.[0]?.url) || it.image || null;
+      const firstImage = it.image || (cb.find(b => b.type === 'image' && Array.isArray(b.urls))?.urls?.[0]?.url) || null;
       return {
         id: it.id,
         title: it.title,
