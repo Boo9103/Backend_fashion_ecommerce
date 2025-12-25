@@ -130,6 +130,8 @@ exports.getProducts = async function ({
             params.push(limitPlus);
             params.push(offset);
         } else {
+          //kiểm tra xem trạng thái sản phẩm có active ko, nếu k có active thì không trả về sp
+            //where.push(`p.status = 'active'`);
             sql = `SELECT * FROM v_product_full p WHERE ${where.join(' AND ')} ORDER BY ${orderBy} LIMIT $${idx++}`;
             params.push(limitPlus);
         }
@@ -654,20 +656,29 @@ exports.deleteProduct = async (productId) => {
     }
 
     // xóa ảnh variants trước
-    await client.query(
-      `DELETE FROM product_images
-       WHERE variant_id IN (SELECT id FROM product_variants WHERE product_id = $1)`,
+    // await client.query(
+    //   `DELETE FROM product_images
+    //    WHERE variant_id IN (SELECT id FROM product_variants WHERE product_id = $1)`,
+    //   [productId]
+    // );
+
+    // // xóa variants
+    // await client.query('DELETE FROM product_variants WHERE product_id = $1', [productId]);
+
+    // // xóa ảnh product (không có variant_id)
+    // await client.query('DELETE FROM product_images WHERE product_id = $1 AND variant_id IS NULL', [productId]);
+
+    // // xóa product
+    // const del = await client.query('DELETE FROM products WHERE id = $1 RETURNING id', [productId]);
+
+    //set status sp về inactive thay vì xóa hẳn
+    const del = await client.query(
+      `UPDATE products 
+       SET status = 'inactive', updated_at = NOW()
+       WHERE id = $1
+       RETURNING id`,
       [productId]
     );
-
-    // xóa variants
-    await client.query('DELETE FROM product_variants WHERE product_id = $1', [productId]);
-
-    // xóa ảnh product (không có variant_id)
-    await client.query('DELETE FROM product_images WHERE product_id = $1 AND variant_id IS NULL', [productId]);
-
-    // xóa product
-    const del = await client.query('DELETE FROM products WHERE id = $1 RETURNING id', [productId]);
     await client.query('COMMIT');
 
     return del.rows[0] || null;
