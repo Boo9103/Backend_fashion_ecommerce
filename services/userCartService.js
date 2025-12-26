@@ -354,3 +354,93 @@ exports.checkStockQuantity = async (variantIds) => {
         client.release();
     }
 };
+
+exports.removeInvalidItems = async (userId, variantIds) => {
+    if(!userId){
+        const e = new Error('Unauthorized');
+        e.status = 401;
+        throw e;
+    }
+
+    if(!Array.isArray(variantIds) || variantIds.length === 0){
+        const e = new Error('variantIds must be a non-empty array');
+        e.status = 400;
+        throw e;
+    }
+
+    const client = await pool.connect();
+    try{
+        await client.query('BEGIN');
+
+        //1. lấy user's cart
+        const cartRes = await client.query(
+            `SELECT id FROM carts WHERE user_id = $1 LIMIT 1`, [userId]
+        );
+
+        if(cartRes.rowCount === 0){
+            const err = new Error('Cart not found for user');
+            err.status = 404;
+            throw err;
+        }
+
+        const cartId = cartRes.rows[0].id;
+
+        //2. Tìm các cart items matching với variantIds
+        const findRes = await client.query(
+            `SELECT id, variant_id FROM cart_items 
+            WHERE cart_id = $1 AND variant_id = ANY($2::uuid[])`, 
+            [cartId, variantIds]
+        );
+
+        if(findRes.rowCount === 0){
+            console.warn('[removeInvalidItems] no matching items found to remove', {
+                cartId,
+                requestedVariantCount: variantIds.length
+            });
+            //không có item nào để xóa
+            await client.query('COMMIT');
+            return { removedCount: 0 };
+        }
+
+        const itemIdsToRemove = findRes.rows.map(r => r.id);
+        const removedVariantIds = findRes.rows.map(r => r.variant_id);
+
+        console.debug('[removeInvalidItems] found items to remove', {
+            cartId,
+            removedCount: itemIdsToRemove.length,
+            removedVariantIds
+        });
+
+        //3. Xóa các cart items tìm được
+        const deleteRes = await client.query(
+            `DELETE FROM cart_items
+            WHERE cart_id = $1 AND id = ANY($2::uuid[])
+            RETURNING id, varinant_id`,
+            [cartId, itemIdsToRemove]
+        );
+
+        //4. update cart's updated_at
+        await client.query(
+            `UPDATE carts SET updated_at = NOW() WHERE id = $1`,
+            [cartId]
+        );
+        await client.query('COMMIT');
+
+        //5. return result
+        const updatedCart = await exports.getCart(userId);
+
+        return {
+            success: true,
+            removed: {
+                count: deleteRes.rowCount,
+                variantIds: removedVariantIds
+            },
+            cart: updatedCart
+        };
+    }catch(err){
+        await client.query('ROLLBACK');
+        throw err;
+    } finally {
+        client.release();
+    }
+};

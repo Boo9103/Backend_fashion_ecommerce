@@ -95,3 +95,28 @@ exports.checkStock = async (req, res, next) => {
         next(error);
     }
 };
+
+exports.removeInvalidItems = async (req, res, next) => {
+    try {
+        const userId = req.user?.id;
+        if(!userId) {
+            return res.status(401).json({ 
+                success: false,
+                message: 'Unauthorized' });
+        }
+
+        const { variantIds } = req.body || {};
+        if(!variantIds || !Array.isArray(variantIds) || variantIds.length === 0) {
+            return res.status(400).json({ 
+                success: false,
+                message: 'variantIds must be a non-empty array' });
+        }
+
+        const result = await cartService.removeInvalidItems(userId, variantIds);
+        return res.status(200).json({
+            success: true,
+            data: result });
+    } catch (error) {
+        next(error);
+    }
+};

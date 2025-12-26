@@ -51,7 +51,8 @@ router.patch('/cart/items/:id', requireUser, cartController.updateItem);
 router.delete('/cart/items/:id', requireUser, cartController.removeItem);
 router.delete('/cart/clear', requireUser, cartController.clearCart);
 // /api/cart/stock/check?variant_ids=id1,id2,id3 -> Check stock availability for one or more variants
-router.get('/cart/stock/check', cartController.checkStock);
+router.get('/cart/stock/check', requireUser, cartController.checkStock);
+router.delete('/cart/remove-invalid', requireUser, cartController.removeInvalidItems);
 
 //chi tiết product từ variant trong giỏ hàng
 router.get('/products/detail/:variantId', cartController.getProductFromVariant);
