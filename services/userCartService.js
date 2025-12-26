@@ -225,7 +225,7 @@ exports.updateItem = async (userId, itemId, qty) => {
         await client.query('BEGIN');
         //đảm bảo giỏ hàng tồn tại
         const q = `
-            SELECT ci.id, ci.cart_id
+            SELECT ci.id, ci.cart_id, ci.variant_id
             FROM cart_items ci
             JOIN carts c ON ci.cart_id = c.id
             WHERE ci.id = $1 AND c.user_id = $2 LIMIT 1
@@ -233,31 +233,45 @@ exports.updateItem = async (userId, itemId, qty) => {
         const r = await client.query(q, [itemId, userId]);
         if(r.rows.length == 0) throw Object.assign(new Error('Cart item not found'), { status: 404 });
 
+        const cartId = r.rows[0].cart_id;
+        const variantId = r.rows[0].variant_id;
+
         //lấy thông tin stock_qty item hiện tại
-        const currentItemRes = await client.query(
-            `SELECT pv.stock_qty AS qty
+        const stockRes = await client.query(
+            `SELECT pv.stock_qty
             FROM product_variants pv
-            JOIN cart_items ci ON ci.variant_id = pv.id
-            WHERE ci.id = $1 LIMIT 1`,
-            [itemId]
+            WHERE pv.id = $1 LIMIT 1`,
+            [variantId]
         );
-        if(currentItemRes.rows.length === 0){
+        if(stockRes.rows.length === 0){
             throw Object.assign(new Error('Cart item not found'), { status: 404 });
         }
-        const currentQty = Number(currentItemRes.rows[0].qty);
 
+        const stockQty = Number(stockRes.rows[0].stock_qty);
+
+        let finalQty;
         if(qty === 0 ){
             await client.query(`DELETE FROM cart_items WHERE id = $1`, [itemId]);
+            finalQty = 0;
         }//nếu như số lượng mới nhập vào lớn hơn số lượng trong kho thì chỉ cập nhật bằng số lượng trong kho
-        else if (qty > currentQty){
+        else if (qty > stockQty){
+            finalQty = stockQty;
+
+            console.debug('[updateItem] qty capped to stock', {
+                itemId,
+                requestedQty: qty,
+                stockQty,
+                cappedQty: finalQty
+            });
             await client.query(
                 `UPDATE cart_items
                 SET qty = $1, updated_at = NOW()
                 WHERE id = $2`,
-                [currentQty, itemId]
+                [stockQty, itemId]
             );
         }
         else{
+            finalQty = qty;
             await client.query(
                 `UPDATE cart_items
                 SET qty = $1, updated_at = NOW()
@@ -267,7 +281,7 @@ exports.updateItem = async (userId, itemId, qty) => {
         }
         await client.query(
             `UPDATE carts SET updated_at = NOW() WHERE id = $1`,
-            [r.rows[0].cart_id]
+            [cartId]
         );
         await client.query('COMMIT');
 
