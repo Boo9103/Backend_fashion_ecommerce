@@ -700,6 +700,7 @@ exports.getProductById = async (productId) => {
       p.price,
       p.sale_percent,
       p.is_flash_sale,
+      p.status,
       c.name AS category_name,
       s.name AS supplier_name,
       COALESCE(

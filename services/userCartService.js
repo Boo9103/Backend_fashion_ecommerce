@@ -454,7 +454,7 @@ exports.removeInvalidItems = async (userId, variantIds) => {
         const deleteRes = await client.query(
             `DELETE FROM cart_items
             WHERE cart_id = $1 AND id = ANY($2::uuid[])
-            RETURNING id, varinant_id`,
+            RETURNING id, variant_id`,
             [cartId, itemIdsToRemove]
         );
 
