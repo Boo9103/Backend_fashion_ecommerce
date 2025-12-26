@@ -814,7 +814,7 @@ exports.updateProductStatus = async (productId, status) => {
     //update trạng thái inactive -> active hoặc ngược lại
     const updateRes = await client.query(
       `UPDATE products 
-      SET satus = $1, updated_at = NOW()
+      SET status = $1, updated_at = NOW()
       WHERE id = $2
       RETURNING *`,
       [normalizedStatus, productId]

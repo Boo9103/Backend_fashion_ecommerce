@@ -67,12 +67,14 @@ exports.getCart = async (userId) => {
                 pv.sku,
                 pv.color_name,
                 pv.sizes,
+                pv.stock_qty,
                 p.id AS product_id,
                 p.name AS product_name,
                 p.price AS product_price,
                 p.sale_percent,
                 p.is_flash_sale,
                 p.final_price,
+                p.status,
                 s.name AS supplier_name,
                 (SELECT pi.url FROM product_images pi WHERE pi.variant_id = pv.id LIMIT 1) AS image_url
             FROM cart_items ci
@@ -109,9 +111,11 @@ exports.getCart = async (userId) => {
                 product_name: r.product_name,
                 supplier_name: (r.supplier_name && r.supplier_name.trim()) ? r.supplier_name.trim() : null,
                 qty: qty,
+                stock_qty: r.stock_qty,
                 unit_price: unitPriceSnapshot,
                 line_total: lineTotal,
                 image_url: r.image_url,
+                status: r.status,
 
                 //flash sale / sale info
                 is_flash_sale: isFlash,
@@ -352,7 +356,6 @@ exports.checkStockQuantity = async (variantIds) => {
             const notFound = variantIds.filter(id => !foundIds.includes(id));
             console.warn('[checkStockQuantity] some variants not found', { notFound });
         }
-
         // Tạo một bản đồ từ variantId đến thông tin tồn kho
         const stockData = rows.map(row => ({
             variantId: row.variant_id,
