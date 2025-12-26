@@ -779,3 +779,69 @@ exports.getAvailableProducts = async () => {
 
   return result.rows;
 };
+
+//hàm update trạng thái product
+exports.updateProductStatus = async (productId, status) => {
+  const validStatuses = ['active', 'inactive'];
+  if(!status || !validStatuses.includes(status.toLowerCase())){
+    const err = new Error(`Invalid status. Must be one of: ${validStatuses.join(', ')}`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const normalizedStatus = status.toLowerCase();
+  const client = await pool.connect();
+
+  try{
+    await client.query('BEGIN');
+
+    //check sp tồn tại
+    const check = await client.query('SELECT id, status, name FROM products WHERE id =$1', [productId]);
+    if(check.rowCount === 0){
+      const err = new Error('Product not found');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const currentProduct = check.rows[0];
+    console.debug('[updateProductStatus] updating product', {
+      productId,
+      currentStatus: currentProduct.status,
+      newStatus: normalizedStatus,
+      productName: currentProduct.name
+    });
+
+    //update trạng thái inactive -> active hoặc ngược lại
+    const updateRes = await client.query(
+      `UPDATE products 
+      SET satus = $1, updated_at = NOW()
+      WHERE id = $2
+      RETURNING *`,
+      [normalizedStatus, productId]
+    );
+
+    if(updateRes.rowCount === 0){
+      throw new Error('Failed to update product status');
+    }
+
+    //lấy lại dữ liệu đầy đủ
+    const fullRes = await client.query(
+      `SELECT * FROM v_product_full WHERE id = $1`,
+      [productId]
+    );
+
+    await client.query('COMMIT');
+
+    console.debug('[updateProductStatus] product status updated successfully', {
+      productId,
+      newStatus: normalizedStatus
+    });
+
+    return fullRes.rows[0] || updateRes.rows[0];
+  }catch(error){
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};

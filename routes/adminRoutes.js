@@ -48,7 +48,7 @@ router.patch('/products/:id', requireAdmin, adminProductController.updateFlashSa
 router.put('/products/:id', requireAdmin, adminProductController.updateProduct);
 router.delete('/products/:id', requireAdmin, adminProductController.deleteProduct);
 //vd lọc theo giá:http://localhost:3000/admin/products?flash_sale=true&min_price=200000&max_price=500000
-
+router.patch('/products/:id/status', requireAdmin, adminProductController.updateProductStatus);
 
 //Promotion management
 router.post('/promotions', requireAdmin, promotionController.createPromotion);

@@ -78,3 +78,20 @@ exports.getProductFromVariant = async (req, res, next) => {
         next(error);
     }
 };
+
+
+exports.checkStock = async (req, res, next) => {
+    try {
+        const {variantIds} = req.body || {};
+        if(!variantIds || !Array.isArray(variantIds) || variantIds.length === 0) {
+            return res.status(400).json({ message: 'variantIds must be a non-empty array' });
+        }
+
+        const stockStatuses = await cartService.checkStockQuantity(variantIds);
+        return res.status(200).json({
+            sucess: true,
+            data: stockStatuses});
+    } catch (error) {
+        next(error);
+    }
+};

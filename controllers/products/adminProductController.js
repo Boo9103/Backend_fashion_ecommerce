@@ -181,4 +181,32 @@ exports.getProductsForPromotion = async (req, res) => {
     }catch(error){
         return res.status(500).json({ message: 'Server error' });
     }
-}
+};
+
+exports.updateProductStatus = async (req, res, next) => {
+    try{
+        const { id } = req.params;
+        const { status } = req.body;
+
+        //kiểm tra input
+        if(!id || !status){
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required fields: id, status'
+            });
+        }
+
+        const updatedProduct = await productService.updateProductStatus(id, status);
+
+        return res.status(200).json({
+            success: true,
+            message: `Product status updated to "${status}" successfully`,
+            data: updatedProduct
+        });
+    }catch(error){
+        return res.status(500).json({
+            success: false,
+            message: error.message || 'Server error'
+        });
+    }
+};

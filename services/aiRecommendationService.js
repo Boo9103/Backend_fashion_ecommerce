@@ -1491,1752 +1491,1969 @@ exports.handleOutfitSelection = async (userId, sessionId, index) => {
 };
 
 // Robust handleGeneralMessage: always returns an object and logs helpful info
-// exports.handleGeneralMessage = async (userId, opts = {}) => {
-//   const client = await pool.connect();
-  
-//   try {
-//     const { message = '', sessionId = null, lastRecommendationAllowed = true } = opts || {};
-//     console.log('[aiService.handleGeneralMessage] start (no early persist)', { userId, sessionId, message: String(message).slice(0,120) });
-
-//     // persist user message only if valid
-//     let _userMessagePersisted = false;
-//     if (sessionId && message && String(message).trim().length) {
-//       try {
-//         await client.query(
-//           `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
-//           [sessionId, String(message).trim()]
-//         );
-//         await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//         _userMessagePersisted = true;
-//       } catch (e) {
-//         console.error('[aiService.handleGeneralMessage] persist user message failed', e && e.stack ? e.stack : e);
-//       }
-//     }
-
-//     // load last recommendation for contextual resolution (if any)
-//     let lastRec = null;
-//     if (lastRecommendationAllowed) {
-//       try {
-//         // include context so downstream "show more" can reuse occasion/weather without extra queries
-//         const recQ = await client.query(
-//           `SELECT id, items, context, created_at FROM ai_recommendations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
-//           [userId]
-//         );
-//         if (recQ.rowCount > 0) lastRec = recQ.rows[0];
-//       } catch (e) {
-//         console.error('[aiService.handleGeneralMessage] load last recommendation failed', e && e.stack ? e.stack : e);
-//       }
-//     }
-
-//     // Debug: surface lastRec content so we can see if context exists / is parseable
-//     try {
-//       if (lastRec) {
-//         const itemsPreview = typeof lastRec.items === 'string' ? (lastRec.items || '').slice(0,200) : JSON.stringify(lastRec.items || {}).slice(0,200);
-//         console.debug('[aiService.handleGeneralMessage] lastRec loaded', { id: lastRec.id, contextRaw: lastRec.context, itemsPreview });
-//         let ctx = null;
-//         try { ctx = (typeof lastRec.context === 'string') ? JSON.parse(lastRec.context) : lastRec.context; } catch(e){ ctx = lastRec.context; }
-//         console.debug('[aiService.handleGeneralMessage] lastRec parsed context', ctx);
-//       } else {
-//         console.debug('[aiService.handleGeneralMessage] no lastRec found for user', { userId });
-//       }
-//     } catch (logErr) { /* ignore logging errors */ }
-    
-//     let lastAccessoryRec = null;
-//     try {
-//       lastAccessoryRec = await exports.getLastRecommendationForUser(userId, 'accessories');
-//     } catch (e) { lastAccessoryRec = null; }
-
-//     const lowerMsg = String(message || '').toLowerCase();
-//     const slotHints = (typeof extractSlotsFromMessage === 'function') ? extractSlotsFromMessage(message || '') : {};
-
-//     if (process.env.DEBUG_AI_SERVICE) {
-//       try {
-//         console.debug('[aiService.handleGeneralMessage.DEBUG] incoming message (raw):', String(message).slice(0,1000));
-//         console.debug('[aiService.handleGeneralMessage.DEBUG] lowerMsg:', lowerMsg);
-//         console.debug('[aiService.handleGeneralMessage.DEBUG] slotHints:', slotHints);
-//         console.debug('[aiService.handleGeneralMessage.DEBUG] lastRec (preview):', lastRec ? { id: lastRec.id, context: lastRec.context } : null);
-//         console.debug('[aiService.handleGeneralMessage.DEBUG] lastAccessoryRec (preview):', lastAccessoryRec ? { id: lastAccessoryRec.id, itemsPreview: (typeof lastAccessoryRec.items === "string" ? lastAccessoryRec.items.slice(0,200) : JSON.stringify(lastAccessoryRec.items || {}).slice(0,200)) } : null);
-//       } catch (e) { console.error('[aiService.DEBUG] safe debug log failed', e && e.stack ? e.stack : e); }
-//     }
-//     let sessionHistory = [];
-//     try {
-//       sessionHistory = await loadSessionHistory(client, sessionId, 60) || [];
-//       sessionHistory = Object.freeze(sessionHistory);
-//     } catch (e) {
-//       console.error('[aiService.handleGeneralMessage] load session history failed', e && e.stack ? e.stack : e);
-//       sessionHistory = Object.freeze([]);
-//     }
-//     // Nhận số đo người dùng và hai hành động khả dụng:
-//     // - opts.silentSave = true: lưu nhưng KHÔNG trả về ack (tiếp tục luồng)
-//     // - opts.suggestSizeImmediately = true: lưu rồi gọi luồng tư vấn size ngay, trả về kết quả
-//     try {
-//       const m = String(message || '');
-//       // "170cm 64kg", "170 64", "1m7 và 64kg", "1m70", "1.7m 64", "mình cao 1m7 và nặng 64kg"
-//       const parseMeasurementsFromText = (text = '') => {
-//         const s = String(text || '').toLowerCase();
-//         let height = null;
-//         let weight = null;
-
-//         // 1) Compact meter forms: "1m7", "1m70", "1.70m", "1,7m"
-//         const compactM = s.match(/(\d{1,3})m(\d{1,2})\b/);
-//         if (compactM) {
-//           const a = Number(compactM[1]);
-//           const b = Number(compactM[2]);
-//           if (!Number.isNaN(a) && !Number.isNaN(b)) {
-//             height = a * 100 + (b < 10 ? b * 10 : b); // "1m7" -> 170
-//           }
-//         }
-
-//         // 2) Decimal meter forms: "1.7m" or "1,7m"
-//         if (!height) {
-//           const decM = s.match(/(\d+(?:[.,]\d{1,2}))\s?m\b/);
-//           if (decM) {
-//             const n = Number(decM[1].replace(',', '.'));
-//             if (!Number.isNaN(n)) height = Math.round(n * 100);
-//           }
-//         }
-
-//         // 3) cm explicit: "170cm"
-//         if (!height) {
-//           const cm = s.match(/(\d{2,3})\s?cm\b/);
-//           if (cm) height = Number(cm[1]);
-//         }
-
-//         // 4) weight explicit: "64kg"
-//         const kg = s.match(/(\d{2,3})\s?kg\b/);
-//         if (kg) weight = Number(kg[1]);
-
-//         // 5) "nặng 64" or "nặng 64kg"
-//         if (!weight) {
-//           const nang = s.match(/nặng\s*(\d{2,3})(?:\s?kg)?\b/);
-//           if (nang) weight = Number(nang[1]);
-//         }
-
-//         // 6) fallback: find numeric tokens and infer by plausible ranges
-//         if ((!height || !weight)) {
-//           const numPattern = /(\d{1,3}(?:[.,]\d{1,2})?)(?:\s?(cm|kg|m))?/g;
-//           const found = [];
-//           let mTok;
-//           while ((mTok = numPattern.exec(s)) !== null) {
-//             found.push({ val: mTok[1].replace(',', '.'), unit: mTok[2] || null });
-//           }
-
-//           for (const f of found) {
-//             const n = Number(f.val);
-//             if (f.unit === 'cm' && !height) height = Math.round(n);
-//             else if (f.unit === 'kg' && !weight) weight = Math.round(n);
-//             else if (f.unit === 'm' && !height) height = Math.round(n * 100);
-//           }
-
-//           // if still missing, use heuristics: centimeter-range for height, kg-range for weight
-//           const nums = found.map(f => Number(f.val)).filter(x => !Number.isNaN(x));
-//           if (!height && nums.length) {
-//             const hCand = nums.find(x => x >= 100 && x <= 230);
-//             if (hCand) height = Math.round(hCand);
-//             else {
-//               const mCand = nums.find(x => x > 1 && x < 3); // likely in meters like 1.7
-//               if (mCand) height = Math.round(mCand * 100);
-//             }
-//           }
-//           if (!weight && nums.length) {
-//             const wCand = nums.find(x => x >= 30 && x <= 250 && x !== height);
-//             if (wCand) weight = Math.round(wCand);
-//           }
-//         }
-
-//         // simple sanity check
-//         if (height && (height < 50 || height > 300)) height = null;
-//         if (weight && (weight < 20 || weight > 500)) weight = null;
-
-//         if (height || weight) return { height, weight };
-//         return null;
-//       };
-
-//       const mm = parseMeasurementsFromText(m);
-//       if (mm) {
-//         const height = mm.height;
-//         const weight = mm.weight;
-//         if (!Number.isNaN(height) && !Number.isNaN(weight)) {
-//           try {
-//             // lưu trực tiếp vào users
-//             await client.query(`UPDATE users SET height = $1, weight = $2 WHERE id = $3`, [height, weight, userId]);
-//             // Reuse sessionHistory loaded earlier (top of handler). Also fetch recent assistant messages
-//             // including metadata because follow-up question may be stored in metadata.followUp.question.
-//             const measurementRegex = /\b(chiều cao|cân nặng|cm\/kg|cho mình biết chiều cao|cho mình biết chiều cao và cân nặng|tư vấn size|để mình tư vấn size|chọn\s*size|chọn\s*size\s*giúp|bạn.*chọn\s*size|muốn\s*mình\s*chọn\s*size)\b/i;
-
-//             // sessionHistory (chronological) was loaded near the top of the function into `sessionHistory`.
-//             const recentFromHistory = Array.isArray(sessionHistory) && sessionHistory.length > 0
-//               ? sessionHistory.slice(-6).reverse() // examine last few messages (most recent last)
-//               : [];
-
-//             // also pull last assistant rows including metadata (defensive)
-//             let recentAssistantRows = [];
-//             try {
-//               if (sessionId) {
-//                 const aQ = await client.query(
-//                   `SELECT content, metadata FROM ai_chat_messages WHERE session_id = $1 AND role = 'assistant' ORDER BY created_at DESC LIMIT 6`,
-//                   [sessionId]
-//                 );
-//                 recentAssistantRows = aQ.rows || [];
-//               }
-//             } catch (e) {
-//               console.error('[aiService.handleGeneralMessage] fetch recent assistant rows failed', e && e.stack ? e.stack : e);
-//               recentAssistantRows = [];
-//             }
-
-//             const assistantAskedForMeasurements = (
-//               // check textual assistant messages in sessionHistory
-//               recentFromHistory.some(m => m.role === 'assistant' && measurementRegex.test(String(m.content || '')))
-//               ||
-//               // check DB assistant rows content + metadata JSON (followUp.question, metadata.followUp, metadata)
-//               recentAssistantRows.some(r => {
-//                 try {
-//                   const txt = String(r.content || '');
-//                   if (measurementRegex.test(txt)) return true;
-//                   const meta = r.metadata;
-//                   if (!meta) return false;
-//                   const j = (typeof meta === 'string') ? JSON.parse(meta) : meta;
-//                   // check common metadata locations
-//                   const candidates = [];
-//                   if (j && typeof j === 'object') {
-//                     if (j.followUp && typeof j.followUp === 'object' && j.followUp.question) candidates.push(String(j.followUp.question));
-//                     if (j.question) candidates.push(String(j.question));
-//                     if (j.size_prompt) candidates.push(String(j.size_prompt));
-//                     // fallback: stringify metadata
-//                     candidates.push(JSON.stringify(j));
-//                   }
-//                   return candidates.some(c => measurementRegex.test(String(c || '')));
-//                 } catch (ex) {
-//                   return false;
-//                 }
-//               })
-//             );
-
-//             const triggerSizeFlow = (opts && opts.silentSave) || (lastRec && assistantAskedForMeasurements);
-
-//             if (triggerSizeFlow){
-//               // Nếu silentSave: sau khi lưu, tiếp tục và chạy luồng "Chọn size giúp mình"
-//               try {
-//                 let last = lastRec;
-//                 if (!last) last = await exports.getLastRecommendationForUser(userId);
-//                 if (!last) {
-//                   // không có recommendation trước đó -> tiếp tục xử lý bình thường (no ACK)
-//                 } else {
-//                   let recJson = last.items;
-//                   if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch(e) { recJson = null; } }
-//                   const outfits = recJson && recJson.outfits ? recJson.outfits : [];
-//                   if (outfits.length === 0) {
-//                     // không có outfit -> tiếp tục bình thường
-//                   } else {
-//                     const selected = outfits[0];
-//                     const variantIds = Array.isArray(selected.items) ? selected.items : [];
-//                     if (variantIds.length === 0) {
-//                       // không có variant rõ ràng -> tiếp tục bình thường
-//                     } else {
-//                       // Lấy measurements (vừa update ở trên nên có)
-//                       const uQ = await client.query(`SELECT height, weight, bust, waist, hip FROM users WHERE id = $1 LIMIT 1`, [userId]);
-//                       const u = uQ.rows[0];
-//                       if (!u || (!u.height && !u.weight && !u.bust && !u.waist && !u.hip)) {
-//                         const ask = 'Bạn cho mình biết chiều cao và cân nặng (cm/kg) để mình tư vấn size chính xác nhé?';
-//                         if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, ask]);
-//                         return { ask, sessionId };
-//                       }
-
-//                       // load categories for variants and size guides
-//                       const pvQ = await client.query(
-//                         `SELECT pv.id AS variant_id, p.category_id
-//                          FROM product_variants pv JOIN products p ON pv.product_id = p.id
-//                          WHERE pv.id = ANY($1::uuid[])`,
-//                         [variantIds]
-//                       );
-//                       const catMap = {};
-//                       pvQ.rows.forEach(r => { catMap[String(r.variant_id)] = r.category_id; });
-//                       const catIds = Array.from(new Set(Object.values(catMap).filter(Boolean)));
-//                       const guidesByCategoryLocal = {};
-//                       if (catIds.length) {
-//                         const sgQ = await client.query(`SELECT category_id, size_label, min_height, max_height, min_weight, max_weight, bust, waist, hip FROM size_guides WHERE category_id = ANY($1::uuid[])`, [catIds]);
-//                         for (const g of sgQ.rows) {
-//                           guidesByCategoryLocal[g.category_id] = guidesByCategoryLocal[g.category_id] || [];
-//                           guidesByCategoryLocal[g.category_id].push(g);
-//                         }
-//                       }
-//                       // compute suggestions
-//                       const suggestions = variantIds.map(vid => {
-//                         const cid = catMap[String(vid)];
-//                         const guides = cid ? (guidesByCategoryLocal[cid] || []) : [];
-//                         const sz = pickSizeFromGuides(guides, u) || null;
-//                         return { variant_id: String(vid), suggested_size: sz };
-//                       });
-
-//                       // Lấy tên + màu cho các variant để hiển thị thân thiện
-//                       const vIds = suggestions.map(s => s.variant_id);
-//                       let namesMap = {};
-//                       try {
-//                         const nQ = await client.query(
-//                           `SELECT pv.id AS variant_id, p.name AS product_name, pv.color_name
-//                            FROM product_variants pv JOIN products p ON pv.product_id = p.id
-//                            WHERE pv.id = ANY($1::uuid[])`,
-//                           [vIds]
-//                         );
-//                         for (const r of (nQ.rows || [])) {
-//                           namesMap[String(r.variant_id)] = { product_name: r.product_name, color: r.color_name };
-//                         }
-//                       } catch (e) { /* ignore */ }
-
-//                       const lines = suggestions.map(s => {
-//                         const info = namesMap[s.variant_id] || {};
-//                         const name = info.product_name || s.variant_id;
-//                         const color = info.color_name ? ` (${info.color_name})` : '';
-//                         return `${name}${color} → ${s.suggested_size || 'Không rõ'}`;
-//                       });
-//                       const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}. Nếu bạn muốn mặc rộng hơn thì tăng 1 size nhé.`;
-//                       if (sessionId) {
-//                         await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`, [sessionId, reply, JSON.stringify({ size_suggestions: suggestions })]);
-//                         await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//                       }
-//                       return {
-//                         type: 'size_suggestions',
-//                         reply,
-//                         sizeSuggestions: suggestions,
-//                         metadata: { size_suggestions: suggestions },
-//                         sessionId
-//                       };
-//                     }
-//                   }
-//                 }
-//               } catch (e) {
-//                 console.error('[aiService.handleGeneralMessage] silentSave -> choose-size flow failed', e && e.stack ? e.stack : e);
-//                 // on error: fall through to normal flow without ACK
-//               }
-//             } else {
-//               // Mặc định: trả về confirmation đơn giản, KHÔNG hỏi follow-up hay gợi ý size
-//               const ack = `Mình đã lưu chiều cao ${height}cm và cân nặng ${weight}kg.`;
-//               if (sessionId) {
-//                 await client.query(
-//                   `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`,
-//                   [sessionId, ack]
-//                 );
-//                 await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//               }
-//               return { reply: ack, sessionId };
-//             }
-//           } catch (e) {
-//             console.error('[aiService.handleGeneralMessage] save measurements failed', e && e.stack ? e.stack : e);
-//             // nếu lưu thất bại thì tiếp tục luồng xử lý (không throw ở đây)
-//           }
-//         }
-//       }
-
-//       const retrieveIntent = /\b(gửi lại thông tin|gửi lại|gửi lại thông tin của|gửi lại thông tin cái|gửi lại thông tin món|gửi lại thông tin mẫu|gửi lại)\b/i;
-//       if (retrieveIntent.test(lowerMsg)) {
-//         try {
-//           // prefer item-level retrieval (cái áo / cái quần / món 1) -> falls back to full outfit
-//           const itemRes = await exports.retrieveLastItemDetails(userId, sessionId, message);
-//           if (itemRes && (itemRes.reply || itemRes.ask)) {
-//             // if function asked for clarification, surface ask
-//             if (itemRes.ask) return { ask: itemRes.ask, sessionId };
-//             return { reply: itemRes.reply, item: itemRes.item, sessionId };
-//           }
-//           // fallback: retrieve whole outfit
-//           const res = await exports.retrieveLastOutfitDetails(userId, sessionId);
-//           if (res.ask) return { ask: res.ask, sessionId };
-//           return { reply: res.reply, outfit: res.outfit, items: res.items, sessionId };
-//         } catch (e) {
-//           console.error('[aiService.handleGeneralMessage] retrieveIntent failed', e && e.stack ? e.stack : e);
-//           return { reply: 'Mình không lấy được thông tin outfit lúc này, thử lại sau nhé!', sessionId };
-//         }
-//       }
-//     } catch (e) { /* ignore parse errors */ }
-    
-
-//   function normalizeForMatching(s = '') {
-//   return String(s || '')
-//     .normalize('NFD')                     // decompose accents
-//     .replace(/[\u0300-\u036f]/g, '')      // remove diacritics
-//     .replace(/[^a-z0-9\s]/gi, ' ')        // strip punctuation
-//     .replace(/\s+/g, ' ')
-//     .trim()
-//     .toLowerCase();
-//   }
-
-//   function isGratitude(text = '') {
-//     const norm = normalizeForMatching(text);
-//     if (!norm) return false;
-//     // common normalized variants (include Vietnamese without diacritics + common english shortcuts)
-//     const variants = [
-//       'cam on','camon','camr on','camonw','cam onw',
-//       'cam on luna','cam on ban','cam on bạn','cam on luna',
-//       'cam onk','cam onk', // tolerate stray chars
-//       'cam on', 'camon', 'cảm ơn' /* defensive */,
-//       'thank you','thanks','ty','tks','tnx'
-//     ];
-//     for (const v of variants) {
-//       if (norm.indexOf(v) !== -1) return true;
-//     }
-//     // fallback: simple heuristics: contains "cam" and "on" close by or contains "camon" or "cam" + "on"
-//     if (/\bcam\w{0,3}\s*on\b/.test(norm) || /\bcamon\w*\b/.test(norm)) return true;
-//     if (/\bthanks?\b/.test(norm) || /\btks\b/.test(norm) || /\btnx\b/.test(norm)) return true;
-//     return false;
-//   }
-
-//     // handle "Chọn size giúp mình", "Xem thêm outfit", "Đủ rồi, cảm ơn Luna!"
-//     try {
-//       // 1) Choose size flow
-//       if (/\bchọn\s*size\s*giúp\s*mình\b/i.test(lowerMsg)) {
-//         // ensure we have last recommendation
-//         let last = lastRec;
-//         if (!last) last = await exports.getLastRecommendationForUser(userId);
-//         if (!last) return { ask: 'Mình chưa có set nào trước đó. Bạn muốn mình tìm vài set để chọn không?', sessionId };
-
-//         let recJson = last.items;
-//         if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch(e) { recJson = null; } }
-//         const outfits = recJson && recJson.outfits ? recJson.outfits : [];
-//         if (!outfits.length) return { ask: 'Mình chưa có outfit trước đó để tư vấn size. Bạn muốn mình gợi ý outfit mới không?', sessionId };
-
-//         const selected = outfits[0];
-//         const variantIds = Array.isArray(selected.items) ? selected.items : [];
-//         if (!variantIds.length) return { ask: 'Mình chưa có món rõ ràng để tư vấn size. Bạn có thể chọn 1 mẫu cụ thể không?', sessionId };
-
-//         // user measurements
-//         const uQ = await client.query(`SELECT height, weight, bust, waist, hip FROM users WHERE id = $1 LIMIT 1`, [userId]);
-//         const u = uQ.rows[0];
-//         if (!u || (!u.height && !u.weight && !u.bust && !u.waist && !u.hip)) {
-//           const ask = 'Bạn cho mình biết chiều cao và cân nặng (cm/kg) để mình tư vấn size chính xác nhé?';
-//           if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, ask]);
-//           return { ask, sessionId };
-//         }
-
-//         // load categories for variants and size guides
-//         const pvQ = await client.query(
-//           `SELECT pv.id AS variant_id, p.category_id
-//            FROM product_variants pv JOIN products p ON pv.product_id = p.id
-//            WHERE pv.id = ANY($1::uuid[])`,
-//           [variantIds]
-//         );
-//         const catMap = {};
-//         pvQ.rows.forEach(r => { catMap[String(r.variant_id)] = r.category_id; });
-//         const catIds = Array.from(new Set(Object.values(catMap).filter(Boolean)));
-//         const guidesByCategoryLocal = {};
-//         if (catIds.length) {
-//           const sgQ = await client.query(`SELECT category_id, size_label, min_height, max_height, min_weight, max_weight, bust, waist, hip FROM size_guides WHERE category_id = ANY($1::uuid[])`, [catIds]);
-//           for (const g of sgQ.rows) {
-//             guidesByCategoryLocal[g.category_id] = guidesByCategoryLocal[g.category_id] || [];
-//             guidesByCategoryLocal[g.category_id].push(g);
-//           }
-//         }
-
-//         // compute suggestions
-//         const suggestions = variantIds.map(vid => {
-//           const cid = catMap[String(vid)];
-//           const guides = cid ? (guidesByCategoryLocal[cid] || []) : [];
-//           const sz = pickSizeFromGuides(guides, u) || null;
-//           return { variant_id: String(vid), suggested_size: sz };
-//         });
-
-//         const vIds = suggestions.map(s => s.variant_id);
-//         let namesMap = {};
-//         try {
-//           const nQ = await client.query(
-//             `SELECT pv.id AS variant_id, p.name AS product_name, pv.color_name
-//              FROM product_variants pv JOIN products p ON pv.product_id = p.id
-//              WHERE pv.id = ANY($1::uuid[])`,
-//             [vIds]
-//           );
-//           for (const r of (nQ.rows || [])) {
-//             namesMap[String(r.variant_id)] = { product_name: r.product_name, color: r.color_name };
-//           }
-//         } catch (e) { /* ignore */ }
-
-//         const lines = suggestions.map(s => {
-//           const info = namesMap[s.variant_id] || {};
-//           const name = info.product_name || s.variant_id;
-//           const color = info.color_name ? ` (${info.color_name})` : '';
-//           return `${name}${color} → ${s.suggested_size || 'Không rõ'}`;
-//         });
-//         const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}. Nếu bạn muốn mặc rộng hơn thì tăng 1 size nhé.`;
-//         if (sessionId) {
-//           await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`, [sessionId, reply, JSON.stringify({ size_suggestions: suggestions })]);
-//           await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//         }
-//         return { 
-//           type: 'size_suggestions',
-//           reply, 
-//           sizeSuggestions: suggestions, metadata: { size_suggestions: suggestions },
-//           sessionId };
-//       }
-
-//       // 2) Show more outfit -> reuse last recommendation context and exclude previous variants
-//       if (/\bxem\s*thêm\s*outfit\b/i.test(lowerMsg) || /\bxem\s*thêm\b/i.test(lowerMsg)) {
-//         let last = lastRec;
-//         if (!last) last = await exports.getLastRecommendationForUser(userId);
-//         const excludeIds = [];
-//         let occasionFromContext = null, weatherFromContext = null;
-//         if (last) {
-//           let recJson = last.items;
-//           if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch(e) { recJson = null; } }
-//           const outfits = recJson && recJson.outfits ? recJson.outfits : [];
-//           for (const o of outfits) if (Array.isArray(o.items)) excludeIds.push(...o.items.map(i => String(i)));
-//           try {
-//             const ctx = typeof last.context === 'string' ? JSON.parse(last.context) : last.context;
-//             occasionFromContext = ctx?.occasion || null;
-//             weatherFromContext = ctx?.weather || null;
-//           } catch (e) { /* ignore */ }
-//         }
-
-//         try {
-//           const rec = await exports.generateOutfitRecommendation(userId, occasionFromContext, weatherFromContext, { sessionId, maxOutfits: 1, excludeVariantIds: excludeIds, more: true });
-//           if (rec && rec.outfits && rec.outfits.length) return { reply: rec.reply || 'Mình gợi ý thêm 1 set cho bạn.', outfits: rec.outfits, followUp: rec.followUp || null, sessionId };
-//           return { reply: 'Mình chưa tìm được set khác, bạn muốn thử phong cách khác không?', outfits: [], sessionId };
-//         } catch (e) {
-//           console.error('[aiService.handleGeneralMessage] quickReply showMore failed', e && e.stack ? e.stack : e);
-//           return { reply: 'Mình không tìm được set mới ngay bây giờ, thử lại sau nhé!', outfits: [], sessionId };
-//         }
-//       }
-
-//       // 2.1. Xử lý quickreply "Oke luôn"
-//       // -- NEW: handle quick replies like "Mẫu 1", "Mẫu 2", ... and "Không thích cái nào"
-//       //    - Lưu hành động user vào ai_recommendations (context.items) để audit / reuse
-//       //    - Nếu user chọn mẫu N -> trả chi tiết + persist metadata
-//       //    - Nếu user "Không thích cái nào" -> gọi suggestAccessories lại với excludeVariantIds
-//       const sampleMatch = String(message || '').match(/\bmẫu\s*(\d+)\b/i);
-//       if (sampleMatch) {
-//         const selIdx = Math.max(0, Number(sampleMatch[1]) - 1);
-
-//         // Try to ensure we have a sessionId to persist chat history; fallback: find latest session for user
-//         let persistSessionId = sessionId || null;
-//         if (!persistSessionId) {
-//           try {
-//             const sRes = await client.query(
-//               `SELECT id FROM ai_chat_sessions WHERE user_id = $1 ORDER BY last_message_at DESC LIMIT 1`,
-//               [userId]
-//             );
-//             if (sRes.rowCount > 0) persistSessionId = sRes.rows[0].id;
-//           } catch (e) {
-//             console.warn('[aiService.handleGeneralMessage] failed to recover sessionId for persistence', e && e.stack ? e.stack : e);
-//             persistSessionId = null;
-//           }
-//         }
-
-//         // persist user's quick-reply into ai_chat_messages only when we have a session to write to
-//         if (persistSessionId && !_userMessagePersisted && message && String(message).trim()) {
-//           try {
-//             await client.query(
-//               `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
-//               [persistSessionId, String(message).trim()]
-//             );
-//             await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
-//             _userMessagePersisted = true;
-//           } catch (e) {
-//             console.warn('[aiService.handleGeneralMessage] persist sample quick-reply user message failed', e && e.stack ? e.stack : e);
-//           }
-//         }
-
-//         try {
-//            // Helper: parse ai_recommendations.items shape for product_search
-//           const extractProductsFromRec = (recRow) => {
-//             if (!recRow) return [];
-//             let items = recRow.items;
-//             // parsed items may be stringified JSON
-//             if (typeof items === 'string') {
-//               try { items = JSON.parse(items); } catch (_) { items = null; }
-//             }
-//             // shapes we expect:
-//             // - array directly
-//             // - { products: [...] } or { items: [...] }
-//             if (Array.isArray(items)) return items;
-//             if (items && Array.isArray(items.products)) return items.products;
-//             if (items && Array.isArray(items.items)) return items.items;
-//             // fallback: if recRow has top-level products or accessories keys
-//             if (recRow && recRow.items && recRow.items.products && Array.isArray(recRow.items.products)) return recRow.items.products;
-//             return [];
-//           };
-
-//           // 1) prefer product_search last recommendation
-//           const lastProdRec = await exports.getLastRecommendationForUser(userId, 'product_search');
-//           let products = [];
-//           if (lastProdRec) {
-//             products = extractProductsFromRec(lastProdRec);
-//           }
-//           if (Array.isArray(products) && products.length > 0) {
-//             if (selIdx < 0 || selIdx >= products.length) {
-//               const ask = `Mẫu ${selIdx+1} không tồn tại, bạn thử chọn lại nhé.`;
-//               if (persistSessionId) {
-//                 try {
-//                   await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [persistSessionId, ask]);
-//                   await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
-//                 } catch (_) { /* ignore */ }
-//               }
-//               return { ask, sessionId: persistSessionId };
-//             }
-
-//             const chosen = products[selIdx];
-//             const chosenVariant = String(chosen.variant_id || chosen.variant || chosen.id || '');
-//             const chosenName = chosen.name || chosen.product_name || chosen.title || chosenVariant;
-
-//             // Ensure user's quick-reply is persisted: prefer session + insert, else create session via saveChatMessage
-//             let usedSessionId = persistSessionId;
-//             if (!usedSessionId) {
-//               try {
-//                 const saved = await exports.saveChatMessage(userId, { sessionId: null, role: 'user', content: String(message || '').trim() });
-//                 if (saved && saved.success && saved.sessionId) {
-//                   usedSessionId = saved.sessionId;
-//                   _userMessagePersisted = true;
-//                 }
-//               } catch (e) { /* ignore */ }
-//             } else if (!_userMessagePersisted) {
-//               try {
-//                 await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'user',$2,NOW())`, [usedSessionId, String(message || '').trim()]);
-//                 await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [usedSessionId]);
-//                 _userMessagePersisted = true;
-//               } catch (e) { /* ignore */ }
-//             }
-
-//             // persist analytics / audit of user selection
-//             try {
-//               const ctx = { action: 'product_select', source: 'quick_reply', sessionId: usedSessionId };
-//               const items = { selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen } };
-//               await client.query(
-//                 `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
-//                  VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
-//                 [userId, ctx, items, 'user-action']
-//               );
-//             } catch (e) {
-//               console.warn('[aiService.handleGeneralMessage] persist product selection to ai_recommendations failed', e && e.stack ? e.stack : e);
-//             }
-
-//             const reply = `Đã chọn: ${chosenName}. Mình lưu lựa chọn của bạn. Bạn muốn mình show chi tiết (hình/size) hoặc tư vấn thêm phụ kiện khác?`;
-
-//             // persist assistant reply into chat history when we have a session
-//             if (usedSessionId) {
-//               try {
-//                 await client.query(
-//                   `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
-//                    VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
-//                   [usedSessionId, reply, JSON.stringify({ action: 'product_selected', selected: { index: selIdx + 1, variant_id: chosenVariant } })]
-//                 );
-//                 await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [usedSessionId]);
-//               } catch (e) {
-//                 console.warn('[aiService.handleGeneralMessage] persist assistant selection reply failed', e && e.stack ? e.stack : e);
-//               }
-//             }
-
-//             return { reply, selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen }, sessionId: usedSessionId };
-//           }
-
-//           // Fallback: if no ai_recommendations row found, try to read last assistant message metadata (session-aware)
-//           if ((!products || products.length === 0) && persistSessionId) {
-//             try {
-//               const mQ = await client.query(
-//                 `SELECT metadata FROM ai_chat_messages WHERE session_id = $1 AND role = 'assistant' AND metadata IS NOT NULL ORDER BY created_at DESC LIMIT 8`,
-//                 [persistSessionId]
-//               );
-//               for (const row of (mQ.rows || [])) {
-//                 try {
-//                   const meta = (typeof row.metadata === 'string') ? JSON.parse(row.metadata) : row.metadata;
-//                   if (!meta) continue;
-//                   // metadata saved by searchProducts uses: { type: 'product_search', items: rows } or { type:'product_search', items: { items: [...] } }
-//                   if (meta.type === 'product_search') {
-//                     if (Array.isArray(meta.items)) { products = meta.items; break; }
-//                     if (meta.items && Array.isArray(meta.items.products)) { products = meta.items.products; break; }
-//                     if (meta.items && Array.isArray(meta.items.items)) { products = meta.items.items; break; }
-//                   }
-//                 } catch (eMeta) { /* ignore parse error */ }
-//               }
-//             } catch (eMsg) { /* ignore */ }
-//           }
-          
-//           //2 fallback: Load last accessory recommendation
-//           const last = await exports.getLastRecommendationForUser(userId, 'accessories');
-//           if (!last) {
-//             const ask = 'Mình chưa tìm mẫu phụ kiện nào trước đó. Bạn muốn mình tìm vài mẫu không?';
-//             if (persistSessionId) {
-//               try {
-//                 await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [persistSessionId, ask]);
-//                 await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
-//               } catch (e) { /* non-fatal */ }
-//             }
-//             // still persist user action for analytics even without session
-//             try {
-//               // pass objects (pg will serialize to jsonb) and log errors if any
-//               const ctx = { action: 'accessory_select', source: 'quick_reply', sessionId: persistSessionId };
-//               const items = { selected: null };
-//               await client.query(
-//                 `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
-//                  VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
-//                 [userId, ctx, items, 'user-action']
-//               );
-//             } catch (e) {
-//               console.warn('[aiService.handleGeneralMessage] ai_recommendations insert failed (no-last)', e && e.stack ? e.stack : e);
-//             }
-//             return { ask, sessionId: persistSessionId };
-//           }
-
-//           let recJson = last.items;
-//           if (typeof recJson === 'string') {
-//             try { recJson = JSON.parse(recJson); } catch (e) { recJson = recJson || {}; }
-//           }
-//           const accessories = (recJson && recJson.accessories) ? recJson.accessories : [];
-//           if (!accessories || accessories.length === 0) {
-//             const ask = 'Mình không tìm thấy mẫu cũ để chọn lại. Bạn muốn mình tìm vài mẫu không?';
-//             if (persistSessionId) {
-//               try {
-//                 await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [persistSessionId, ask]);
-//                 await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
-//               } catch (e) { /* non-fatal */ }
-//             }
-//             // persist analytics even without session
-//             try {
-//               const ctx2 = { action: 'accessory_select_missing', sessionId: persistSessionId };
-//               const items2 = { accessories: [] };
-//               await client.query(
-//                 `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
-//                  VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
-//                 [userId, ctx2, items2, 'user-action']
-//               );
-//             } catch (e) {
-//               console.warn('[aiService.handleGeneralMessage] ai_recommendations insert failed (missing)', e && e.stack ? e.stack : e);
-//             }
-//             return { ask, sessionId: persistSessionId };
-//           }
-
-//           if (selIdx < 0 || selIdx >= accessories.length) {
-//             const ask = `Mẫu ${selIdx+1} không tồn tại, bạn thử chọn lại nhé.`;
-//             if (persistSessionId) {
-//               try {
-//                 await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [persistSessionId, ask]);
-//                 await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
-//               } catch (e) { /* ignore */ }
-//             }
-//             return { ask, sessionId: persistSessionId };
-//           }
-
-//           const chosen = accessories[selIdx];
-//           const chosenVariant = String(chosen.variant_id || chosen.variant || chosen.id || '');
-//           const chosenName = chosen.name || chosen.product_name || chosen.title || chosenVariant;
-
-//           // persist user selection for analytics / reuse (always attempt, even without session)
-//           try {
-//             const ctx3 = { action: 'accessory_select', source: 'quick_reply', sessionId: persistSessionId };
-//             const items3 = { selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen } };
-//             await client.query(
-//               `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
-//                VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
-//               [
-//                 userId,
-//                 ctx3,
-//                 items3,
-//                 'user-action'
-//               ]
-//             );
-//           } catch (e) {
-//             // Log full detail to help debug why insert didn't persist
-//             console.warn('[aiService.handleGeneralMessage] persist user selection to ai_recommendations failed', {
-//               err: e && (e.stack || e.message) ? (e.stack || e.message) : e,
-//               userId, chosenVariant, selIdx, persistSessionId
-//             });
-//           }
-
-//           const reply = `Đã chọn: ${chosenName}. Mình lưu lựa chọn của bạn. Bạn muốn mình show chi tiết (hình/size) hoặc tư vấn thêm phụ kiện khác?`;
-
-//           // persist assistant response into chat history when session available
-//           if (persistSessionId) {
-//             try {
-//               await client.query(
-//                 `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
-//                  VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
-//                 [
-//                   persistSessionId,
-//                   reply,
-//                   { action: 'accessory_selected', selected: { index: selIdx + 1, variant_id: chosenVariant } }
-//                 ]
-//               );
-//               await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
-//             } catch (e) {
-//               console.error('[aiService.handleGeneralMessage] persist assistant selection reply failed', e && e.stack ? e.stack : e);
-//             }
-//           }
-
-//           return { reply, selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen }, sessionId: persistSessionId };
-//         } catch (e) {
-//           console.error('[aiService.handleGeneralMessage] sample quick-reply handler failed', e && e.stack ? e.stack : e);
-//           // fallthrough to other handlers
-//         }
-//       }
-
-//       // Handle "Không thích cái nào" — gọi suggestAccessories loại trừ các variant đã hiển thị
-//       if (/\b(không thích cái nào|khong thich cai nao|không thích cái nào)\b/i.test(String(message || ''))) {
-//         try {
-//           // collect excluded ids for analytics (best-effort)
-//           const last = await exports.getLastRecommendationForUser(userId, 'accessories');
-//           let excludeIds = [];
-//           if (last && last.items) {
-//             let recJson = last.items;
-//             if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch(e){ recJson = null; } }
-//             const accessories = recJson && recJson.accessories ? recJson.accessories : [];
-//             excludeIds = accessories.map(a => String(a.variant_id || a.variant || a.id)).filter(Boolean);
-//           }
-
-//           // persist user action for analytics but DO NOT trigger new product generation here
-//           try {
-//             await client.query(
-//               `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
-//                VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
-//               [userId, JSON.stringify({ action: 'accessory_reject_all', sessionId }), JSON.stringify({ excluded: excludeIds }), 'user-action']
-//             );
-//           } catch (e) { /* non-fatal */ console.warn('[aiService.handleGeneralMessage] persist reject action failed', e && e.stack ? e.stack : e); }
-
-//           // Friendly assistant reply only — offer clarifying quick replies so FE can next-step without generating products
-//           const reply = 'Mình hiểu — bạn không thích những mẫu này rồi. Bạn muốn mình thử gợi ý theo màu, kiểu hay xem thêm mẫu khác?';
-//           const followUp = { quickReplies: ['Gợi ý thêm mẫu khác', 'Không cần'] };
-
-//           if (sessionId) {
-//             try {
-//               await client.query(
-//                 `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
-//                  VALUES ($1,'assistant',$2,$3::jsonb,NOW())`,
-//                 [sessionId, reply, JSON.stringify({ action: 'accessory_reject_ack', excluded: excludeIds, followUp })]
-//               );
-//               await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//             } catch (e) { /* non-fatal */ console.warn('[aiService.handleGeneralMessage] persist assistant ack failed', e && e.stack ? e.stack : e); }
-//           }
-
-//           return { reply, accessories: [], data: [], followUp, sessionId };
-//         } catch (e) {
-//           console.error('[aiService.handleGeneralMessage] handle "không thích cái nào" failed', e && e.stack ? e.stack : e);
-//         }
-//       }
-
-//       //2.1.2. Xử lý quickreply "Gợi ý thêm mẫu khác" / "không cần"
-//       const normTrim = String(message || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-//       if (/^(goi y them mau khac|gợi ý thêm mẫu khác)$/i.test(normTrim) || normTrim === 'gợi ý thêm mẫu khác' || normTrim === 'goi y them mau khac') {
-//         // persist user's quick-reply if not already saved (best-effort)
-//         if (sessionId && !_userMessagePersisted && message && String(message).trim()) {
-//           try {
-//             await client.query(
-//               `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
-//               [sessionId, String(message).trim()]
-//             );
-//             await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//             _userMessagePersisted = true;
-//           } catch (e) { /* non-fatal */ console.warn('[aiService] persist quick-reply user failed', e && e.stack ? e.stack : e); }
-//         }
-
-//         try {
-//           // 1) If lastAccessoryRec exists and was an accessories response, prefer suggesting more accessories
-//           try {
-//             if (lastAccessoryRec && lastAccessoryRec.items) {
-//               let json = lastAccessoryRec.items;
-//               if (typeof json === 'string') { try { json = JSON.parse(json); } catch (_) { json = null; } }
-//               const accessories = json && json.accessories ? json.accessories : [];
-//               const excludeIds = accessories.map(a => String(a.variant_id || a.variant || a.id)).filter(Boolean);
-
-//               const accRes = await exports.suggestAccessories(userId, message || 'Gợi ý thêm mẫu khác', {
-//                 sessionId,
-//                 excludeVariantIds: excludeIds,
-//                 _userMessagePersisted: _userMessagePersisted,
-//                 max: 6
-//               });
-
-//               if (accRes && accRes.ask) return { ask: accRes.ask, sessionId };
-//               // ensure assistant reply persisted (suggestAccessories usually persists, but double-check best-effort)
-//               if (sessionId && accRes && accRes.reply) {
-//                 try {
-//                   await client.query(
-//                     `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
-//                      VALUES ($1, $2, $3, $4::jsonb, NOW())`,
-//                     [sessionId, 'assistant', accRes.reply, JSON.stringify({ type: 'accessories', items: accRes.accessories || [], followUp: accRes.followUp || null })]
-//                   );
-//                   await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//                 } catch (_) { /* ignore duplicate persist errors */ }
-//               }
-//               return { reply: accRes.reply || 'Mình gợi ý thêm vài mẫu cho bạn nè.', accessories: accRes.accessories || [], data: accRes.accessories || [], followUp: accRes.followUp || null, sessionId };
-//             }
-//           } catch (ee) {
-//             console.warn('[aiService.handleGeneralMessage] accessory-continue attempt failed', ee && ee.stack ? ee.stack : ee);
-//           }
-
-//           // 2) Otherwise prefer outfit continuation (keep prior behavior)
-//           if (lastRec && lastRec.items) {
-//             let recJson = lastRec.items;
-//             if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch (_) { recJson = null; } }
-//             const outfits = recJson && recJson.outfits ? recJson.outfits : [];
-//             if (outfits && outfits.length > 0) {
-//               const excludeIds = [];
-//               for (const o of outfits) if (Array.isArray(o.items)) excludeIds.push(...o.items.map(i => String(i)));
-
-//               let occasionFromContext = null, weatherFromContext = null;
-//               try {
-//                 const ctx = typeof lastRec.context === 'string' ? JSON.parse(lastRec.context) : lastRec.context;
-//                 occasionFromContext = ctx?.occasion || null;
-//                 weatherFromContext = ctx?.weather || null;
-//               } catch (e) { /* ignore */ }
-
-//               const rec = await exports.generateOutfitRecommendation(userId, occasionFromContext, weatherFromContext, {
-//                 sessionId,
-//                 maxOutfits: 1,
-//                 excludeVariantIds: excludeIds,
-//                 more: true
-//               });
-//               if (rec && rec.ask) return { ask: rec.ask, sessionId };
-//               // persist reply if needed
-//               if (sessionId && rec && rec.reply && !rec._persistedByGenerator) {
-//                 try {
-//                   await client.query(
-//                     `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`,
-//                     [sessionId, rec.reply, JSON.stringify({ outfits: rec.outfits || [], followUp: rec.followUp || null })]
-//                   );
-//                   await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//                 } catch (_) { /* non-fatal */ }
-//               }
-//               return { reply: rec.reply || 'Mình gợi ý thêm 1 set cho bạn.', outfits: rec.outfits || [], followUp: rec.followUp || null, sessionId };
-//             }
-//           }
-
-//           // 3) Final fallback: try outfit generator (safe UX)
-//           const recFallback = await exports.generateOutfitRecommendation(userId, null, null, {
-//             sessionId,
-//             maxOutfits: 1,
-//             more: true
-//           });
-//           if (recFallback && recFallback.ask) return { ask: recFallback.ask, sessionId };
-//           return { reply: recFallback.reply || 'Mình gợi ý thêm 1 set cho bạn.', outfits: recFallback.outfits || [], followUp: recFallback.followUp || null, sessionId };
-
-//         } catch (e) {
-//           console.error('[aiService.handleGeneralMessage] quickReply "Gợi ý thêm mẫu khác" critical error', e && e.stack ? e.stack : e);
-//           // return friendly message instead of throwing (prevents frontend "Lỗi kết nối")
-//           return { reply: 'Lỗi khi lấy mẫu mới, bạn thử lại sau vài giây nha!', accessories: [], data: [], sessionId };
-//         }
-//       }
-
-//       if (/^(khong can|không cần|khong canh?)$/i.test(normTrim) || normTrim === 'không cần') {
-//         const reply = 'Oke bạn, không cần thì thôi nha! Nếu cần mình luôn sẵn sàng nhé 😊';
-//         try {
-//           if (sessionId) {
-//             await client.query(
-//               `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`,
-//               [sessionId, reply]
-//             );
-//             await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//           }
-//         } catch (e) { /* non-fatal */ }
-//         return { reply, sessionId };
-//       }
-
-//       //2.2. Xử lý phụ kiện followUp "nam", "nữ", "cả hai"
-//       const _normQuick = String(message || '').trim().toLowerCase()
-//         .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ');
-//       if (sessionId && /^(nam|nu|ca hai|ca-hai|ca_hai|ca)$/.test(_normQuick)) {
-//         // persist user's quick-reply only if we haven't already
-//         if (!_userMessagePersisted) {
-//           try {
-//             await client.query(
-//               `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
-//               [sessionId, String(message).trim()]
-//             );
-//             await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//             _userMessagePersisted = true;
-//           } catch (e) {
-//             console.warn('[aiService.handleGeneralMessage] persist gender quick-reply failed', e && e.stack ? e.stack : e);
-//           }
-//         }
-
-//         // check recent assistant messages for an accessories.ask_gender probe
-//         try {
-//           const aQ = await client.query(
-//             `SELECT id, content, metadata, created_at
-//              FROM ai_chat_messages
-//              WHERE session_id = $1 AND role = 'assistant' AND metadata IS NOT NULL
-//              ORDER BY created_at DESC LIMIT 10`,
-//             [sessionId]
-//           );
-//           // find the most recent assistant ask for accessories/gender and capture its timestamp
-//           let askRow = null;
-//           for (const r of (aQ.rows || [])) {
-//             try {
-//               const meta = (typeof r.metadata === 'string') ? JSON.parse(r.metadata) : r.metadata;
-//               if (meta && (meta.type === 'accessories.ask_gender' || meta.type === 'accessories.ask')) { askRow = r; break; }
-//             } catch (_) { /* ignore parse errors */ }
-//           }
-
-//           if (askRow) {
-//             // map quick-reply -> context.gender
-//             let genderVal = null;
-//             if (_normQuick === 'nam') genderVal = 'nam';
-//             else if (_normQuick === 'nu') genderVal = 'nữ';
-//             else genderVal = null; // 'ca hai' => no gender filter
-
-//             // Try to recover the original user query that triggered the assistant ask (user message before the ask)
-//             let originalUserQuery = null;
-//             try {
-//               const uQ = await client.query(
-//                 `SELECT content FROM ai_chat_messages
-//                  WHERE session_id = $1 AND role = 'user' AND created_at < $2
-//                  ORDER BY created_at DESC LIMIT 1`,
-//                 [sessionId, askRow.created_at]
-//               );
-//               if (uQ.rowCount) originalUserQuery = uQ.rows[0].content;
-//             } catch (ux) { /* ignore */ }
-
-//             // prefer originalUserQuery when available so suggestAccessories knows requestedType (túi/vi/kinh)
-//             const queryToUse = originalUserQuery && String(originalUserQuery).trim().length ? String(originalUserQuery) : message;
-
-//             const accRes = await exports.suggestAccessories(userId, queryToUse, {
-//               sessionId,
-//               context: { gender: genderVal },
-//               _userMessagePersisted: true,
-//               max: opts?.max || 6
-//             });
-
-//             if (accRes) {
-//               if (accRes.ask) return { ask: accRes.ask, sessionId };
-//               return { reply: accRes.reply, accessories: accRes.accessories || [], data: accRes.accessories || [], followUp: accRes.followUp || null, sessionId };
-//             }
-//           }
-//         } catch (e) {
-//           console.error('[aiService.handleGeneralMessage] handle gender quick-reply failed', e && e.stack ? e.stack : e);
-//         }
-//       }
-
-//       //2.3. Xử lý quickreply "Oke luôn"
-//       if (/\boke\s*luôn\b/i.test(lowerMsg)) {
-//         const ask = 'Bạn cho mình biết chiều cao và cân nặng (cm/kg) để mình tư vấn size chính xác nhé?';
-//         try {
-//           if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, ask]);
-//         } catch (e) { console.error('[aiService.handleGeneralMessage] persist ask failed', e && e.stack ? e.stack : e); }
-//         return { ask, sessionId };
-//       }
-
-//       if (/\b(để\s*sau|để\s*sau\s*nha|de\s*sau)\b/i.test(lowerMsg)) {
-//         const reply = 'Oke bạn, để sau nha! 😊';
-//         try {
-//           if (sessionId) {
-//             await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, reply]);
-//             await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//           }
-//         } catch (e) { console.error('[aiService.handleGeneralMessage] persist quick-reply failed', e && e.stack ? e.stack : e); }
-//         return { reply, sessionId };
-//       }
-
-//       // 3) End conversation quick reply
-//       if (/\bđủ\s*rồi\b/i.test(lowerMsg) || isGratitude(lowerMsg)){
-//         const reply = 'Oke bạn, mình luôn sẵn sàng khi bạn cần nhé! 😊';
-//         if (sessionId) {
-//           await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, reply]);
-//           await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//         }
-//         return { reply, sessionId };
-//       }
-//     } catch (e) {
-//       console.error('[aiService.handleGeneralMessage] quickReplies handler error', e && e.stack ? e.stack : e);
-//       // fallthrough to normal processing
-//     }
-
-//     // if slotHints indicates accessories intent, prefer accessory path BEFORE calling outfit generator
-//     if (slotHints.wantsAccessories) {
-//       console.debug('[aiService.handleGeneralMessage] slotHints indicates wantsAccessories, delegating to suggestAccessories', { message: String(message).slice(0,200) });
-//       if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService.handleGeneralMessage.DEBUG] accessory branch triggered by slotHints');
-//       const accResult = await exports.suggestAccessories(userId, message, {
-//         sessionId,
-//         categoryIds: inferAccessorySlugsFromMessage(message),
-//         max: 6,
-//         _userMessagePersisted
-//       });
-
-//       if (process.env.DEBUG_AI_SERVICE) {
-//         console.debug('[aiService.handleGeneralMessage.DEBUG] suggestAccessories result preview:', {
-//           reply: accResult && accResult.reply ? String(accResult.reply).slice(0,400) : null,
-//           accessoriesCount: Array.isArray(accResult?.accessories) ? accResult.accessories.length : 0,
-//           ask: accResult?.ask || false
-//         });
-//       }
-//       if (accResult.accessories?.length > 0) {
-//         return { reply: accResult.reply, accessories: accResult.accessories, followUp: accResult.followUp || null, sessionId };
-//       }
-//       return { reply: accResult.reply || 'Mình chưa thấy mẫu phụ kiện nào phù hợp, bạn muốn tìm kiểu gì ạ?', accessories: [], followUp: accResult.followUp || null, sessionId };
-//       }
-//       const accessorySlugs = inferAccessorySlugsFromMessage(message);
-//       if(accessorySlugs.length > 0) {
-//         console.debug('[AI] Accessory intent detected ', {message, slugs: accessorySlugs});
-
-//       const accResult = await exports.suggestAccessories(userId, message, {
-//           sessionId,
-//           categoryIds: accessorySlugs,
-//           max: 5,
-//           _userMessagePersisted: _userMessagePersisted
-//       });
-
-//       if(accResult.accessories?.length > 0){
-//          return{
-//           reply: accResult.reply,
-//           accessories: accResult.accessories,
-//           data: accResult.accessories,
-//           sessionId
-//         };
-//       }
-
-//       return {
-//         reply: accResult.reply || 'Mình chưa thấy mẫu phụ kiện nào phù hợp, bạn muốn tìm kiểu gì ạ?',
-//         accessories: [],
-//         data: [],
-//         sessionId
-//       };
-//     }
-
-//     // helper: resolve simple references ("áo đó", "outfit 2") -> variant id or null
-//     const resolveRefFromLastRecommendation = (lastRecLocal, msg) => {
-//         if (!lastRecLocal || !msg) return null;
-//         let recJson = lastRecLocal.items;
-//         if (typeof recJson === 'string') {
-//           try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; }
-//         }
-//         const outfits = (recJson && recJson.outfits) ? recJson.outfits : [];
-
-//         // numeric index "outfit 2" or "bộ 1"
-//         const idxMatch = String(msg).match(/(?:bộ|outfit|thứ)\s*(\d+)/i);
-//         if (idxMatch) {
-//           const n = Number(idxMatch[1]);
-//           if (!Number.isNaN(n) && outfits[n - 1]) {
-//             return Array.isArray(outfits[n - 1].items) && outfits[n - 1].items[0] ? outfits[n - 1].items[0] : null;
-//           }
-//         }
-
-//         const txt = String(msg || '').toLowerCase();
-//         const _norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-//         const wantTop = /\b(áo|cái áo|chiếc áo|top|shirt|blouse|sơ mi|áo len|áo khoác|áo thun|đầm|dress)\b/i.test(txt) || /\bao\b/i.test(txt);
-//         const wantBottom = /\b(quần|pants|jean|short|skirt|váy|kaki|trousers|chino)\b/i.test(txt);
-
-//         const pickFromMeta = (o, matchTop, matchBottom) => {
-//           if (!o || !Array.isArray(o.items)) return null;
-//           const meta = Array.isArray(o.meta) ? o.meta : null;
-//           if (meta && meta.length === o.items.length) {
-//             for (let i = 0; i < meta.length; i++) {
-//               const m = meta[i] || {};
-//               const pname = _norm(m.product_name || '');
-//               const cat = _norm(m.category_name || '');
-//               if (matchTop && (pname.includes('ao') || /top|shirt|blouse|dress/.test(cat))) return o.items[i];
-//               if (matchBottom && (pname.includes('quan') || /quan|pants|jean|skirt|trousers/.test(cat))) return o.items[i];
-//             }
-//           }
-//           const name = String(o.name || '').toLowerCase();
-//           const desc = String(o.description || '').toLowerCase();
-//           if (matchTop && (name.includes('áo') || desc.includes('áo'))) return o.items[0];
-//           if (matchBottom && (name.includes('quần') || desc.includes('quần'))) return o.items[0];
-//           return null;
-//         };
-
-//         for (const o of outfits) {
-//           if (wantTop) {
-//             const v = pickFromMeta(o, true, false);
-//             if (v) return v;
-//           }
-//           if (wantBottom) {
-//             const v = pickFromMeta(o, false, true);
-//             if (v) return v;
-//           }
-//         }
-
-//         if (outfits.length === 1 && Array.isArray(outfits[0].items) && outfits[0].items[0]) return outfits[0].items[0];
-//         return null;
-//       };
-
-//     //const lowerMsg = String(message || '').toLowerCase();
-//     const stockIntentRe = /\b(có\s+size|còn\s+size|còn\s+hàng|còn\s+không|còn\s+size\s*[a-z0-9]|có\s+hàng)\b/i;
-//     const recommendIntentRe = /\b(tư vấn|gợi ý|chọn\s*size|giúp\s*mình|muốn|gợi ý\s*1|muốn\s*(?:1|một)?\s*(?:bộ|outfit|set|bộ\s*trang\s*phục|bộ\s*đồ)|bộ|outfit|set|mix\s*đồ|phối\s*đồ|basic|đơn giản|văn\s+phòng|công\s+sở)\b/i;
-//     const quickSuggestKeywords = /\b(basic|đơn giản|văn phòng|công sở|office|phối đồ|mix đồ|bộ trang phục|cho mình 1 bộ|cho mình một bộ)\b/i;
-//     //const slotHints = (typeof extractSlotsFromMessage === 'function') ? extractSlotsFromMessage(message || '') : {};
-
-//     // follow-up intents
-//     const showMoreIntent = /\b(xem thêm|thêm (?:1|một)? (?:outfit|bộ|set)|thêm giúp|thêm nữa|mình muốn (?:1|một)? (?:outfit|bộ) khác|muốn (?:1|một)? (?:outfit|bộ) khác|outfit khác|bộ khác)? (?:có)\b/i;
-//     const colorIntent = /\b(màu|màu gì|màu nào)\b/i;
-//     const sizeIntent = /\b(size|cỡ|kích cỡ|chiều cao|cân nặng|tư vấn size)\b/i;
-//     const sizeIntentRe = sizeIntent;
-//     const colorIntentRe = colorIntent;
-//     // 1) show more -> call generateOutfitRecommendation excluding previous variants
-//     if (showMoreIntent.test(lowerMsg)) {
-//       // try to reuse last recommendation's context so LLM won't ask for occasion/weather again
-//       let last = lastRec;
-//       if (!last && lastRecommendationAllowed) {
-//         try {
-//           const lq = await client.query(`SELECT id, items, context FROM ai_recommendations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [userId]);
-//           if (lq.rowCount) last = lq.rows[0];
-//         } catch (e) { /* ignore */ }
-//       }
-//       const excludeIds = [];
-//       if (last) {
-//         // extract variant ids robustly
-//         let recJson = last.items;
-//         if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; } }
-//         const outfits = recJson && recJson.outfits ? recJson.outfits : [];
-//         for (const o of outfits) {
-//           if (!Array.isArray(o.items)) continue;
-//           for (const it of o.items) {
-//             if (typeof it === 'string' && it.trim()) excludeIds.push(String(it));
-//             else if (it && typeof it === 'object') {
-//               if (it.variant_id) excludeIds.push(String(it.variant_id));
-//               else if (it.id) excludeIds.push(String(it.id));
-//             }
-//           }
-//         }
-//       }
-
-//       // prefer to reuse stored context (occasion/weather) if available
-//       let occasionFromContext = null;
-//       let weatherFromContext = null;
-//       if (last && last.context) {
-//         try {
-//           const ctx = typeof last.context === 'string' ? JSON.parse(last.context) : last.context;
-//           occasionFromContext = ctx && ctx.occasion ? ctx.occasion : null;
-//           weatherFromContext = ctx && ctx.weather ? ctx.weather : null;
-//         } catch (e) { /* ignore */ }
-//       }
-
-//       try {
-//         console.debug('[aiService.handleGeneralMessage.showMore] reusing context', { occasionFromContext, weatherFromContext, excludeCount: excludeIds.length });
-//         // Do NOT forward the raw "show more" user message to generator — it may trigger parsing & asking again.
-//         const rec = await exports.generateOutfitRecommendation(
-//           userId,
-//           occasionFromContext, // reuse occasion from last rec when possible
-//           weatherFromContext,  // reuse weather from last rec when possible
-//           { sessionId, /* message intentionally omitted */ maxOutfits: 1, excludeVariantIds: excludeIds, more: true }
-//         );
-//         if (rec && rec.outfits && rec.outfits.length) return { reply: rec.reply || rec.message || 'Mình gợi ý thêm 1 set cho bạn.', outfits: rec.outfits, followUp: rec.followUp || null, sessionId };
-//         return { reply: 'Mình chưa tìm được set khác, bạn muốn thử phong cách khác không?', outfits: [], followUp: null, sessionId };
-//       } catch (e) {
-//         console.error('[aiService.handleGeneralMessage] showMore flow failed', e && e.stack ? e.stack : e);
-//         return { reply: 'Mình không tìm được set mới ngay bây giờ, thử lại sau nhé!', outfits: [], followUp: null, sessionId };
-//       }
-//     }
-
-//     // 1.5) change/dislike item intent (keep/replace specific item in last outfit)
-//     const changeIntent = /\b(thay\s*đổi|đổi|không\s*thích|ko\s*thích|không\s*ưa|không\s*hợp|không thích mẫu|đổi cái)\b/i;
-//     if (changeIntent.test(lowerMsg)) {
-//       if (!lastRec) return { ask: 'Bạn đang nói tới bộ outfit trước đó phải không? Mình cần biết bộ nào để đổi giúp bạn nhé.', sessionId };
-//       const targetVariant = resolveRefFromLastRecommendation(lastRec, message);
-//       if (!targetVariant) return { ask: 'Bạn có thể nói rõ "cái áo đó" hoặc "outfit 2" để mình biết đổi món nào không?', sessionId };
-
-//       // find outfit that contains targetVariant (fallback to first outfit)
-//       let recJson = lastRec.items;
-//       if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch(e) { recJson = null; } }
-//       const outfits = recJson && recJson.outfits ? recJson.outfits : [];
-//       let outfit = outfits.find(o => Array.isArray(o.items) && o.items.includes(targetVariant));
-//       if (!outfit && outfits.length === 1) outfit = outfits[0];
-
-//       const keepIds = Array.isArray(outfit?.items) ? outfit.items.filter(i => String(i) !== String(targetVariant)) : [];
-//       const removeIds = [String(targetVariant)];
-
-//       // reuse context if available
-//       let occasionFromContext = null, weatherFromContext = null;
-//       if (lastRec && lastRec.context) {
-//         try {
-//           const ctx = typeof lastRec.context === 'string' ? JSON.parse(lastRec.context) : lastRec.context;
-//           occasionFromContext = ctx && ctx.occasion ? ctx.occasion : null;
-//           weatherFromContext = ctx && ctx.weather ? ctx.weather : null;
-//         } catch (e) { /* ignore */ }
-//       }
-
-//       try {
-//         const rec = await exports.generateOutfitRecommendation(
-//           userId,
-//           occasionFromContext,
-//           weatherFromContext,
-//           {
-//             sessionId: sessionId,
-//             // message intentionally omitted to force reuse of stored context
-//             maxOutfits: 1,
-//             excludeVariantIds: removeIds,
-//             keepVariantIds: keepIds,
-//             more: true
-//           }
-//         );
-//         if (!rec) return { reply: 'Mình chưa tìm được món thay thế ngay, thử lại nhé!', sessionId };
-//         if (rec.ask) return { ask: rec.ask, sessionId };
-//         return { reply: rec.reply || rec.message || 'Mình gợi ý 1 set khác cho bạn.', outfits: rec.outfits || [], followUp: rec.followUp || null, sessionId };
-//       } catch (e) {
-//         console.error('[aiService.handleGeneralMessage] change-item flow failed', e && e.stack ? e.stack : e);
-//         return { reply: 'Mình không tìm được món thay thế ngay giờ, thử lại sau nhé!', sessionId };
-//       }
-//     }
- 
-//     // 2) stock/color/size follow-ups referencing last recommendation
-//     if (stockIntentRe.test(lowerMsg) || colorIntent.test(lowerMsg) || sizeIntent.test(lowerMsg)) {
-//       const refVariant = resolveRefFromLastRecommendation(lastRec, message);
-//       if (!refVariant) {
-//         return { ask: 'Bạn đang nói tới món đồ nào trong gợi ý trước đó? Bạn có thể nói "cái áo đó" hoặc "outfit 2" nhé.', sessionId };
-//       }
-
-//       if (stockIntentRe.test(lowerMsg)) {
-//         try {
-//           const info = await checkVariantAvailability(refVariant);
-//           if (!info) return { reply: 'Mình không tìm thấy sản phẩm này trong kho.', sessionId };
-//           const reply = info.stock_qty > 0 ? `Chiếc đó vẫn còn ${info.stock_qty} chiếc trong kho.` : 'Chiếc đó hiện đã hết hàng rồi.';
-//           return { reply, sessionId };
-//         } catch (e) {
-//           return { reply: 'Mình không truy xuất được kho lúc này, thử lại sau nhé.', sessionId };
-//         }
-//       }
-
-//       if (colorIntent.test(lowerMsg)) {
-//         try {
-//           // If reference not resolved yet, try to infer variant from last recommendation metadata or recent assistant messages
-//           if (!refVariant) {
-//             // helper: normalize tokens
-//             const normalize = (s='') => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-//             const tokens = normalize(message).split(/\s+/).filter(Boolean);
-//             // try lastRec metadata first
-//             if (lastRec && lastRec.items) {
-//               try {
-//                 let recJson = lastRec.items;
-//                 if (typeof recJson === 'string') recJson = JSON.parse(recJson);
-//                 const outfits = (recJson && recJson.outfits) ? recJson.outfits : [];
-//                 for (const o of outfits) {
-//                   const metaArr = Array.isArray(o.meta) ? o.meta : [];
-//                   for (const m of metaArr) {
-//                     const pname = String(m.product_name || '').toLowerCase();
-//                     const pcat = String(m.category_name || '').toLowerCase();
-//                     for (const t of tokens) {
-//                       if (!t) continue;
-//                       if ((pname && pname.includes(t)) || (pcat && pcat.includes(t))) {
-//                         if (m.variant_id) { refVariant = String(m.variant_id); break; }
-//                       }
-//                     }
-//                     if (refVariant) break;
-//                   }
-//                   if (refVariant) break;
-//                 }
-//               } catch (eMeta) { /* ignore parse errors */ }
-//             }
-
-//             // fallback: inspect recent assistant messages' metadata (if still no match)
-//             if (!refVariant && sessionId) {
-//               try {
-//                 const aQ = await client.query(`SELECT metadata, content FROM ai_chat_messages WHERE session_id = $1 AND role = 'assistant' AND metadata IS NOT NULL ORDER BY created_at DESC LIMIT 10`, [sessionId]);
-//                 for (const row of (aQ.rows || [])) {
-//                   try {
-//                     const meta = (typeof row.metadata === 'string') ? JSON.parse(row.metadata) : row.metadata;
-//                     if (!meta) continue;
-//                     // meta may contain outfits -> meta.outfits[].meta[].variant_id or saved outfit/items
-//                     const outfits = meta.outfits || (meta.outfit ? [meta.outfit] : null);
-//                     if (Array.isArray(outfits)) {
-//                       for (const o of outfits) {
-//                         const metaArr = Array.isArray(o.meta) ? o.meta : [];
-//                         for (const m of metaArr) {
-//                           const pname = String(m.product_name || '').toLowerCase();
-//                           const pcat = String(m.category_name || '').toLowerCase();
-//                           for (const t of tokens) {
-//                             if (!t) continue;
-//                             if ((pname && pname.includes(t)) || (pcat && pcat.includes(t))) {
-//                               if (m.variant_id) { refVariant = String(m.variant_id); break; }
-//                             }
-//                           }
-//                           if (refVariant) break;
-//                         }
-//                         if (refVariant) break;
-//                       }
-//                     }
-//                     if (refVariant) break;
-//                   } catch (ex) { /* ignore row parse errors */ }
-//                 }
-//               } catch (eRows) { /* ignore DB fetch errors */ }
-//             }
-//           }
-
-//           if (!refVariant) {
-//             // final user-friendly ask when we still can't infer the reference
-//             return { ask: 'Bạn đang nói tới món đồ nào trong gợi ý trước đó? Bạn có thể nói "cái quần baggy đó" hoặc "outfit 1" để mình kiểm tra màu giúp nhé.', sessionId };
-//           }
-//           // primary: get colors for the product (via helper)
-//           let variants = [];
-//           try {
-//             variants = await getVariantColorsByVariant(refVariant);
-//           } catch (eInner) {
-//             console.error('[aiService.handleGeneralMessage] getVariantColorsByVariant failed', eInner && eInner.stack ? eInner.stack : eInner);
-//             variants = [];
-//           }
-
-//           // defensive fallback: query product_variants by product_id if helper returned empty
-//           if ((!variants || variants.length === 0)) {
-//             try {
-//               const info = await checkVariantAvailability(refVariant);
-//               if (info && info.product_id) {
-//                 const vQ = await client.query(
-//                   `SELECT id AS variant_id, color_name, sizes, stock_qty
-//                    FROM product_variants
-//                    WHERE product_id = $1
-//                    ORDER BY color_name NULLS LAST, sizes NULLS LAST`,
-//                   [info.product_id]
-//                 );
-//                 variants = (vQ.rows || []).map(r => ({
-//                   variant_id: String(r.variant_id),
-//                   product_id: info.product_id || null,
-//                   color_name: r.color_name || null,
-//                   size_name: r.sizes || null,
-//                   stock_qty: (typeof r.stock_qty === 'number') ? r.stock_qty : null,
-//                   available: (typeof r.stock_qty === 'number') ? (r.stock_qty > 0) : null
-//                 }));
-//               }
-//             } catch (eFallback) {
-//               console.error('[aiService.handleGeneralMessage] fallback fetch variant colors failed', eFallback && eFallback.stack ? eFallback.stack : eFallback);
-//             }
-//           }
-
-//           if (!variants || variants.length === 0) {
-//             return { reply: 'Mình không tìm thấy màu cho sản phẩm này.', sessionId };
-//           }
-
-//           // build color list and product name
-//           const info = await checkVariantAvailability(refVariant).catch(()=>null);
-//           const productName = info && info.product_name ? info.product_name : (variants[0].product_name || variants[0].product_id ? `Sản phẩm` : 'Sản phẩm này');
-
-//           // distinct color strings with availability tag
-//           // Return only distinct color names (no availability text)
-//           const colors = variants.map(v => (v.color_name || v.color || '').toString().trim());
-//           // remove empty / unknown placeholders and dedupe
-//           const unique = Array.from(new Set(colors)).filter(c => c && c.toLowerCase() !== 'không rõ');
-
-//           if (unique.length === 0) {
-//             return { reply: 'Mình không tìm thấy màu cho sản phẩm này.', sessionId };
-//           }
-//           return { reply: `${productName} có các màu: ${unique.join(', ')}.`, sessionId };
-//         } catch (e) {
-//           console.error('[aiService.handleGeneralMessage] colorIntent final error', e && e.stack ? e.stack : e);
-//           return { reply: 'Mình không lấy được thông tin màu lúc này, thử lại sau nhé.', sessionId };
-//         }
-//       }
-
-//       if (sizeIntent.test(lowerMsg)) {
-//         try {
-//           const uQ = await client.query(`SELECT height, weight, bust, waist, hip FROM users WHERE id = $1 LIMIT 1`, [userId]);
-//           const u = uQ.rows[0];
-//           if (!u || (!u.height && !u.weight && !u.bust && !u.waist && !u.hip)) {
-//             return { ask: 'Bạn cho mình biết chiều cao và cân nặng (cm/kg) để mình tư vấn size chính xác nhé?', sessionId };
-//           }
-//           const pvQ = await client.query(`SELECT product_id FROM product_variants WHERE id = $1 LIMIT 1`, [refVariant]);
-//           const productId = pvQ.rowCount ? pvQ.rows[0].product_id : null;
-//           let guides = [];
-//           if (productId) {
-//             const prodQ = await client.query(`SELECT category_id FROM products WHERE id = $1 LIMIT 1`, [productId]);
-//             const categoryId = prodQ.rowCount ? prodQ.rows[0].category_id : null;
-//             if (categoryId) {
-//               const sgQ = await client.query(`SELECT size_label, min_height, max_height, min_weight, max_weight FROM size_guides WHERE category_id = $1`, [categoryId]);
-//               guides = sgQ.rows || [];
-//             }
-//           }
-//           const suggested = pickSizeFromGuides(guides, u) || 'Không chắc — mình cần biết số đo vòng ngực/eo/hông để tư vấn kỹ hơn.';
-//           return { reply: `Mình gợi ý size: ${suggested}. Bạn muốn mình lưu size này hay so sánh với S/M/L không?`, sessionId };
-//         } catch (e) {
-//           return { reply: 'Mình không truy xuất được thông tin size lúc này, thử lại sau nhé.', sessionId };
-//         }
-//       }
-//     }
-
-//     // PRIORITY: nếu user hỏi "thông tin / xem chi tiết" => trả chi tiết món trước, KHÔNG gọi generator
-//     const itemDetailIntent = /\b(thông tin chi tiết|thông tin|chi tiết|xem chi tiết|cho mình thông tin|cho mình xem chi tiết|cho mình thông tin của|chi tiết của)\b/i;
-//     if (itemDetailIntent.test(lowerMsg)) {
-//       try {
-//         const itemRes = await exports.retrieveLastItemDetails(userId, sessionId, message);
-//         if (itemRes) {
-//           if (itemRes.ask) return { ask: itemRes.ask, sessionId };
-//           return { reply: itemRes.reply, item: itemRes.item, sessionId };
-//         }
-//         // if retrieve didn't return useful data, fall through to normal flow
-//       } catch (e) {
-//         console.error('[aiService.handleGeneralMessage] retrieveLastItemDetails failed', e && e.stack ? e.stack : e);
-//         // fallthrough to recommendation flow
-//       }
-//     }
-
-    
-
-//     // detect product search intent based on keywords - user hỏi sản phẩm
-//     const typeMap = [
-//       // ÁO
-//       { slug: 'ao-thun',          kws: ['áo thun', 'ao thun', 't-shirt', 'tshirt', 'tee', 'thun'] },
-//       { slug: 'ao-so-mi',         kws: ['sơ mi', 'so mi', 'áo sơ mi', 'ao so mi', 'shirt', 'blouse'] },
-//       { slug: 'ao-hoodie-sweater',kws: ['hoodie', 'áo hoodie', 'ao hoodie', 'sweater', 'áo sweater', 'áo len', 'ao len'] },
-//       { slug: 'ao-varsity-bomber',kws: ['áo khoác', 'ao khoac', 'áo bomber', 'bomber', 'varsity', 'jacket', 'áo jacket', 'coat', 'blazer'] },
-
-//       // QUẦN
-//       { slug: 'quan-jean',        kws: ['quần jean', 'quan jean', 'jean', 'jeans', 'denim'] },
-//       { slug: 'quan-short',       kws: ['quần short', 'quan short', 'short', 'quần đùi', 'quan dui'] },
-//       { slug: 'quan-ong-rong',    kws: ['quần ống rộng', 'quan ong rong', 'quần ống suông', 'quan ong suong'] },
-//       { slug: 'quan-au-ong-suong',kws: ['quần âu', 'quan au', 'quần tây', 'quan tay', 'trousers', 'chino', 'kaki'] },
-
-//       // TÚI XÁCH NỮ
-//       { slug: 'tui-xach',         kws: ['túi xách', 'tui xach', 'túi cầm tay', 'bag', 'handbag'] },
-//       { slug: 'tui-deo-cheo',     kws: ['túi đeo chéo', 'tui deo cheo', 'túi đeo vai', 'crossbody', 'shoulder bag'] },
-//       { slug: 'set-qua-tang',     kws: ['set quà tặng', 'set qua tang', 'bộ quà tặng'] },
-
-//       // PHỤ KIỆN
-//       { slug: 'vi-nam',           kws: ['ví nam', 'vi nam', 'wallet nam', 'bóp nam'] },
-//       { slug: 'vi-nu',            kws: ['ví nữ', 'vi nu', 'wallet nữ', 'bóp nữ'] },
-//       { slug: 'kinh-mat',         kws: ['kính mát', 'kinh mat', 'kính râm', 'sunglasses', 'kính nắng'] },
-//       { slug: 'gong-kinh',        kws: ['gọng kính', 'gong kinh', 'khung kính'] },
-//       { slug: 'kinh-bao-ho',      kws: ['kính bảo hộ', 'kinh bao ho', 'kính an toàn'] }
-//     ];
-
-//     // Tạo danh sách tất cả từ khóa để detect intent
-//     const allKeywords = typeMap.flatMap(item => item.kws);
-//     const productSearchIntentRe = new RegExp('\\b(' + allKeywords.join('|') + ')\\b', 'i');
-
-//     // Kiểm tra xem tin nhắn có chứa từ khóa tìm kiếm sản phẩm không
-//     if (productSearchIntentRe.test(lowerMsg)) {
-//       try {
-//         const res = await exports.searchProducts(userId, message, {
-//           sessionId,
-//           limit: 6
-//         });
-
-//         // searchProducts đã tự persist reply + metadata + recommendation audit
-//         // Chỉ cần trả về cho frontend
-//         return {
-//           reply: res.reply,
-//           products: res.products || [],
-//           data: res.products || [],  // giữ cả 2 để tương thích FE cũ
-//           followUp: res.followUp || null,
-//           sessionId: res.sessionId || sessionId
-//         };
-//       } catch (e) {
-//         console.error('[aiService.handleGeneralMessage] product search failed', e && e.stack ? e.stack : e);
-//         return {
-//           reply: 'Mình đang tìm hàng mà hơi chậm một chút, bạn thử lại sau vài giây nhé!',
-//           products: [],
-//           data: [],
-//           sessionId
-//         };
-//       }
-//     }
-
-//     // thì xử lý branch phụ kiện NGAY lập tức (không gọi generator outfit).
-//     const accessoryRequestForExistingOutfitRe = /\b(tư vấn thêm phụ kiện|tư vấn phụ kiện|thêm phụ kiện|chọn thêm phụ kiện|phụ kiện cho (?:outfit|bộ)|phụ kiện cho bộ|cho outfit này|cho bộ này|bộ vừa rồi|outfit vừa rồi)\b/i;
-//     if (accessoryRequestForExistingOutfitRe.test(String(message || '')) || slotHints.wantsAccessories) {
-//        if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService.handleGeneralMessage.DEBUG] accessoryRequestForExistingOutfitRe matched:', String(message).slice(0,200));
-//       try {
-//         // suggestAccessories đã có logic lấy last recommendation khi detect cụm "outfit này" bên trong nó;
-//         // truyền _userMessagePersisted để tránh double-persist nếu cần.
-//         const accRes = await exports.suggestAccessories(userId, message, {
-//           sessionId,
-//           _userMessagePersisted
-//         });
-
-//         if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService.handleGeneralMessage.DEBUG] suggestAccessories (outfit branch) returned', {
-//           reply: accRes && accRes.reply ? String(accRes.reply).slice(0,400) : null,
-//           accessoriesCount: Array.isArray(accRes?.accessories) ? accRes.accessories.length : 0,
-//           ask: !!accRes?.ask
-//         });
-//         if (accRes) {
-//           if (accRes.ask) return { ask: accRes.ask, sessionId };
-//           if (Array.isArray(accRes.accessories) && accRes.accessories.length > 0) {
-//             return { reply: accRes.reply, accessories: accRes.accessories, data: accRes.accessories, followUp: accRes.followUp || null, sessionId };
-//           }
-//           // nếu không có accessories nhưng suggestAccessories trả reply/ask thì trả luôn (data empty)
-//           if (accRes.reply) return { reply: accRes.reply, accessories: accRes.accessories || [], data: accRes.accessories || [], sessionId };
-//         }
-//         // nếu suggestAccessories không tìm được gì, fallthrough để có thể gọi generator nếu cần
-//       } catch (e) {
-//         console.error('[aiService.handleGeneralMessage] accessory-priority branch failed', e && e.stack ? e.stack : e);
-//         // tiếp tục flow bình thường
-//       }
-//     }
-
-//     // If user asked for new recommendation (original flow)
-//     if (recommendIntentRe.test(lowerMsg) || quickSuggestKeywords.test(lowerMsg) || slotHints.occasion || slotHints.style || (slotHints.productHints && slotHints.productHints.length)) {
-//       try {
-//         const rec = await exports.generateOutfitRecommendation(userId, null, null, {
-//           sessionId,
-//           message,
-//           maxOutfits: opts?.maxOutfits || 3,
-//           _userMessagePersisted, // inform generator that we've already saved the user message
-//           inferredWantsAccessories: slotHints.wantsAccessories || false
-//         });
-
-//         if (!rec) {
-//           console.error('[aiService.handleGeneralMessage] generateOutfitRecommendation returned empty');
-//           return { reply: 'Mình đang tạm thời không thể gợi ý được. Thử lại sau nhé!', outfits: [], sessionId };
-//         }
-
-//         if (rec.ask) {
-//           const askText = rec.ask;
-//           if (sessionId) {
-//             try {
-//               if(rec.outfits || rec.followUp){
-//                 await client.query(
-//                   `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`,
-//                   [sessionId, askText, JSON.stringify({ outfits: rec.outfits || [], followUp: rec.followUp || null })]
-//                 );
-//               } else {
-//                 await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, askText]);
-//               }
-//               await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//             } catch (e) {
-//               console.error('[aiService.handleGeneralMessage] persist ask failed', e && e.stack ? e.stack : e);
-//             }
-//           }
-//           return { ask: askText, outfits: Array.isArray(rec.outfits) ? rec.outfits : [], sessionId };
-//         }
-
-//         const outfitsArr = Array.isArray(rec.outfits) ? rec.outfits : [];
-//         const replyText = rec.reply || rec.message || (outfitsArr.length ? `Mình đã gợi ý ${outfitsArr.length} set cho bạn.` : 'Mình chưa tìm được set phù hợp, bạn muốn mình thử phong cách khác không?');
-
-//         if (sessionId && replyText && !rec._persistedByGenerator) {
-//           try {
-//             // Nếu generator không tự lưu, persist reply và kèm metadata khi có followUp/outfits
-//             if (rec && (rec.followUp || (Array.isArray(outfitsArr) && outfitsArr.length))) {
-//               await client.query(
-//                 `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`,
-//                 [sessionId, replyText, JSON.stringify({ outfits: outfitsArr, followUp: rec.followUp || null })]
-//               );
-//             } else {
-//               await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, replyText]);
-//             }
-//             await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-//           } catch (e) {
-//             console.error('[aiService.handleGeneralMessage] persist reply failed', e && e.stack ? e.stack : e);
-//           }
-//         }
-
-//         return { reply: replyText, outfits: outfitsArr, followUp: rec.followUp || null, sessionId };
-//       } catch (e) {
-//         console.error('[aiService.handleGeneralMessage] delegate to generateOutfitRecommendation failed', e && e.stack ? e.stack : e);
-//       }
-//     }
-
-//     // Replace/adjust follow-up handling for stock/size/color intents
-//     // (insert into the place that handles resolvedRef and size/stock/color intents)
-//     {
-//       // e.g. const targetVariantId = resolveRefFromLastRecommendation(lastRec, message) || variantHintFromMsg;
-//       const targetVariantId = (typeof resolveRefFromLastRecommendation === 'function') ? resolveRefFromLastRecommendation(lastRec, message) : null;
-//       if (targetVariantId) {
-//         // Handle "size / availability" question
-//         if (sizeIntentRe.test(lowerMsg) || /\b(size|size|cỡ|M|L|XL|S)\b/i.test(message)) {
-//           const info = await checkVariantAvailability(targetVariantId);
-//           if (!info) return { reply: 'Mình không tìm thấy sản phẩm đó nữa.' };
-//           // only respond with product name + availability for requested size (no numeric stock)
-//           const sizeRequestedMatch = message.match(/\b(size|size|cỡ|M|L|XL|S)\b/i);
-//           const sizeLabel = sizeRequestedMatch ? sizeRequestedMatch[0] : info.size;
-//           const availabilityText = info.available ? 'còn hàng' : 'hết hàng';
-//           const reply = `${info.product_name || 'Sản phẩm'} — size ${sizeLabel}: ${availabilityText}.`;
-//           // optionally persist assistant message, return structured minimal data (no counts)
-//           return { reply, selected: { product_id: info.product_id, variant_id: info.variant_id } };
-//         }
-
-//         // Handle "color preference / list colors" user utterance
-//         if (colorIntentRe.test(lowerMsg) || /màu|color|đỏ|đen|xanh|kem|trắng/i.test(message)) {
-//           // list COLORS only for same product_id
-//           const colors = await getVariantColorsByVariant(targetVariantId);
-//           if (!colors || colors.length === 0) return { reply: 'Mình không tìm thấy màu nào cho sản phẩm đó.' };
-//           // Build human-friendly list: "Đen (còn hàng), Kem (hết hàng)."
-//           const parts = [];
-//           const productName = (await (async () => {
-//             const c = await checkVariantAvailability(targetVariantId);
-//             return c ? c.product_name : null;
-//           })()) || 'Sản phẩm';
-//           for (const c of colors) {
-//             parts.push(`${c.color}${c.available ? ' (còn hàng)' : ' (hết hàng)'}`);
-//           }
-//           const reply = `Sản phẩm ${productName} có các màu: ${parts.join(', ')}.`;
-//           return { reply, selected: { product_id: colors[0].product_id || null } };
-//         }
-//       }
-//     }
-
-//     // If nothing matched, fallback reply
-//     return { reply: 'Mình chưa hiểu ý bạn lắm. Bạn muốn mình gợi ý outfit hay hỏi về sản phẩm trong gợi ý trước đó?', outfits: [], sessionId };
-//   } catch (err) {
-//     console.error('[aiService.handleGeneralMessage] uncaught error', err && err.stack ? err.stack : err);
-//     return { reply: 'Mình đang bận thử đồ, thử lại sau nhé!', outfits: [], sessionId: opts?.sessionId || null };
-//   } finally {
-//     try { client.release(); } catch (e) { /* ignore */ }
-//   }
-// };
 exports.handleGeneralMessage = async (userId, opts = {}) => {
   const client = await pool.connect();
-  try {
-    const { message = '', sessionId = null } = otps || {};
-
-    //Bước 1: persit + load context
-    // const context = await _lo
-  }finally {
-    client.release();
-  }
-};
-
-const _loadMessageContext = async (client, userId, sessionId, message) => {
-  const lowerMsg = String(message || '').toLowerCase();
-  const _norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
-  // duy trì session nếu có và tạo mới nếu không có
-  let persistedSessionId = sessionId;
-  if (sessionId && message && String(message).trim().length) {
-    try {
-      await client.query(
-        `INSERT INTO ai_chat_messages (session_id, role, content, created_at)
-         VALUES ($1, 'user', $2, NOW())`,
-        [sessionId, String(message).trim()]
-      );
-      await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-    } catch (e) {
-      console.warn('[loadMessageContext] persist user message failed (non-fatal)', e?.message);
-    }
-  }
-
-  //tải last recommendation để tham chiếu 
-  let lastRec = null, sessionHistory = [];
-  try {
-    const recQ = await client.query(
-      `SELECT id, items, context, created_at FROM ai_recommendations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
-      [userId]
-    );
-    if (recQ.rowCount > 0) lastRec = recQ.rows[0];
-  } catch (e) {
-    console.warn('[loadMessageContext] load last recommendation failed', e?.message);
-  }
-
-  if (persistedSessionId) {
-    try {
-      const mQ = await client.query(
-        `SELECT role, content FROM ai_chat_messages WHERE session_id = $1 ORDER BY created_at DESC LIMIT 60`,
-        [persistedSessionId]
-      );
-      sessionHistory = (mQ.rows || []).reverse().map(r => ({
-        role: r.role === 'assistant' ? 'assistant' : 'user',
-        content: String(r.content || '').slice(0, 4000)
-      }));
-    } catch (e) {
-      console.warn('[loadMessageContext] load session history failed', e?.message);
-    }
-  }
-
-  // Parse measurements from message
-  const measurements = _parseMeasurementsFromText(message);
-
-  // Parse slots (occasion, weather, gender, style)
-  const slots = extractSlotsFromMessage(message);
-
-  // Detect various intents
-  const context = {
-    userId,
-    sessionId: persistedSessionId,
-    message,
-    lowerMsg,
-    _norm,
-    lastRec,
-    sessionHistory,
-    measurements,
-    slots,
-    
-    // Intent flags
-    hasMeasurements: !!measurements,
-    retrieveIntent: /\b(gửi lại thông tin|gửi lại)\b/i.test(lowerMsg),
-    itemDetailIntent: /\b(thông tin chi tiết|thông tin|chi tiết|xem chi tiết)\b/i.test(lowerMsg),
-    productSearchIntent: _hasProductSearchIntent(lowerMsg),
-    accessoryIntent: _hasAccessoryIntent(lowerMsg, slots),
-    stockIntent: /\b(có\s+size|còn\s+size|còn\s+hàng|còn\s+không)\b/i.test(lowerMsg),
-    colorIntent: /\b(màu|màu gì|màu nào)\b/i.test(lowerMsg),
-    sizeIntent: /\b(size|cỡ|kích cỡ|tư vấn size)\b/i.test(lowerMsg),
-  };
   
-  return context;
+  try {
+    const { message = '', sessionId = null, lastRecommendationAllowed = true } = opts || {};
+    console.log('[aiService.handleGeneralMessage] start (no early persist)', { userId, sessionId, message: String(message).slice(0,120) });
+
+    // persist user message only if valid
+    let _userMessagePersisted = false;
+    if (sessionId && message && String(message).trim().length) {
+      try {
+        await client.query(
+          `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
+          [sessionId, String(message).trim()]
+        );
+        await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+        _userMessagePersisted = true;
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] persist user message failed', e && e.stack ? e.stack : e);
+      }
+    }
+
+    // load last recommendation for contextual resolution (if any)
+    let lastRec = null;
+    if (lastRecommendationAllowed) {
+      try {
+        // include context so downstream "show more" can reuse occasion/weather without extra queries
+        const recQ = await client.query(
+          `SELECT id, items, context, created_at FROM ai_recommendations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+          [userId]
+        );
+        if (recQ.rowCount > 0) lastRec = recQ.rows[0];
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] load last recommendation failed', e && e.stack ? e.stack : e);
+      }
+    }
+
+    // Debug: surface lastRec content so we can see if context exists / is parseable
+    try {
+      if (lastRec) {
+        const itemsPreview = typeof lastRec.items === 'string' ? (lastRec.items || '').slice(0,200) : JSON.stringify(lastRec.items || {}).slice(0,200);
+        console.debug('[aiService.handleGeneralMessage] lastRec loaded', { id: lastRec.id, contextRaw: lastRec.context, itemsPreview });
+        let ctx = null;
+        try { ctx = (typeof lastRec.context === 'string') ? JSON.parse(lastRec.context) : lastRec.context; } catch(e){ ctx = lastRec.context; }
+        console.debug('[aiService.handleGeneralMessage] lastRec parsed context', ctx);
+      } else {
+        console.debug('[aiService.handleGeneralMessage] no lastRec found for user', { userId });
+      }
+    } catch (logErr) { /* ignore logging errors */ }
+    
+    let lastAccessoryRec = null;
+    try {
+      lastAccessoryRec = await exports.getLastRecommendationForUser(userId, 'accessories');
+    } catch (e) { lastAccessoryRec = null; }
+
+    const lowerMsg = String(message || '').toLowerCase();
+    const slotHints = (typeof extractSlotsFromMessage === 'function') ? extractSlotsFromMessage(message || '') : {};
+
+    if (process.env.DEBUG_AI_SERVICE) {
+      try {
+        console.debug('[aiService.handleGeneralMessage.DEBUG] incoming message (raw):', String(message).slice(0,1000));
+        console.debug('[aiService.handleGeneralMessage.DEBUG] lowerMsg:', lowerMsg);
+        console.debug('[aiService.handleGeneralMessage.DEBUG] slotHints:', slotHints);
+        console.debug('[aiService.handleGeneralMessage.DEBUG] lastRec (preview):', lastRec ? { id: lastRec.id, context: lastRec.context } : null);
+        console.debug('[aiService.handleGeneralMessage.DEBUG] lastAccessoryRec (preview):', lastAccessoryRec ? { id: lastAccessoryRec.id, itemsPreview: (typeof lastAccessoryRec.items === "string" ? lastAccessoryRec.items.slice(0,200) : JSON.stringify(lastAccessoryRec.items || {}).slice(0,200)) } : null);
+      } catch (e) { console.error('[aiService.DEBUG] safe debug log failed', e && e.stack ? e.stack : e); }
+    }
+    let sessionHistory = [];
+    try {
+      sessionHistory = await loadSessionHistory(client, sessionId, 60) || [];
+      sessionHistory = Object.freeze(sessionHistory);
+    } catch (e) {
+      console.error('[aiService.handleGeneralMessage] load session history failed', e && e.stack ? e.stack : e);
+      sessionHistory = Object.freeze([]);
+    }
+    // Nhận số đo người dùng và hai hành động khả dụng:
+    // - opts.silentSave = true: lưu nhưng KHÔNG trả về ack (tiếp tục luồng)
+    // - opts.suggestSizeImmediately = true: lưu rồi gọi luồng tư vấn size ngay, trả về kết quả
+    try {
+      const m = String(message || '');
+      // "170cm 64kg", "170 64", "1m7 và 64kg", "1m70", "1.7m 64", "mình cao 1m7 và nặng 64kg"
+      const parseMeasurementsFromText = (text = '') => {
+        const s = String(text || '').toLowerCase();
+        let height = null;
+        let weight = null;
+
+        // 1) Compact meter forms: "1m7", "1m70", "1.70m", "1,7m"
+        const compactM = s.match(/(\d{1,3})m(\d{1,2})\b/);
+        if (compactM) {
+          const a = Number(compactM[1]);
+          const b = Number(compactM[2]);
+          if (!Number.isNaN(a) && !Number.isNaN(b)) {
+            height = a * 100 + (b < 10 ? b * 10 : b); // "1m7" -> 170
+          }
+        }
+
+        // 2) Decimal meter forms: "1.7m" or "1,7m"
+        if (!height) {
+          const decM = s.match(/(\d+(?:[.,]\d{1,2}))\s?m\b/);
+          if (decM) {
+            const n = Number(decM[1].replace(',', '.'));
+            if (!Number.isNaN(n)) height = Math.round(n * 100);
+          }
+        }
+
+        // 3) cm explicit: "170cm"
+        if (!height) {
+          const cm = s.match(/(\d{2,3})\s?cm\b/);
+          if (cm) height = Number(cm[1]);
+        }
+
+        // 4) weight explicit: "64kg"
+        const kg = s.match(/(\d{2,3})\s?kg\b/);
+        if (kg) weight = Number(kg[1]);
+
+        // 5) "nặng 64" or "nặng 64kg"
+        if (!weight) {
+          const nang = s.match(/nặng\s*(\d{2,3})(?:\s?kg)?\b/);
+          if (nang) weight = Number(nang[1]);
+        }
+
+        // 6) fallback: find numeric tokens and infer by plausible ranges
+        if ((!height || !weight)) {
+          const numPattern = /(\d{1,3}(?:[.,]\d{1,2})?)(?:\s?(cm|kg|m))?/g;
+          const found = [];
+          let mTok;
+          while ((mTok = numPattern.exec(s)) !== null) {
+            found.push({ val: mTok[1].replace(',', '.'), unit: mTok[2] || null });
+          }
+
+          for (const f of found) {
+            const n = Number(f.val);
+            if (f.unit === 'cm' && !height) height = Math.round(n);
+            else if (f.unit === 'kg' && !weight) weight = Math.round(n);
+            else if (f.unit === 'm' && !height) height = Math.round(n * 100);
+          }
+
+          // if still missing, use heuristics: centimeter-range for height, kg-range for weight
+          const nums = found.map(f => Number(f.val)).filter(x => !Number.isNaN(x));
+          if (!height && nums.length) {
+            const hCand = nums.find(x => x >= 100 && x <= 230);
+            if (hCand) height = Math.round(hCand);
+            else {
+              const mCand = nums.find(x => x > 1 && x < 3); // likely in meters like 1.7
+              if (mCand) height = Math.round(mCand * 100);
+            }
+          }
+          if (!weight && nums.length) {
+            const wCand = nums.find(x => x >= 30 && x <= 250 && x !== height);
+            if (wCand) weight = Math.round(wCand);
+          }
+        }
+
+        // simple sanity check
+        if (height && (height < 50 || height > 300)) height = null;
+        if (weight && (weight < 20 || weight > 500)) weight = null;
+
+        if (height || weight) return { height, weight };
+        return null;
+      };
+
+      const mm = parseMeasurementsFromText(m);
+      if (mm) {
+        const height = mm.height;
+        const weight = mm.weight;
+        if (!Number.isNaN(height) && !Number.isNaN(weight)) {
+          try {
+            // lưu trực tiếp vào users
+            await client.query(`UPDATE users SET height = $1, weight = $2 WHERE id = $3`, [height, weight, userId]);
+            // Reuse sessionHistory loaded earlier (top of handler). Also fetch recent assistant messages
+            // including metadata because follow-up question may be stored in metadata.followUp.question.
+            const measurementRegex = /\b(chiều cao|cân nặng|cm\/kg|cho mình biết chiều cao|cho mình biết chiều cao và cân nặng|tư vấn size|để mình tư vấn size|chọn\s*size|chọn\s*size\s*giúp|bạn.*chọn\s*size|muốn\s*mình\s*chọn\s*size)\b/i;
+
+            // sessionHistory (chronological) was loaded near the top of the function into `sessionHistory`.
+            const recentFromHistory = Array.isArray(sessionHistory) && sessionHistory.length > 0
+              ? sessionHistory.slice(-6).reverse() // examine last few messages (most recent last)
+              : [];
+
+            // also pull last assistant rows including metadata (defensive)
+            let recentAssistantRows = [];
+            try {
+              if (sessionId) {
+                const aQ = await client.query(
+                  `SELECT content, metadata FROM ai_chat_messages WHERE session_id = $1 AND role = 'assistant' ORDER BY created_at DESC LIMIT 6`,
+                  [sessionId]
+                );
+                recentAssistantRows = aQ.rows || [];
+              }
+            } catch (e) {
+              console.error('[aiService.handleGeneralMessage] fetch recent assistant rows failed', e && e.stack ? e.stack : e);
+              recentAssistantRows = [];
+            }
+
+            const assistantAskedForMeasurements = (
+              // check textual assistant messages in sessionHistory
+              recentFromHistory.some(m => m.role === 'assistant' && measurementRegex.test(String(m.content || '')))
+              ||
+              // check DB assistant rows content + metadata JSON (followUp.question, metadata.followUp, metadata)
+              recentAssistantRows.some(r => {
+                try {
+                  const txt = String(r.content || '');
+                  if (measurementRegex.test(txt)) return true;
+                  const meta = r.metadata;
+                  if (!meta) return false;
+                  const j = (typeof meta === 'string') ? JSON.parse(meta) : meta;
+                  // check common metadata locations
+                  const candidates = [];
+                  if (j && typeof j === 'object') {
+                    if (j.followUp && typeof j.followUp === 'object' && j.followUp.question) candidates.push(String(j.followUp.question));
+                    if (j.question) candidates.push(String(j.question));
+                    if (j.size_prompt) candidates.push(String(j.size_prompt));
+                    // fallback: stringify metadata
+                    candidates.push(JSON.stringify(j));
+                  }
+                  return candidates.some(c => measurementRegex.test(String(c || '')));
+                } catch (ex) {
+                  return false;
+                }
+              })
+            );
+
+            const triggerSizeFlow = (opts && opts.silentSave) || (lastRec && assistantAskedForMeasurements);
+
+            if (triggerSizeFlow){
+              // Nếu silentSave: sau khi lưu, tiếp tục và chạy luồng "Chọn size giúp mình"
+              try {
+                let last = lastRec;
+                if (!last) last = await exports.getLastRecommendationForUser(userId);
+                if (!last) {
+                  // không có recommendation trước đó -> tiếp tục xử lý bình thường (no ACK)
+                } else {
+                  let recJson = last.items;
+                  if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch(e) { recJson = null; } }
+                  const outfits = recJson && recJson.outfits ? recJson.outfits : [];
+                  if (outfits.length === 0) {
+                    // không có outfit -> tiếp tục bình thường
+                  } else {
+                    const selected = outfits[0];
+                    const variantIds = Array.isArray(selected.items) ? selected.items : [];
+                    if (variantIds.length === 0) {
+                      // không có variant rõ ràng -> tiếp tục bình thường
+                    } else {
+                      // Lấy measurements (vừa update ở trên nên có)
+                      const uQ = await client.query(`SELECT height, weight, bust, waist, hip FROM users WHERE id = $1 LIMIT 1`, [userId]);
+                      const u = uQ.rows[0];
+                      if (!u || (!u.height && !u.weight && !u.bust && !u.waist && !u.hip)) {
+                        const ask = 'Bạn cho mình biết chiều cao và cân nặng (cm/kg) để mình tư vấn size chính xác nhé?';
+                        if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, ask]);
+                        return { ask, sessionId };
+                      }
+
+                      // load categories for variants and size guides
+                      const pvQ = await client.query(
+                        `SELECT pv.id AS variant_id, p.category_id
+                         FROM product_variants pv JOIN products p ON pv.product_id = p.id
+                         WHERE pv.id = ANY($1::uuid[])`,
+                        [variantIds]
+                      );
+                      const catMap = {};
+                      pvQ.rows.forEach(r => { catMap[String(r.variant_id)] = r.category_id; });
+                      const catIds = Array.from(new Set(Object.values(catMap).filter(Boolean)));
+                      const guidesByCategoryLocal = {};
+                      if (catIds.length) {
+                        const sgQ = await client.query(`SELECT category_id, size_label, min_height, max_height, min_weight, max_weight, bust, waist, hip FROM size_guides WHERE category_id = ANY($1::uuid[])`, [catIds]);
+                        for (const g of sgQ.rows) {
+                          guidesByCategoryLocal[g.category_id] = guidesByCategoryLocal[g.category_id] || [];
+                          guidesByCategoryLocal[g.category_id].push(g);
+                        }
+                      }
+                      // compute suggestions
+                      const suggestions = variantIds.map(vid => {
+                        const cid = catMap[String(vid)];
+                        const guides = cid ? (guidesByCategoryLocal[cid] || []) : [];
+                        const sz = pickSizeFromGuides(guides, u) || null;
+                        return { variant_id: String(vid), suggested_size: sz };
+                      });
+
+                      // Lấy tên + màu cho các variant để hiển thị thân thiện
+                      const vIds = suggestions.map(s => s.variant_id);
+                      let namesMap = {};
+                      try {
+                        const nQ = await client.query(
+                          `SELECT pv.id AS variant_id, p.name AS product_name, pv.color_name
+                           FROM product_variants pv JOIN products p ON pv.product_id = p.id
+                           WHERE pv.id = ANY($1::uuid[])`,
+                          [vIds]
+                        );
+                        for (const r of (nQ.rows || [])) {
+                          namesMap[String(r.variant_id)] = { product_name: r.product_name, color: r.color_name };
+                        }
+                      } catch (e) { /* ignore */ }
+
+                      const lines = suggestions.map(s => {
+                        const info = namesMap[s.variant_id] || {};
+                        const name = info.product_name || s.variant_id;
+                        const color = info.color_name ? ` (${info.color_name})` : '';
+                        return `${name}${color} → ${s.suggested_size || 'Không rõ'}`;
+                      });
+                      const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}. Nếu bạn muốn mặc rộng hơn thì tăng 1 size nhé.`;
+                      if (sessionId) {
+                        await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`, [sessionId, reply, JSON.stringify({ size_suggestions: suggestions })]);
+                        await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+                      }
+                      return {
+                        type: 'size_suggestions',
+                        reply,
+                        sizeSuggestions: suggestions,
+                        metadata: { size_suggestions: suggestions },
+                        sessionId
+                      };
+                    }
+                  }
+                }
+              } catch (e) {
+                console.error('[aiService.handleGeneralMessage] silentSave -> choose-size flow failed', e && e.stack ? e.stack : e);
+                // on error: fall through to normal flow without ACK
+              }
+            } else {
+              // Mặc định: trả về confirmation đơn giản, KHÔNG hỏi follow-up hay gợi ý size
+              const ack = `Mình đã lưu chiều cao ${height}cm và cân nặng ${weight}kg.`;
+              if (sessionId) {
+                await client.query(
+                  `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`,
+                  [sessionId, ack]
+                );
+                await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+              }
+              return { reply: ack, sessionId };
+            }
+          } catch (e) {
+            console.error('[aiService.handleGeneralMessage] save measurements failed', e && e.stack ? e.stack : e);
+            // nếu lưu thất bại thì tiếp tục luồng xử lý (không throw ở đây)
+          }
+        }
+      }
+
+      const retrieveIntent = /\b(gửi lại thông tin|gửi lại|gửi lại thông tin của|gửi lại thông tin cái|gửi lại thông tin món|gửi lại thông tin mẫu|gửi lại)\b/i;
+      if (retrieveIntent.test(lowerMsg)) {
+        try {
+          // prefer item-level retrieval (cái áo / cái quần / món 1) -> falls back to full outfit
+          const itemRes = await exports.retrieveLastItemDetails(userId, sessionId, message);
+          if (itemRes && (itemRes.reply || itemRes.ask)) {
+            // if function asked for clarification, surface ask
+            if (itemRes.ask) return { ask: itemRes.ask, sessionId };
+            return { reply: itemRes.reply, item: itemRes.item, sessionId };
+          }
+          // fallback: retrieve whole outfit
+          const res = await exports.retrieveLastOutfitDetails(userId, sessionId);
+          if (res.ask) return { ask: res.ask, sessionId };
+          return { reply: res.reply, outfit: res.outfit, items: res.items, sessionId };
+        } catch (e) {
+          console.error('[aiService.handleGeneralMessage] retrieveIntent failed', e && e.stack ? e.stack : e);
+          return { reply: 'Mình không lấy được thông tin outfit lúc này, thử lại sau nhé!', sessionId };
+        }
+      }
+    } catch (e) { /* ignore parse errors */ }
+    
+
+  function normalizeForMatching(s = '') {
+  return String(s || '')
+    .normalize('NFD')                     // decompose accents
+    .replace(/[\u0300-\u036f]/g, '')      // remove diacritics
+    .replace(/[^a-z0-9\s]/gi, ' ')        // strip punctuation
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  }
+
+  function isGratitude(text = '') {
+    const norm = normalizeForMatching(text);
+    if (!norm) return false;
+    // common normalized variants (include Vietnamese without diacritics + common english shortcuts)
+    const variants = [
+      'cam on','camon','camr on','camonw','cam onw',
+      'cam on luna','cam on ban','cam on bạn','cam on luna',
+      'cam onk','cam onk', // tolerate stray chars
+      'cam on', 'camon', 'cảm ơn' /* defensive */,
+      'thank you','thanks','ty','tks','tnx'
+    ];
+    for (const v of variants) {
+      if (norm.indexOf(v) !== -1) return true;
+    }
+    // fallback: simple heuristics: contains "cam" and "on" close by or contains "camon" or "cam" + "on"
+    if (/\bcam\w{0,3}\s*on\b/.test(norm) || /\bcamon\w*\b/.test(norm)) return true;
+    if (/\bthanks?\b/.test(norm) || /\btks\b/.test(norm) || /\btnx\b/.test(norm)) return true;
+    return false;
+  }
+
+    // handle "Chọn size giúp mình", "Xem thêm outfit", "Đủ rồi, cảm ơn Luna!"
+    try {
+      // 1) Choose size flow
+      if (/\bchọn\s*size\s*giúp\s*mình\b/i.test(lowerMsg)) {
+        // ensure we have last recommendation
+        let last = lastRec;
+        if (!last) last = await exports.getLastRecommendationForUser(userId);
+        if (!last) return { ask: 'Mình chưa có set nào trước đó. Bạn muốn mình tìm vài set để chọn không?', sessionId };
+
+        let recJson = last.items;
+        if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch(e) { recJson = null; } }
+        const outfits = recJson && recJson.outfits ? recJson.outfits : [];
+        if (!outfits.length) return { ask: 'Mình chưa có outfit trước đó để tư vấn size. Bạn muốn mình gợi ý outfit mới không?', sessionId };
+
+        const selected = outfits[0];
+        const variantIds = Array.isArray(selected.items) ? selected.items : [];
+        if (!variantIds.length) return { ask: 'Mình chưa có món rõ ràng để tư vấn size. Bạn có thể chọn 1 mẫu cụ thể không?', sessionId };
+
+        // user measurements
+        const uQ = await client.query(`SELECT height, weight, bust, waist, hip FROM users WHERE id = $1 LIMIT 1`, [userId]);
+        const u = uQ.rows[0];
+        if (!u || (!u.height && !u.weight && !u.bust && !u.waist && !u.hip)) {
+          const ask = 'Bạn cho mình biết chiều cao và cân nặng (cm/kg) để mình tư vấn size chính xác nhé?';
+          if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, ask]);
+          return { ask, sessionId };
+        }
+
+        // load categories for variants and size guides
+        const pvQ = await client.query(
+          `SELECT pv.id AS variant_id, p.category_id
+           FROM product_variants pv JOIN products p ON pv.product_id = p.id
+           WHERE pv.id = ANY($1::uuid[])`,
+          [variantIds]
+        );
+        const catMap = {};
+        pvQ.rows.forEach(r => { catMap[String(r.variant_id)] = r.category_id; });
+        const catIds = Array.from(new Set(Object.values(catMap).filter(Boolean)));
+        const guidesByCategoryLocal = {};
+        if (catIds.length) {
+          const sgQ = await client.query(`SELECT category_id, size_label, min_height, max_height, min_weight, max_weight, bust, waist, hip FROM size_guides WHERE category_id = ANY($1::uuid[])`, [catIds]);
+          for (const g of sgQ.rows) {
+            guidesByCategoryLocal[g.category_id] = guidesByCategoryLocal[g.category_id] || [];
+            guidesByCategoryLocal[g.category_id].push(g);
+          }
+        }
+
+        // compute suggestions
+        const suggestions = variantIds.map(vid => {
+          const cid = catMap[String(vid)];
+          const guides = cid ? (guidesByCategoryLocal[cid] || []) : [];
+          const sz = pickSizeFromGuides(guides, u) || null;
+          return { variant_id: String(vid), suggested_size: sz };
+        });
+
+        const vIds = suggestions.map(s => s.variant_id);
+        let namesMap = {};
+        try {
+          const nQ = await client.query(
+            `SELECT pv.id AS variant_id, p.name AS product_name, pv.color_name
+             FROM product_variants pv JOIN products p ON pv.product_id = p.id
+             WHERE pv.id = ANY($1::uuid[])`,
+            [vIds]
+          );
+          for (const r of (nQ.rows || [])) {
+            namesMap[String(r.variant_id)] = { product_name: r.product_name, color: r.color_name };
+          }
+        } catch (e) { /* ignore */ }
+
+        const lines = suggestions.map(s => {
+          const info = namesMap[s.variant_id] || {};
+          const name = info.product_name || s.variant_id;
+          const color = info.color_name ? ` (${info.color_name})` : '';
+          return `${name}${color} → ${s.suggested_size || 'Không rõ'}`;
+        });
+        const reply = `Mình gợi ý size cho bộ bạn vừa chọn: ${lines.join('; ')}. Nếu bạn muốn mặc rộng hơn thì tăng 1 size nhé.`;
+        if (sessionId) {
+          await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`, [sessionId, reply, JSON.stringify({ size_suggestions: suggestions })]);
+          await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+        }
+        return { 
+          type: 'size_suggestions',
+          reply, 
+          sizeSuggestions: suggestions, metadata: { size_suggestions: suggestions },
+          sessionId };
+      }
+
+      // 2) Show more outfit -> reuse last recommendation context and exclude previous variants
+      if (/\bxem\s*thêm\s*outfit\b/i.test(lowerMsg) || /\bxem\s*thêm\b/i.test(lowerMsg)) {
+        let last = lastRec;
+        if (!last) last = await exports.getLastRecommendationForUser(userId);
+        const excludeIds = [];
+        let occasionFromContext = null, weatherFromContext = null;
+        if (last) {
+          let recJson = last.items;
+          if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch(e) { recJson = null; } }
+          const outfits = recJson && recJson.outfits ? recJson.outfits : [];
+          for (const o of outfits) if (Array.isArray(o.items)) excludeIds.push(...o.items.map(i => String(i)));
+          try {
+            const ctx = typeof last.context === 'string' ? JSON.parse(last.context) : last.context;
+            occasionFromContext = ctx?.occasion || null;
+            weatherFromContext = ctx?.weather || null;
+          } catch (e) { /* ignore */ }
+        }
+
+        try {
+          const rec = await exports.generateOutfitRecommendation(userId, occasionFromContext, weatherFromContext, { sessionId, maxOutfits: 1, excludeVariantIds: excludeIds, more: true });
+          if (rec && rec.outfits && rec.outfits.length) return { reply: rec.reply || 'Mình gợi ý thêm 1 set cho bạn.', outfits: rec.outfits, followUp: rec.followUp || null, sessionId };
+          return { reply: 'Mình chưa tìm được set khác, bạn muốn thử phong cách khác không?', outfits: [], sessionId };
+        } catch (e) {
+          console.error('[aiService.handleGeneralMessage] quickReply showMore failed', e && e.stack ? e.stack : e);
+          return { reply: 'Mình không tìm được set mới ngay bây giờ, thử lại sau nhé!', outfits: [], sessionId };
+        }
+      }
+
+      //2.05) show more product search (dành cho searchProducts)
+      if (/\bxem\s*thêm\b/i.test(lowerMsg) || /\bthêm\s*sản\s*phẩm\b/i.test(lowerMsg)) {
+      try {
+        // Kiểm tra: last recommendation có phải product_search không?
+        const lastProdRec = await exports.getLastRecommendationForUser(userId, 'product_search');
+        
+        if (lastProdRec && lastProdRec.items) {
+          // Parse items để lấy list variant_id đã show trước đó
+          let recJson = lastProdRec.items;
+          if (typeof recJson === 'string') {
+            try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; }
+          }
+
+          const products = (recJson && recJson.products) ? recJson.products : [];
+          const excludeIds = products.map(p => String(p.variant_id || p.id)).filter(Boolean);
+
+          if (excludeIds.length) {
+            console.debug('[handleGeneralMessage] showMore product search: reusing query, excluding', { excludeCount: excludeIds.length });
+
+            // Lấy query gốc từ context
+            let lastQuery = null;
+            if (lastProdRec.context) {
+              const ctx = typeof lastProdRec.context === 'string' 
+                ? JSON.parse(lastProdRec.context) 
+                : lastProdRec.context;
+              lastQuery = ctx && ctx.query ? ctx.query : null;
+            }
+
+            // Nếu không có query gốc, hỏi user
+            if (!lastQuery) {
+              return { 
+                ask: 'Bạn muốn xem thêm sản phẩm loại nào? (ví dụ: "quần jean", "áo thun")',
+                sessionId 
+              };
+            }
+
+            // Gọi searchProducts lại với excludeVariantIds
+            const searchResult = await exports.searchProducts(userId, lastQuery, {
+              sessionId,
+              limit: 6,
+              excludeVariantIds: excludeIds  // 🆕 THÊM exclude
+            });
+
+            return {
+              reply: searchResult.reply || 'Mình tìm thêm vài mẫu khác cho bạn nè.',
+              products: searchResult.products || [],
+              data: searchResult.products || [],
+              followUp: searchResult.followUp || null,
+              sessionId: searchResult.sessionId || sessionId
+            };
+          }
+        }
+      } catch (e) {
+        console.error('[handleGeneralMessage] showMore product search failed', e && e.stack ? e.stack : e);
+        // fallthrough để xử lý "xem thêm" cho outfit nếu có
+      }
+    }
+
+      // 2.1. Xử lý quickreply "Oke luôn"
+      // -- NEW: handle quick replies like "Mẫu 1", "Mẫu 2", ... and "Không thích cái nào"
+      //    - Lưu hành động user vào ai_recommendations (context.items) để audit / reuse
+      //    - Nếu user chọn mẫu N -> trả chi tiết + persist metadata
+      //    - Nếu user "Không thích cái nào" -> gọi suggestAccessories lại với excludeVariantIds
+      const sampleMatch = String(message || '').match(/\bmẫu\s*(\d+)\b/i);
+      if (sampleMatch) {
+        const selIdx = Math.max(0, Number(sampleMatch[1]) - 1);
+
+        // Try to ensure we have a sessionId to persist chat history; fallback: find latest session for user
+        let persistSessionId = sessionId || null;
+        if (!persistSessionId) {
+          try {
+            const sRes = await client.query(
+              `SELECT id FROM ai_chat_sessions WHERE user_id = $1 ORDER BY last_message_at DESC LIMIT 1`,
+              [userId]
+            );
+            if (sRes.rowCount > 0) persistSessionId = sRes.rows[0].id;
+          } catch (e) {
+            console.warn('[aiService.handleGeneralMessage] failed to recover sessionId for persistence', e && e.stack ? e.stack : e);
+            persistSessionId = null;
+          }
+        }
+
+        // persist user's quick-reply into ai_chat_messages only when we have a session to write to
+        if (persistSessionId && !_userMessagePersisted && message && String(message).trim()) {
+          try {
+            await client.query(
+              `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
+              [persistSessionId, String(message).trim()]
+            );
+            await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
+            _userMessagePersisted = true;
+          } catch (e) {
+            console.warn('[aiService.handleGeneralMessage] persist sample quick-reply user message failed', e && e.stack ? e.stack : e);
+          }
+        }
+
+        try {
+           // Helper: parse ai_recommendations.items shape for product_search
+          const extractProductsFromRec = (recRow) => {
+            if (!recRow) return [];
+            let items = recRow.items;
+            // parsed items may be stringified JSON
+            if (typeof items === 'string') {
+              try { items = JSON.parse(items); } catch (_) { items = null; }
+            }
+            // shapes we expect:
+            // - array directly
+            // - { products: [...] } or { items: [...] }
+            if (Array.isArray(items)) return items;
+            if (items && Array.isArray(items.products)) return items.products;
+            if (items && Array.isArray(items.items)) return items.items;
+            // fallback: if recRow has top-level products or accessories keys
+            if (recRow && recRow.items && recRow.items.products && Array.isArray(recRow.items.products)) return recRow.items.products;
+            return [];
+          };
+
+          // 1) prefer product_search last recommendation
+          const lastProdRec = await exports.getLastRecommendationForUser(userId, 'product_search');
+          let products = [];
+          if (lastProdRec) {
+            products = extractProductsFromRec(lastProdRec);
+          }
+          if (Array.isArray(products) && products.length > 0) {
+            if (selIdx < 0 || selIdx >= products.length) {
+              const ask = `Mẫu ${selIdx+1} không tồn tại, bạn thử chọn lại nhé.`;
+              if (persistSessionId) {
+                try {
+                  await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [persistSessionId, ask]);
+                  await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
+                } catch (_) { /* ignore */ }
+              }
+              return { ask, sessionId: persistSessionId };
+            }
+
+            const chosen = products[selIdx];
+            const chosenVariant = String(chosen.variant_id || chosen.variant || chosen.id || '');
+            const chosenName = chosen.name || chosen.product_name || chosen.title || chosenVariant;
+
+            // Ensure user's quick-reply is persisted: prefer session + insert, else create session via saveChatMessage
+            let usedSessionId = persistSessionId;
+            if (!usedSessionId) {
+              try {
+                const saved = await exports.saveChatMessage(userId, { sessionId: null, role: 'user', content: String(message || '').trim() });
+                if (saved && saved.success && saved.sessionId) {
+                  usedSessionId = saved.sessionId;
+                  _userMessagePersisted = true;
+                }
+              } catch (e) { /* ignore */ }
+            } else if (!_userMessagePersisted) {
+              try {
+                await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'user',$2,NOW())`, [usedSessionId, String(message || '').trim()]);
+                await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [usedSessionId]);
+                _userMessagePersisted = true;
+              } catch (e) { /* ignore */ }
+            }
+
+            // persist analytics / audit of user selection
+            try {
+              const ctx = { action: 'product_select', source: 'quick_reply', sessionId: usedSessionId };
+              const items = { selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen } };
+              await client.query(
+                `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
+                 VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
+                [userId, ctx, items, 'user-action']
+              );
+            } catch (e) {
+              console.warn('[aiService.handleGeneralMessage] persist product selection to ai_recommendations failed', e && e.stack ? e.stack : e);
+            }
+
+            const reply = `Đã chọn: ${chosenName}. Mình lưu lựa chọn của bạn. Bạn muốn mình show chi tiết (hình/size) hoặc tư vấn thêm phụ kiện khác?`;
+
+            // persist assistant reply into chat history when we have a session
+            if (usedSessionId) {
+              try {
+                await client.query(
+                  `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+                   VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
+                  [usedSessionId, reply, JSON.stringify({ action: 'product_selected', selected: { index: selIdx + 1, variant_id: chosenVariant } })]
+                );
+                await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [usedSessionId]);
+              } catch (e) {
+                console.warn('[aiService.handleGeneralMessage] persist assistant selection reply failed', e && e.stack ? e.stack : e);
+              }
+            }
+
+            return { reply, selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen }, sessionId: usedSessionId };
+          }
+
+          // Fallback: if no ai_recommendations row found, try to read last assistant message metadata (session-aware)
+          if ((!products || products.length === 0) && persistSessionId) {
+            try {
+              const mQ = await client.query(
+                `SELECT metadata FROM ai_chat_messages WHERE session_id = $1 AND role = 'assistant' AND metadata IS NOT NULL ORDER BY created_at DESC LIMIT 8`,
+                [persistSessionId]
+              );
+              for (const row of (mQ.rows || [])) {
+                try {
+                  const meta = (typeof row.metadata === 'string') ? JSON.parse(row.metadata) : row.metadata;
+                  if (!meta) continue;
+                  // metadata saved by searchProducts uses: { type: 'product_search', items: rows } or { type:'product_search', items: { items: [...] } }
+                  if (meta.type === 'product_search') {
+                    if (Array.isArray(meta.items)) { products = meta.items; break; }
+                    if (meta.items && Array.isArray(meta.items.products)) { products = meta.items.products; break; }
+                    if (meta.items && Array.isArray(meta.items.items)) { products = meta.items.items; break; }
+                  }
+                } catch (eMeta) { /* ignore parse error */ }
+              }
+            } catch (eMsg) { /* ignore */ }
+          }
+          
+          //2 fallback: Load last accessory recommendation
+          const last = await exports.getLastRecommendationForUser(userId, 'accessories');
+          if (!last) {
+            const ask = 'Mình chưa tìm mẫu phụ kiện nào trước đó. Bạn muốn mình tìm vài mẫu không?';
+            if (persistSessionId) {
+              try {
+                await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [persistSessionId, ask]);
+                await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
+              } catch (e) { /* non-fatal */ }
+            }
+            // still persist user action for analytics even without session
+            try {
+              // pass objects (pg will serialize to jsonb) and log errors if any
+              const ctx = { action: 'accessory_select', source: 'quick_reply', sessionId: persistSessionId };
+              const items = { selected: null };
+              await client.query(
+                `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
+                 VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
+                [userId, ctx, items, 'user-action']
+              );
+            } catch (e) {
+              console.warn('[aiService.handleGeneralMessage] ai_recommendations insert failed (no-last)', e && e.stack ? e.stack : e);
+            }
+            return { ask, sessionId: persistSessionId };
+          }
+
+          let recJson = last.items;
+          if (typeof recJson === 'string') {
+            try { recJson = JSON.parse(recJson); } catch (e) { recJson = recJson || {}; }
+          }
+          const accessories = (recJson && recJson.accessories) ? recJson.accessories : [];
+          if (!accessories || accessories.length === 0) {
+            const ask = 'Mình không tìm thấy mẫu cũ để chọn lại. Bạn muốn mình tìm vài mẫu không?';
+            if (persistSessionId) {
+              try {
+                await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [persistSessionId, ask]);
+                await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
+              } catch (e) { /* non-fatal */ }
+            }
+            // persist analytics even without session
+            try {
+              const ctx2 = { action: 'accessory_select_missing', sessionId: persistSessionId };
+              const items2 = { accessories: [] };
+              await client.query(
+                `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
+                 VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
+                [userId, ctx2, items2, 'user-action']
+              );
+            } catch (e) {
+              console.warn('[aiService.handleGeneralMessage] ai_recommendations insert failed (missing)', e && e.stack ? e.stack : e);
+            }
+            return { ask, sessionId: persistSessionId };
+          }
+
+          if (selIdx < 0 || selIdx >= accessories.length) {
+            const ask = `Mẫu ${selIdx+1} không tồn tại, bạn thử chọn lại nhé.`;
+            if (persistSessionId) {
+              try {
+                await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [persistSessionId, ask]);
+                await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
+              } catch (e) { /* ignore */ }
+            }
+            return { ask, sessionId: persistSessionId };
+          }
+
+          const chosen = accessories[selIdx];
+          const chosenVariant = String(chosen.variant_id || chosen.variant || chosen.id || '');
+          const chosenName = chosen.name || chosen.product_name || chosen.title || chosenVariant;
+
+          // persist user selection for analytics / reuse (always attempt, even without session)
+          try {
+            const ctx3 = { action: 'accessory_select', source: 'quick_reply', sessionId: persistSessionId };
+            const items3 = { selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen } };
+            await client.query(
+              `INSERT INTO ai_recommendations (user_id, context, items, model_version, created_at)
+               VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW())`,
+              [
+                userId,
+                ctx3,
+                items3,
+                'user-action'
+              ]
+            );
+          } catch (e) {
+            // Log full detail to help debug why insert didn't persist
+            console.warn('[aiService.handleGeneralMessage] persist user selection to ai_recommendations failed', {
+              err: e && (e.stack || e.message) ? (e.stack || e.message) : e,
+              userId, chosenVariant, selIdx, persistSessionId
+            });
+          }
+
+          const reply = `Đã chọn: ${chosenName}. Mình lưu lựa chọn của bạn. Bạn muốn mình show chi tiết (hình/size) hoặc tư vấn thêm phụ kiện khác?`;
+
+          // persist assistant response into chat history when session available
+          if (persistSessionId) {
+            try {
+              await client.query(
+                `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+                 VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
+                [
+                  persistSessionId,
+                  reply,
+                  { action: 'accessory_selected', selected: { index: selIdx + 1, variant_id: chosenVariant } }
+                ]
+              );
+              await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [persistSessionId]);
+            } catch (e) {
+              console.error('[aiService.handleGeneralMessage] persist assistant selection reply failed', e && e.stack ? e.stack : e);
+            }
+          }
+
+          return { reply, selected: { index: selIdx + 1, variant_id: chosenVariant, raw: chosen }, sessionId: persistSessionId };
+        } catch (e) {
+          console.error('[aiService.handleGeneralMessage] sample quick-reply handler failed', e && e.stack ? e.stack : e);
+          // fallthrough to other handlers
+        }
+      }
+
+      // Handle "Không thích cái nào" — gọi suggestAccessories loại trừ các variant đã hiển thị
+      // if (/\b(không thích cái nào|khong thich cai nao)\b/i.test(String(message || ''))) {
+      //   try {
+      //     // ✅ STEP 1: Persist user message NGAY nếu chưa persist
+      //     if (sessionId && !_userMessagePersisted && message && String(message).trim().length) {
+      //       try {
+      //         await client.query(
+      //           `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
+      //           [sessionId, String(message).trim()]
+      //         );
+      //         await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+      //         _userMessagePersisted = true;
+      //       } catch (e) {
+      //         console.warn('[handleGeneralMessage] persist "không thích" user message failed (non-fatal)', e && e.stack ? e.stack : e);
+      //       }
+      //     }
+
+      //     // ✅ STEP 2: Lấy last accessories recommendation để extract excludeIds + gender/type context
+      //     const lastAccRec = await exports.getLastRecommendationForUser(userId, 'accessories');
+      //     let excludeIds = [];
+      //     let lastContext = {};
+
+      //     if (lastAccRec && lastAccRec.items) {
+      //       let recJson = lastAccRec.items;
+      //       if (typeof recJson === 'string') {
+      //         try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; }
+      //       }
+            
+      //       // 🔑 KEY FIX: accessories lưu trong recJson.accessories (do suggestAccessories persist)
+      //       const accessories = recJson && recJson.accessories ? recJson.accessories : [];
+      //       excludeIds = accessories.map(a => String(a.variant_id || a.variant || a.id || '')).filter(Boolean);
+
+      //       // Extract context từ last recommendation
+      //       if (lastAccRec.context) {
+      //         lastContext = typeof lastAccRec.context === 'string'
+      //           ? JSON.parse(lastAccRec.context)
+      //           : lastAccRec.context;
+      //       }
+      //     }
+
+      //     console.debug('[handleGeneralMessage] "không thích cái nào" detected', {
+      //       excludeCount: excludeIds.length,
+      //       lastContextGender: lastContext?.gender || null,
+      //       lastContextType: lastContext?.message || null
+      //     });
+
+      //     // ✅ STEP 3: Gọi suggestAccessories với excludeVariantIds + context từ last rec
+      //     try {
+      //       const accRes = await exports.suggestAccessories(userId, message || 'Gợi ý thêm mẫu khác', {
+      //         sessionId,
+      //         context: {
+      //           gender: lastContext?.gender || null,
+      //           requestedType: lastContext?.message || null // ← message lưu cái user hỏi ban đầu
+      //         },
+      //         excludeVariantIds: excludeIds,  // ← PASS exclude vào
+      //         _userMessagePersisted: true,    // ← đã persist ở STEP 1
+      //         max: 6
+      //       });
+
+      //       // ✅ STEP 4: Trả response đúng format
+      //       // suggestAccessories tự persist assistant reply + metadata vào DB
+      //       // chỉ cần trả lại cho FE
+      //       if (accRes && Array.isArray(accRes.accessories) && accRes.accessories.length > 0) {
+      //         return {
+      //           reply: accRes.reply || 'Mình tìm thêm vài mẫu khác cho bạn nè.',
+      //           accessories: accRes.accessories,
+      //           data: accRes.accessories,
+      //           followUp: accRes.followUp || null,
+      //           sessionId
+      //         };
+      //       }
+
+      //       // Nếu không tìm được mẫu mới
+      //       return {
+      //         reply: 'Hic, hết mẫu phù hợp rồi ạ. Hiện tại bên mình không còn mẫu nào phù hợp nữa.',
+      //         accessories: [],
+      //         data: [],
+      //         followUp: { quickReplies: [] },
+      //         sessionId
+      //       };
+      //     } catch (e) {
+      //       console.error('[handleGeneralMessage] suggestAccessories after reject failed', e && e.stack ? e.stack : e);
+      //       return {
+      //         reply: 'Luna đang tìm mẫu khác, bạn đợi xíu nha!',
+      //         accessories: [],
+      //         data: [],
+      //         sessionId
+      //       };
+      //     }
+      //   } catch (e) {
+      //     console.error('[handleGeneralMessage] handle "không thích cái nào" failed', e && e.stack ? e.stack : e);
+      //     // Fallthrough to other handlers instead of returning nothing
+      //   }
+      // }
+
+      // Thay thế phần xử lý "Không thích cái nào" (lines ~3090-3150)
+      // Handle "Không thích cái nào" — gọi suggestAccessories loại trừ các variant đã hiển thị
+      if (/\b(không thích cái nào|khong thich cai nao)\b/i.test(String(message || ''))) {
+        try {
+          // ✅ STEP 1: Persist user message NGAY nếu chưa persist
+          if (sessionId && !_userMessagePersisted && message && String(message).trim().length) {
+            try {
+              await client.query(
+                `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
+                [sessionId, String(message).trim()]
+              );
+              await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+              _userMessagePersisted = true;
+            } catch (e) {
+              console.warn('[handleGeneralMessage] persist "không thích" user message failed (non-fatal)', e && e.stack ? e.stack : e);
+            }
+          }
+
+          // ✅ STEP 2: Lấy last accessories recommendation từ CÁCH NGUỒN (không chỉ ai_recommendations)
+          let excludeIds = [];
+          let lastAccessoryQuery = null;
+          let lastAccessoryContext = {};
+
+          // Cố gắng 1: Lấy từ ai_recommendations (nếu suggestAccessories persist)
+          try {
+            const lastAccRec = await exports.getLastRecommendationForUser(userId, 'accessories');
+            if (lastAccRec && lastAccRec.items) {
+              let recJson = lastAccRec.items;
+              if (typeof recJson === 'string') {
+                try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; }
+              }
+              
+              const accessories = recJson && recJson.accessories ? recJson.accessories : [];
+              excludeIds = accessories.map(a => String(a.variant_id || a.variant || a.id || '')).filter(Boolean);
+              
+              // Extract context
+              if (lastAccRec.context) {
+                lastAccessoryContext = typeof lastAccRec.context === 'string'
+                  ? JSON.parse(lastAccRec.context)
+                  : lastAccRec.context;
+                lastAccessoryQuery = lastAccessoryContext?.message || null;
+              }
+            }
+          } catch (e) {
+            console.debug('[handleGeneralMessage] getLastRecommendationForUser (accessories) failed, trying ai_chat_messages', e && e.message ? e.message : e);
+          }
+
+          // 🆕 Cố gắng 2: Lấy từ ai_chat_messages metadata (nếu suggestAccessories chỉ persist metadata)
+          if (excludeIds.length === 0 && sessionId) {
+            try {
+              const aQ = await client.query(
+                `SELECT metadata FROM ai_chat_messages 
+                WHERE session_id = $1 AND role = 'assistant' AND metadata IS NOT NULL 
+                ORDER BY created_at DESC LIMIT 5`,
+                [sessionId]
+              );
+              
+              for (const row of (aQ.rows || [])) {
+                try {
+                  const meta = (typeof row.metadata === 'string') ? JSON.parse(row.metadata) : row.metadata;
+                  if (!meta) continue;
+                  
+                  // 🔑 Tìm kiếm metadata từ suggestAccessories
+                  if (meta.type === 'accessories_suggestion' || meta.type === 'accessories') {
+                    const accessories = meta.accessories || meta.items || [];
+                    if (Array.isArray(accessories) && accessories.length > 0) {
+                      excludeIds = accessories.map(a => String(a.variant_id || a.id || '')).filter(Boolean);
+                      lastAccessoryQuery = meta.message || null;
+                      console.debug('[handleGeneralMessage] recovered accessories from ai_chat_messages metadata', { count: excludeIds.length });
+                      break;
+                    }
+                  }
+                } catch (eMeta) { 
+                  console.debug('[handleGeneralMessage] parse metadata row failed (non-fatal)');
+                }
+              }
+            } catch (eMsg) {
+              console.debug('[handleGeneralMessage] query ai_chat_messages failed (non-fatal)');
+            }
+          }
+
+          console.debug('[handleGeneralMessage] "không thích cái nào" detected', {
+            excludeCount: excludeIds.length,
+            lastQuery: lastAccessoryQuery || null
+          });
+
+          // ✅ STEP 3: Gọi suggestAccessories với excludeVariantIds
+          try {
+            // 🆕 THÊM: Nếu biết query gốc, truyền lại để tìm phụ kiện cùng loại
+            const accRes = await exports.suggestAccessories(userId, lastAccessoryQuery || message || 'Gợi ý thêm mẫu khác', {
+              sessionId,
+              context: lastAccessoryContext,
+              excludeVariantIds: excludeIds,  // ✅ THÊM: truyền exclude list
+              _userMessagePersisted: true,
+              max: 6
+            });
+
+            // ✅ STEP 4: Trả response đúng format
+            if (accRes && Array.isArray(accRes.accessories) && accRes.accessories.length > 0) {
+              return {
+                reply: accRes.reply || 'Mình tìm thêm vài mẫu khác cho bạn nè.',
+                accessories: accRes.accessories,
+                data: accRes.accessories,
+                followUp: accRes.followUp || null,
+                sessionId
+              };
+            }
+
+            // Nếu không tìm được mẫu mới
+            if (accRes && accRes.reply) {
+              return {
+                reply: accRes.reply,
+                accessories: accRes.accessories || [],
+                data: accRes.accessories || [],
+                followUp: accRes.followUp || { quickReplies: [] },
+                sessionId
+              };
+            }
+
+            // Fallback
+            return {
+              reply: 'Hic, hết mẫu phù hợp rồi ạ. Bạn muốn tìm loại phụ kiện khác không?',
+              accessories: [],
+              data: [],
+              followUp: { quickReplies: ['Túi xách', 'Ví da', 'Kính mát'] },
+              sessionId
+            };
+          } catch (e) {
+            console.error('[handleGeneralMessage] suggestAccessories after reject failed', e && e.stack ? e.stack : e);
+            return {
+              reply: 'Luna đang tìm mẫu khác, bạn đợi xíu nha!',
+              accessories: [],
+              data: [],
+              sessionId
+            };
+          }
+        } catch (e) {
+          console.error('[handleGeneralMessage] handle "không thích cái nào" failed', e && e.stack ? e.stack : e);
+          // Fallthrough to other handlers instead of returning nothing
+        }
+      }
+      //2.1.2. Xử lý quickreply "Gợi ý thêm mẫu khác" / "không cần"
+      const normTrim = String(message || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      if (/^(goi y them mau khac|gợi ý thêm mẫu khác)$/i.test(normTrim) || normTrim === 'gợi ý thêm mẫu khác' || normTrim === 'goi y them mau khac') {
+        // persist user's quick-reply if not already saved (best-effort)
+        if (sessionId && !_userMessagePersisted && message && String(message).trim()) {
+          try {
+            await client.query(
+              `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
+              [sessionId, String(message).trim()]
+            );
+            await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+            _userMessagePersisted = true;
+          } catch (e) { /* non-fatal */ console.warn('[aiService] persist quick-reply user failed', e && e.stack ? e.stack : e); }
+        }
+
+        try {
+          // 1) If lastAccessoryRec exists and was an accessories response, prefer suggesting more accessories
+          try {
+            if (lastAccessoryRec && lastAccessoryRec.items) {
+              let json = lastAccessoryRec.items;
+              if (typeof json === 'string') { try { json = JSON.parse(json); } catch (_) { json = null; } }
+              const accessories = json && json.accessories ? json.accessories : [];
+              const excludeIds = accessories.map(a => String(a.variant_id || a.variant || a.id)).filter(Boolean);
+
+              const accRes = await exports.suggestAccessories(userId, message || 'Gợi ý thêm mẫu khác', {
+                sessionId,
+                excludeVariantIds: excludeIds,
+                _userMessagePersisted: _userMessagePersisted,
+                max: 6
+              });
+
+              if (accRes && accRes.ask) return { ask: accRes.ask, sessionId };
+              // ensure assistant reply persisted (suggestAccessories usually persists, but double-check best-effort)
+              if (sessionId && accRes && accRes.reply) {
+                try {
+                  await client.query(
+                    `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+                     VALUES ($1, $2, $3, $4::jsonb, NOW())`,
+                    [sessionId, 'assistant', accRes.reply, JSON.stringify({ type: 'accessories', items: accRes.accessories || [], followUp: accRes.followUp || null })]
+                  );
+                  await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+                } catch (_) { /* ignore duplicate persist errors */ }
+              }
+              return { reply: accRes.reply || 'Mình gợi ý thêm vài mẫu cho bạn nè.', accessories: accRes.accessories || [], data: accRes.accessories || [], followUp: accRes.followUp || null, sessionId };
+            }
+          } catch (ee) {
+            console.warn('[aiService.handleGeneralMessage] accessory-continue attempt failed', ee && ee.stack ? ee.stack : ee);
+          }
+
+          // 2) Otherwise prefer outfit continuation (keep prior behavior)
+          if (lastRec && lastRec.items) {
+            let recJson = lastRec.items;
+            if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch (_) { recJson = null; } }
+            const outfits = recJson && recJson.outfits ? recJson.outfits : [];
+            if (outfits && outfits.length > 0) {
+              const excludeIds = [];
+              for (const o of outfits) if (Array.isArray(o.items)) excludeIds.push(...o.items.map(i => String(i)));
+
+              let occasionFromContext = null, weatherFromContext = null;
+              try {
+                const ctx = typeof lastRec.context === 'string' ? JSON.parse(lastRec.context) : lastRec.context;
+                occasionFromContext = ctx?.occasion || null;
+                weatherFromContext = ctx?.weather || null;
+              } catch (e) { /* ignore */ }
+
+              const rec = await exports.generateOutfitRecommendation(userId, occasionFromContext, weatherFromContext, {
+                sessionId,
+                maxOutfits: 1,
+                excludeVariantIds: excludeIds,
+                more: true
+              });
+              if (rec && rec.ask) return { ask: rec.ask, sessionId };
+              // persist reply if needed
+              if (sessionId && rec && rec.reply && !rec._persistedByGenerator) {
+                try {
+                  await client.query(
+                    `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`,
+                    [sessionId, rec.reply, JSON.stringify({ outfits: rec.outfits || [], followUp: rec.followUp || null })]
+                  );
+                  await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+                } catch (_) { /* non-fatal */ }
+              }
+              return { reply: rec.reply || 'Mình gợi ý thêm 1 set cho bạn.', outfits: rec.outfits || [], followUp: rec.followUp || null, sessionId };
+            }
+          }
+
+          // 3) Final fallback: try outfit generator (safe UX)
+          const recFallback = await exports.generateOutfitRecommendation(userId, null, null, {
+            sessionId,
+            maxOutfits: 1,
+            more: true
+          });
+          if (recFallback && recFallback.ask) return { ask: recFallback.ask, sessionId };
+          return { reply: recFallback.reply || 'Mình gợi ý thêm 1 set cho bạn.', outfits: recFallback.outfits || [], followUp: recFallback.followUp || null, sessionId };
+
+        } catch (e) {
+          console.error('[aiService.handleGeneralMessage] quickReply "Gợi ý thêm mẫu khác" critical error', e && e.stack ? e.stack : e);
+          // return friendly message instead of throwing (prevents frontend "Lỗi kết nối")
+          return { reply: 'Lỗi khi lấy mẫu mới, bạn thử lại sau vài giây nha!', accessories: [], data: [], sessionId };
+        }
+      }
+
+      if (/^(khong can|không cần|khong canh?)$/i.test(normTrim) || normTrim === 'không cần') {
+        const reply = 'Oke bạn, không cần thì thôi nha! Nếu cần mình luôn sẵn sàng nhé 😊';
+        try {
+          if (sessionId) {
+            await client.query(
+              `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`,
+              [sessionId, reply]
+            );
+            await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+          }
+        } catch (e) { /* non-fatal */ }
+        return { reply, sessionId };
+      }
+
+      //2.2. Xử lý phụ kiện followUp "nam", "nữ", "cả hai"
+      const _normQuick = String(message || '').trim().toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ');
+      if (sessionId && /^(nam|nu|ca hai|ca-hai|ca_hai|ca)$/.test(_normQuick)) {
+        // persist user's quick-reply only if we haven't already
+        if (!_userMessagePersisted) {
+          try {
+            await client.query(
+              `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
+              [sessionId, String(message).trim()]
+            );
+            await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+            _userMessagePersisted = true;
+          } catch (e) {
+            console.warn('[aiService.handleGeneralMessage] persist gender quick-reply failed', e && e.stack ? e.stack : e);
+          }
+        }
+
+        // check recent assistant messages for an accessories.ask_gender probe
+        try {
+          const aQ = await client.query(
+            `SELECT id, content, metadata, created_at
+             FROM ai_chat_messages
+             WHERE session_id = $1 AND role = 'assistant' AND metadata IS NOT NULL
+             ORDER BY created_at DESC LIMIT 10`,
+            [sessionId]
+          );
+          // find the most recent assistant ask for accessories/gender and capture its timestamp
+          let askRow = null;
+          for (const r of (aQ.rows || [])) {
+            try {
+              const meta = (typeof r.metadata === 'string') ? JSON.parse(r.metadata) : r.metadata;
+              if (meta && (meta.type === 'accessories.ask_gender' || meta.type === 'accessories.ask')) { askRow = r; break; }
+            } catch (_) { /* ignore parse errors */ }
+          }
+
+          if (askRow) {
+            // map quick-reply -> context.gender
+            let genderVal = null;
+            if (_normQuick === 'nam') genderVal = 'nam';
+            else if (_normQuick === 'nu') genderVal = 'nữ';
+            else genderVal = null; // 'ca hai' => no gender filter
+
+            // Try to recover the original user query that triggered the assistant ask (user message before the ask)
+            let originalUserQuery = null;
+            try {
+              const uQ = await client.query(
+                `SELECT content FROM ai_chat_messages
+                 WHERE session_id = $1 AND role = 'user' AND created_at < $2
+                 ORDER BY created_at DESC LIMIT 1`,
+                [sessionId, askRow.created_at]
+              );
+              if (uQ.rowCount) originalUserQuery = uQ.rows[0].content;
+            } catch (ux) { /* ignore */ }
+
+            // prefer originalUserQuery when available so suggestAccessories knows requestedType (túi/vi/kinh)
+            const queryToUse = originalUserQuery && String(originalUserQuery).trim().length ? String(originalUserQuery) : message;
+
+            const accRes = await exports.suggestAccessories(userId, queryToUse, {
+              sessionId,
+              context: { gender: genderVal },
+              _userMessagePersisted: true,
+              max: opts?.max || 6
+            });
+
+            if (accRes) {
+              if (accRes.ask) return { ask: accRes.ask, sessionId };
+              return { reply: accRes.reply, accessories: accRes.accessories || [], data: accRes.accessories || [], followUp: accRes.followUp || null, sessionId };
+            }
+          }
+        } catch (e) {
+          console.error('[aiService.handleGeneralMessage] handle gender quick-reply failed', e && e.stack ? e.stack : e);
+        }
+      }
+
+      //2.3. Xử lý quickreply "Oke luôn"
+      if (/\boke\s*luôn\b/i.test(lowerMsg)) {
+        const ask = 'Bạn cho mình biết chiều cao và cân nặng (cm/kg) để mình tư vấn size chính xác nhé?';
+        try {
+          if (sessionId) await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, ask]);
+        } catch (e) { console.error('[aiService.handleGeneralMessage] persist ask failed', e && e.stack ? e.stack : e); }
+        return { ask, sessionId };
+      }
+
+      if (/\b(để\s*sau|để\s*sau\s*nha|de\s*sau)\b/i.test(lowerMsg)) {
+        const reply = 'Oke bạn, để sau nha! 😊';
+        try {
+          if (sessionId) {
+            await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, reply]);
+            await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+          }
+        } catch (e) { console.error('[aiService.handleGeneralMessage] persist quick-reply failed', e && e.stack ? e.stack : e); }
+        return { reply, sessionId };
+      }
+
+      // 3) End conversation quick reply
+      if (/\bđủ\s*rồi\b/i.test(lowerMsg) || isGratitude(lowerMsg)){
+        const reply = 'Oke bạn, mình luôn sẵn sàng khi bạn cần nhé! 😊';
+        if (sessionId) {
+          await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, reply]);
+          await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+        }
+        return { reply, sessionId };
+      }
+    } catch (e) {
+      console.error('[aiService.handleGeneralMessage] quickReplies handler error', e && e.stack ? e.stack : e);
+      // fallthrough to normal processing
+    }
+
+    // if slotHints indicates accessories intent, prefer accessory path BEFORE calling outfit generator
+    if (slotHints.wantsAccessories) {
+      console.debug('[aiService.handleGeneralMessage] slotHints indicates wantsAccessories, delegating to suggestAccessories', { message: String(message).slice(0,200) });
+      if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService.handleGeneralMessage.DEBUG] accessory branch triggered by slotHints');
+      const accResult = await exports.suggestAccessories(userId, message, {
+        sessionId,
+        categoryIds: inferAccessorySlugsFromMessage(message),
+        max: 6,
+        _userMessagePersisted
+      });
+
+      if (process.env.DEBUG_AI_SERVICE) {
+        console.debug('[aiService.handleGeneralMessage.DEBUG] suggestAccessories result preview:', {
+          reply: accResult && accResult.reply ? String(accResult.reply).slice(0,400) : null,
+          accessoriesCount: Array.isArray(accResult?.accessories) ? accResult.accessories.length : 0,
+          ask: accResult?.ask || false
+        });
+      }
+      if (accResult.accessories?.length > 0) {
+        return { reply: accResult.reply, accessories: accResult.accessories, followUp: accResult.followUp || null, sessionId };
+      }
+      return { reply: accResult.reply || 'Mình chưa thấy mẫu phụ kiện nào phù hợp, bạn muốn tìm kiểu gì ạ?', accessories: [], followUp: accResult.followUp || null, sessionId };
+      }
+      const accessorySlugs = inferAccessorySlugsFromMessage(message);
+      if(accessorySlugs.length > 0) {
+        console.debug('[AI] Accessory intent detected ', {message, slugs: accessorySlugs});
+
+      const accResult = await exports.suggestAccessories(userId, message, {
+          sessionId,
+          categoryIds: accessorySlugs,
+          max: 5,
+          _userMessagePersisted: _userMessagePersisted
+      });
+
+      if(accResult.accessories?.length > 0){
+         return{
+          reply: accResult.reply,
+          accessories: accResult.accessories,
+          data: accResult.accessories,
+          sessionId
+        };
+      }
+
+      return {
+        reply: accResult.reply || 'Mình chưa thấy mẫu phụ kiện nào phù hợp, bạn muốn tìm kiểu gì ạ?',
+        accessories: [],
+        data: [],
+        sessionId
+      };
+    }
+
+    // helper: resolve simple references ("áo đó", "outfit 2") -> variant id or null
+    const resolveRefFromLastRecommendation = (lastRecLocal, msg) => {
+        if (!lastRecLocal || !msg) return null;
+        let recJson = lastRecLocal.items;
+        if (typeof recJson === 'string') {
+          try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; }
+        }
+        const outfits = (recJson && recJson.outfits) ? recJson.outfits : [];
+
+        // numeric index "outfit 2" or "bộ 1"
+        const idxMatch = String(msg).match(/(?:bộ|outfit|thứ)\s*(\d+)/i);
+        if (idxMatch) {
+          const n = Number(idxMatch[1]);
+          if (!Number.isNaN(n) && outfits[n - 1]) {
+            return Array.isArray(outfits[n - 1].items) && outfits[n - 1].items[0] ? outfits[n - 1].items[0] : null;
+          }
+        }
+
+        const txt = String(msg || '').toLowerCase();
+        const _norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        const wantTop = /\b(áo|cái áo|chiếc áo|top|shirt|blouse|sơ mi|áo len|áo khoác|áo thun|đầm|dress)\b/i.test(txt) || /\bao\b/i.test(txt);
+        const wantBottom = /\b(quần|pants|jean|short|skirt|váy|kaki|trousers|chino)\b/i.test(txt);
+
+        const pickFromMeta = (o, matchTop, matchBottom) => {
+          if (!o || !Array.isArray(o.items)) return null;
+          const meta = Array.isArray(o.meta) ? o.meta : null;
+          if (meta && meta.length === o.items.length) {
+            for (let i = 0; i < meta.length; i++) {
+              const m = meta[i] || {};
+              const pname = _norm(m.product_name || '');
+              const cat = _norm(m.category_name || '');
+              if (matchTop && (pname.includes('ao') || /top|shirt|blouse|dress/.test(cat))) return o.items[i];
+              if (matchBottom && (pname.includes('quan') || /quan|pants|jean|skirt|trousers/.test(cat))) return o.items[i];
+            }
+          }
+          const name = String(o.name || '').toLowerCase();
+          const desc = String(o.description || '').toLowerCase();
+          if (matchTop && (name.includes('áo') || desc.includes('áo'))) return o.items[0];
+          if (matchBottom && (name.includes('quần') || desc.includes('quần'))) return o.items[0];
+          return null;
+        };
+
+        for (const o of outfits) {
+          if (wantTop) {
+            const v = pickFromMeta(o, true, false);
+            if (v) return v;
+          }
+          if (wantBottom) {
+            const v = pickFromMeta(o, false, true);
+            if (v) return v;
+          }
+        }
+
+        if (outfits.length === 1 && Array.isArray(outfits[0].items) && outfits[0].items[0]) return outfits[0].items[0];
+        return null;
+      };
+
+    //const lowerMsg = String(message || '').toLowerCase();
+    const stockIntentRe = /\b(có\s+size|còn\s+size|còn\s+hàng|còn\s+không|còn\s+size\s*[a-z0-9]|có\s+hàng)\b/i;
+    const recommendIntentRe = /\b(tư vấn|gợi ý|chọn\s*size|giúp\s*mình|muốn|gợi ý\s*1|muốn\s*(?:1|một)?\s*(?:bộ|outfit|set|bộ\s*trang\s*phục|bộ\s*đồ)|bộ|outfit|set|mix\s*đồ|phối\s*đồ|basic|đơn giản|văn\s+phòng|công\s+sở)\b/i;
+    const quickSuggestKeywords = /\b(basic|đơn giản|văn phòng|công sở|office|phối đồ|mix đồ|bộ trang phục|cho mình 1 bộ|cho mình một bộ)\b/i;
+    //const slotHints = (typeof extractSlotsFromMessage === 'function') ? extractSlotsFromMessage(message || '') : {};
+
+    // follow-up intents
+    const showMoreIntent = /\b(xem thêm|thêm (?:1|một)? (?:outfit|bộ|set)|thêm giúp|thêm nữa|mình muốn (?:1|một)? (?:outfit|bộ) khác|muốn (?:1|một)? (?:outfit|bộ) khác|outfit khác|bộ khác)? (?:có)\b/i;
+    const colorIntent = /\b(màu|màu gì|màu nào)\b/i;
+    const sizeIntent = /\b(size|cỡ|kích cỡ|chiều cao|cân nặng|tư vấn size)\b/i;
+    const sizeIntentRe = sizeIntent;
+    const colorIntentRe = colorIntent;
+    // 1) show more -> call generateOutfitRecommendation excluding previous variants
+    if (showMoreIntent.test(lowerMsg)) {
+      // try to reuse last recommendation's context so LLM won't ask for occasion/weather again
+      let last = lastRec;
+      if (!last && lastRecommendationAllowed) {
+        try {
+          const lq = await client.query(`SELECT id, items, context FROM ai_recommendations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [userId]);
+          if (lq.rowCount) last = lq.rows[0];
+        } catch (e) { /* ignore */ }
+      }
+      const excludeIds = [];
+      if (last) {
+        // extract variant ids robustly
+        let recJson = last.items;
+        if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; } }
+        const outfits = recJson && recJson.outfits ? recJson.outfits : [];
+        for (const o of outfits) {
+          if (!Array.isArray(o.items)) continue;
+          for (const it of o.items) {
+            if (typeof it === 'string' && it.trim()) excludeIds.push(String(it));
+            else if (it && typeof it === 'object') {
+              if (it.variant_id) excludeIds.push(String(it.variant_id));
+              else if (it.id) excludeIds.push(String(it.id));
+            }
+          }
+        }
+      }
+
+      // prefer to reuse stored context (occasion/weather) if available
+      let occasionFromContext = null;
+      let weatherFromContext = null;
+      if (last && last.context) {
+        try {
+          const ctx = typeof last.context === 'string' ? JSON.parse(last.context) : last.context;
+          occasionFromContext = ctx && ctx.occasion ? ctx.occasion : null;
+          weatherFromContext = ctx && ctx.weather ? ctx.weather : null;
+        } catch (e) { /* ignore */ }
+      }
+
+      try {
+        console.debug('[aiService.handleGeneralMessage.showMore] reusing context', { occasionFromContext, weatherFromContext, excludeCount: excludeIds.length });
+        // Do NOT forward the raw "show more" user message to generator — it may trigger parsing & asking again.
+        const rec = await exports.generateOutfitRecommendation(
+          userId,
+          occasionFromContext, // reuse occasion from last rec when possible
+          weatherFromContext,  // reuse weather from last rec when possible
+          { sessionId, /* message intentionally omitted */ maxOutfits: 1, excludeVariantIds: excludeIds, more: true }
+        );
+        if (rec && rec.outfits && rec.outfits.length) return { reply: rec.reply || rec.message || 'Mình gợi ý thêm 1 set cho bạn.', outfits: rec.outfits, followUp: rec.followUp || null, sessionId };
+        return { reply: 'Mình chưa tìm được set khác, bạn muốn thử phong cách khác không?', outfits: [], followUp: null, sessionId };
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] showMore flow failed', e && e.stack ? e.stack : e);
+        return { reply: 'Mình không tìm được set mới ngay bây giờ, thử lại sau nhé!', outfits: [], followUp: null, sessionId };
+      }
+    }
+
+    // 1.5) change/dislike item intent (keep/replace specific item in last outfit)
+    const changeIntent = /\b(thay\s*đổi|đổi|không\s*thích|ko\s*thích|không\s*ưa|không\s*hợp|không thích mẫu|đổi cái)\b/i;
+    if (changeIntent.test(lowerMsg)) {
+      if (!lastRec) return { ask: 'Bạn đang nói tới bộ outfit trước đó phải không? Mình cần biết bộ nào để đổi giúp bạn nhé.', sessionId };
+      const targetVariant = resolveRefFromLastRecommendation(lastRec, message);
+      if (!targetVariant) return { ask: 'Bạn có thể nói rõ "cái áo đó" hoặc "outfit 2" để mình biết đổi món nào không?', sessionId };
+
+      // find outfit that contains targetVariant (fallback to first outfit)
+      let recJson = lastRec.items;
+      if (typeof recJson === 'string') { try { recJson = JSON.parse(recJson); } catch(e) { recJson = null; } }
+      const outfits = recJson && recJson.outfits ? recJson.outfits : [];
+      let outfit = outfits.find(o => Array.isArray(o.items) && o.items.includes(targetVariant));
+      if (!outfit && outfits.length === 1) outfit = outfits[0];
+
+      const keepIds = Array.isArray(outfit?.items) ? outfit.items.filter(i => String(i) !== String(targetVariant)) : [];
+      const removeIds = [String(targetVariant)];
+
+      // reuse context if available
+      let occasionFromContext = null, weatherFromContext = null;
+      if (lastRec && lastRec.context) {
+        try {
+          const ctx = typeof lastRec.context === 'string' ? JSON.parse(lastRec.context) : lastRec.context;
+          occasionFromContext = ctx && ctx.occasion ? ctx.occasion : null;
+          weatherFromContext = ctx && ctx.weather ? ctx.weather : null;
+        } catch (e) { /* ignore */ }
+      }
+
+      try {
+        const rec = await exports.generateOutfitRecommendation(
+          userId,
+          occasionFromContext,
+          weatherFromContext,
+          {
+            sessionId: sessionId,
+            // message intentionally omitted to force reuse of stored context
+            maxOutfits: 1,
+            excludeVariantIds: removeIds,
+            keepVariantIds: keepIds,
+            more: true
+          }
+        );
+        if (!rec) return { reply: 'Mình chưa tìm được món thay thế ngay, thử lại nhé!', sessionId };
+        if (rec.ask) return { ask: rec.ask, sessionId };
+        return { reply: rec.reply || rec.message || 'Mình gợi ý 1 set khác cho bạn.', outfits: rec.outfits || [], followUp: rec.followUp || null, sessionId };
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] change-item flow failed', e && e.stack ? e.stack : e);
+        return { reply: 'Mình không tìm được món thay thế ngay giờ, thử lại sau nhé!', sessionId };
+      }
+    }
+ 
+    // 2) stock/color/size follow-ups referencing last recommendation
+    if (stockIntentRe.test(lowerMsg) || colorIntent.test(lowerMsg) || sizeIntent.test(lowerMsg)) {
+      const refVariant = resolveRefFromLastRecommendation(lastRec, message);
+      if (!refVariant) {
+        return { ask: 'Bạn đang nói tới món đồ nào trong gợi ý trước đó? Bạn có thể nói "cái áo đó" hoặc "outfit 2" nhé.', sessionId };
+      }
+
+      if (stockIntentRe.test(lowerMsg)) {
+        try {
+          const info = await checkVariantAvailability(refVariant);
+          if (!info) return { reply: 'Mình không tìm thấy sản phẩm này trong kho.', sessionId };
+          const reply = info.stock_qty > 0 ? `Chiếc đó vẫn còn ${info.stock_qty} chiếc trong kho.` : 'Chiếc đó hiện đã hết hàng rồi.';
+          return { reply, sessionId };
+        } catch (e) {
+          return { reply: 'Mình không truy xuất được kho lúc này, thử lại sau nhé.', sessionId };
+        }
+      }
+
+      if (colorIntent.test(lowerMsg)) {
+        try {
+          // If reference not resolved yet, try to infer variant from last recommendation metadata or recent assistant messages
+          if (!refVariant) {
+            // helper: normalize tokens
+            const normalize = (s='') => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+            const tokens = normalize(message).split(/\s+/).filter(Boolean);
+            // try lastRec metadata first
+            if (lastRec && lastRec.items) {
+              try {
+                let recJson = lastRec.items;
+                if (typeof recJson === 'string') recJson = JSON.parse(recJson);
+                const outfits = (recJson && recJson.outfits) ? recJson.outfits : [];
+                for (const o of outfits) {
+                  const metaArr = Array.isArray(o.meta) ? o.meta : [];
+                  for (const m of metaArr) {
+                    const pname = String(m.product_name || '').toLowerCase();
+                    const pcat = String(m.category_name || '').toLowerCase();
+                    for (const t of tokens) {
+                      if (!t) continue;
+                      if ((pname && pname.includes(t)) || (pcat && pcat.includes(t))) {
+                        if (m.variant_id) { refVariant = String(m.variant_id); break; }
+                      }
+                    }
+                    if (refVariant) break;
+                  }
+                  if (refVariant) break;
+                }
+              } catch (eMeta) { /* ignore parse errors */ }
+            }
+
+            // fallback: inspect recent assistant messages' metadata (if still no match)
+            if (!refVariant && sessionId) {
+              try {
+                const aQ = await client.query(`SELECT metadata, content FROM ai_chat_messages WHERE session_id = $1 AND role = 'assistant' AND metadata IS NOT NULL ORDER BY created_at DESC LIMIT 10`, [sessionId]);
+                for (const row of (aQ.rows || [])) {
+                  try {
+                    const meta = (typeof row.metadata === 'string') ? JSON.parse(row.metadata) : row.metadata;
+                    if (!meta) continue;
+                    // meta may contain outfits -> meta.outfits[].meta[].variant_id or saved outfit/items
+                    const outfits = meta.outfits || (meta.outfit ? [meta.outfit] : null);
+                    if (Array.isArray(outfits)) {
+                      for (const o of outfits) {
+                        const metaArr = Array.isArray(o.meta) ? o.meta : [];
+                        for (const m of metaArr) {
+                          const pname = String(m.product_name || '').toLowerCase();
+                          const pcat = String(m.category_name || '').toLowerCase();
+                          for (const t of tokens) {
+                            if (!t) continue;
+                            if ((pname && pname.includes(t)) || (pcat && pcat.includes(t))) {
+                              if (m.variant_id) { refVariant = String(m.variant_id); break; }
+                            }
+                          }
+                          if (refVariant) break;
+                        }
+                        if (refVariant) break;
+                      }
+                    }
+                    if (refVariant) break;
+                  } catch (ex) { /* ignore row parse errors */ }
+                }
+              } catch (eRows) { /* ignore DB fetch errors */ }
+            }
+          }
+
+          if (!refVariant) {
+            // final user-friendly ask when we still can't infer the reference
+            return { ask: 'Bạn đang nói tới món đồ nào trong gợi ý trước đó? Bạn có thể nói "cái quần baggy đó" hoặc "outfit 1" để mình kiểm tra màu giúp nhé.', sessionId };
+          }
+          // primary: get colors for the product (via helper)
+          let variants = [];
+          try {
+            variants = await getVariantColorsByVariant(refVariant);
+          } catch (eInner) {
+            console.error('[aiService.handleGeneralMessage] getVariantColorsByVariant failed', eInner && eInner.stack ? eInner.stack : eInner);
+            variants = [];
+          }
+
+          // defensive fallback: query product_variants by product_id if helper returned empty
+          if ((!variants || variants.length === 0)) {
+            try {
+              const info = await checkVariantAvailability(refVariant);
+              if (info && info.product_id) {
+                const vQ = await client.query(
+                  `SELECT id AS variant_id, color_name, sizes, stock_qty
+                   FROM product_variants
+                   WHERE product_id = $1
+                   ORDER BY color_name NULLS LAST, sizes NULLS LAST`,
+                  [info.product_id]
+                );
+                variants = (vQ.rows || []).map(r => ({
+                  variant_id: String(r.variant_id),
+                  product_id: info.product_id || null,
+                  color_name: r.color_name || null,
+                  size_name: r.sizes || null,
+                  stock_qty: (typeof r.stock_qty === 'number') ? r.stock_qty : null,
+                  available: (typeof r.stock_qty === 'number') ? (r.stock_qty > 0) : null
+                }));
+              }
+            } catch (eFallback) {
+              console.error('[aiService.handleGeneralMessage] fallback fetch variant colors failed', eFallback && eFallback.stack ? eFallback.stack : eFallback);
+            }
+          }
+
+          if (!variants || variants.length === 0) {
+            return { reply: 'Mình không tìm thấy màu cho sản phẩm này.', sessionId };
+          }
+
+          // build color list and product name
+          const info = await checkVariantAvailability(refVariant).catch(()=>null);
+          const productName = info && info.product_name ? info.product_name : (variants[0].product_name || variants[0].product_id ? `Sản phẩm` : 'Sản phẩm này');
+
+          // distinct color strings with availability tag
+          // Return only distinct color names (no availability text)
+          const colors = variants.map(v => (v.color_name || v.color || '').toString().trim());
+          // remove empty / unknown placeholders and dedupe
+          const unique = Array.from(new Set(colors)).filter(c => c && c.toLowerCase() !== 'không rõ');
+
+          if (unique.length === 0) {
+            return { reply: 'Mình không tìm thấy màu cho sản phẩm này.', sessionId };
+          }
+          return { reply: `${productName} có các màu: ${unique.join(', ')}.`, sessionId };
+        } catch (e) {
+          console.error('[aiService.handleGeneralMessage] colorIntent final error', e && e.stack ? e.stack : e);
+          return { reply: 'Mình không lấy được thông tin màu lúc này, thử lại sau nhé.', sessionId };
+        }
+      }
+
+      if (sizeIntent.test(lowerMsg)) {
+        try {
+          const uQ = await client.query(`SELECT height, weight, bust, waist, hip FROM users WHERE id = $1 LIMIT 1`, [userId]);
+          const u = uQ.rows[0];
+          if (!u || (!u.height && !u.weight && !u.bust && !u.waist && !u.hip)) {
+            return { ask: 'Bạn cho mình biết chiều cao và cân nặng (cm/kg) để mình tư vấn size chính xác nhé?', sessionId };
+          }
+          const pvQ = await client.query(`SELECT product_id FROM product_variants WHERE id = $1 LIMIT 1`, [refVariant]);
+          const productId = pvQ.rowCount ? pvQ.rows[0].product_id : null;
+          let guides = [];
+          if (productId) {
+            const prodQ = await client.query(`SELECT category_id FROM products WHERE id = $1 LIMIT 1`, [productId]);
+            const categoryId = prodQ.rowCount ? prodQ.rows[0].category_id : null;
+            if (categoryId) {
+              const sgQ = await client.query(`SELECT size_label, min_height, max_height, min_weight, max_weight FROM size_guides WHERE category_id = $1`, [categoryId]);
+              guides = sgQ.rows || [];
+            }
+          }
+          const suggested = pickSizeFromGuides(guides, u) || 'Không chắc — mình cần biết số đo vòng ngực/eo/hông để tư vấn kỹ hơn.';
+          return { reply: `Mình gợi ý size: ${suggested}. Bạn muốn mình lưu size này hay so sánh với S/M/L không?`, sessionId };
+        } catch (e) {
+          return { reply: 'Mình không truy xuất được thông tin size lúc này, thử lại sau nhé.', sessionId };
+        }
+      }
+    }
+
+    // PRIORITY: nếu user hỏi "thông tin / xem chi tiết" => trả chi tiết món trước, KHÔNG gọi generator
+    const itemDetailIntent = /\b(thông tin chi tiết|thông tin|chi tiết|xem chi tiết|cho mình thông tin|cho mình xem chi tiết|cho mình thông tin của|chi tiết của)\b/i;
+    if (itemDetailIntent.test(lowerMsg)) {
+      try {
+        const itemRes = await exports.retrieveLastItemDetails(userId, sessionId, message);
+        if (itemRes) {
+          if (itemRes.ask) return { ask: itemRes.ask, sessionId };
+          return { reply: itemRes.reply, item: itemRes.item, sessionId };
+        }
+        // if retrieve didn't return useful data, fall through to normal flow
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] retrieveLastItemDetails failed', e && e.stack ? e.stack : e);
+        // fallthrough to recommendation flow
+      }
+    }
+
+    // detect product search intent based on keywords - user hỏi sản phẩm
+    const typeMap = [
+      // ÁO
+      { slug: 'ao-thun',          kws: ['áo thun', 'ao thun', 't-shirt', 'tshirt', 'tee', 'thun'] },
+      { slug: 'ao-so-mi',         kws: ['sơ mi', 'so mi', 'áo sơ mi', 'ao so mi', 'shirt', 'blouse'] },
+      { slug: 'ao-hoodie-sweater',kws: ['hoodie', 'áo hoodie', 'ao hoodie', 'sweater', 'áo sweater', 'áo len', 'ao len'] },
+      { slug: 'ao-varsity-bomber',kws: ['áo khoác', 'ao khoac', 'áo bomber', 'bomber', 'varsity', 'jacket', 'áo jacket', 'coat', 'blazer'] },
+
+      // QUẦN
+      { slug: 'quan-jean',        kws: ['quần jean', 'quan jean', 'jean', 'jeans', 'denim'] },
+      { slug: 'quan-short',       kws: ['quần short', 'quan short', 'short', 'quần đùi', 'quan dui'] },
+      { slug: 'quan-ni',          kws: ['quần nỉ', 'quan ni', 'quần thun', 'quan thun'] },
+      { slug: 'quan-kaki',        kws: ['quần kaki', 'quan kaki', 'kaki'] },
+      { slug: 'quan-au-ong-suong',kws: ['quần âu', 'quan au', 'quần tây', 'quan tay', 'trousers', 'chino', 'kaki'] },
+
+      // TÚI XÁCH NỮ
+      { slug: 'tui-xach-nu',      kws: ['túi xách nữ', 'tui xach nu', 'túi cầm tay', 'túi đeo chéo', 'tui deo cheo', 'bag', 'handbag'] },
+      { slug: 'tui-xach-nam',     kws: ['túi xách nam', 'tui xach nam'] },
+
+      // PHỤ KIỆN
+      { slug: 'vi-nam',           kws: ['ví nam', 'vi nam', 'wallet nam', 'bóp nam'] },
+      { slug: 'vi-nu',            kws: ['ví nữ', 'vi nu', 'wallet nữ', 'bóp nữ'] },
+      { slug: 'kinh-mat',         kws: ['kính mát', 'kinh mat', 'kính râm', 'sunglasses', 'kính nắng'] },
+      { slug: 'gong-kinh',        kws: ['gọng kính', 'gong kinh', 'khung kính'] }
+    ];
+
+    // Tạo danh sách tất cả từ khóa để detect intent
+    const allKeywords = typeMap.flatMap(item => item.kws);
+    const productSearchIntentRe = new RegExp('\\b(' + allKeywords.join('|') + ')\\b', 'i');
+
+    // Kiểm tra xem tin nhắn có chứa từ khóa tìm kiếm sản phẩm không
+    if (productSearchIntentRe.test(lowerMsg)) {
+      try {
+        const res = await exports.searchProducts(userId, message, {
+          sessionId,
+          limit: 6
+        });
+
+        // searchProducts đã tự persist reply + metadata + recommendation audit
+        // Chỉ cần trả về cho frontend
+        return {
+          reply: res.reply,
+          products: res.products || [],
+          data: res.products || [],  // giữ cả 2 để tương thích FE cũ
+          followUp: res.followUp || null,
+          sessionId: res.sessionId || sessionId
+        };
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] product search failed', e && e.stack ? e.stack : e);
+        return {
+          reply: 'Mình đang tìm hàng mà hơi chậm một chút, bạn thử lại sau vài giây nhé!',
+          products: [],
+          data: [],
+          sessionId
+        };
+      }
+    }
+
+    // thì xử lý branch phụ kiện NGAY lập tức (không gọi generator outfit).
+    const accessoryRequestForExistingOutfitRe = /\b(tư vấn thêm phụ kiện|tư vấn phụ kiện|thêm phụ kiện|chọn thêm phụ kiện|phụ kiện cho (?:outfit|bộ)|phụ kiện cho bộ|cho outfit này|cho bộ này|bộ vừa rồi|outfit vừa rồi)\b/i;
+    if (accessoryRequestForExistingOutfitRe.test(String(message || '')) || slotHints.wantsAccessories) {
+       if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService.handleGeneralMessage.DEBUG] accessoryRequestForExistingOutfitRe matched:', String(message).slice(0,200));
+      try {
+        // suggestAccessories đã có logic lấy last recommendation khi detect cụm "outfit này" bên trong nó;
+        // truyền _userMessagePersisted để tránh double-persist nếu cần.
+        const accRes = await exports.suggestAccessories(userId, message, {
+          sessionId,
+          _userMessagePersisted
+        });
+
+        if (process.env.DEBUG_AI_SERVICE) console.debug('[aiService.handleGeneralMessage.DEBUG] suggestAccessories (outfit branch) returned', {
+          reply: accRes && accRes.reply ? String(accRes.reply).slice(0,400) : null,
+          accessoriesCount: Array.isArray(accRes?.accessories) ? accRes.accessories.length : 0,
+          ask: !!accRes?.ask
+        });
+        if (accRes) {
+          if (accRes.ask) return { ask: accRes.ask, sessionId };
+          if (Array.isArray(accRes.accessories) && accRes.accessories.length > 0) {
+            return { reply: accRes.reply, accessories: accRes.accessories, data: accRes.accessories, followUp: accRes.followUp || null, sessionId };
+          }
+          // nếu không có accessories nhưng suggestAccessories trả reply/ask thì trả luôn (data empty)
+          if (accRes.reply) return { reply: accRes.reply, accessories: accRes.accessories || [], data: accRes.accessories || [], sessionId };
+        }
+        // nếu suggestAccessories không tìm được gì, fallthrough để có thể gọi generator nếu cần
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] accessory-priority branch failed', e && e.stack ? e.stack : e);
+        // tiếp tục flow bình thường
+      }
+    }
+
+    // If user asked for new recommendation (original flow)
+    if (recommendIntentRe.test(lowerMsg) || quickSuggestKeywords.test(lowerMsg) || slotHints.occasion || slotHints.style || (slotHints.productHints && slotHints.productHints.length)) {
+      try {
+        const rec = await exports.generateOutfitRecommendation(userId, null, null, {
+          sessionId,
+          message,
+          maxOutfits: opts?.maxOutfits || 3,
+          _userMessagePersisted, // inform generator that we've already saved the user message
+          inferredWantsAccessories: slotHints.wantsAccessories || false
+        });
+
+        if (!rec) {
+          console.error('[aiService.handleGeneralMessage] generateOutfitRecommendation returned empty');
+          return { reply: 'Mình đang tạm thời không thể gợi ý được. Thử lại sau nhé!', outfits: [], sessionId };
+        }
+
+        if (rec.ask) {
+          const askText = rec.ask;
+          if (sessionId) {
+            try {
+              if(rec.outfits || rec.followUp){
+                await client.query(
+                  `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`,
+                  [sessionId, askText, JSON.stringify({ outfits: rec.outfits || [], followUp: rec.followUp || null })]
+                );
+              } else {
+                await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, askText]);
+              }
+              await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+            } catch (e) {
+              console.error('[aiService.handleGeneralMessage] persist ask failed', e && e.stack ? e.stack : e);
+            }
+          }
+          return { ask: askText, outfits: Array.isArray(rec.outfits) ? rec.outfits : [], sessionId };
+        }
+
+        const outfitsArr = Array.isArray(rec.outfits) ? rec.outfits : [];
+        const replyText = rec.reply || rec.message || (outfitsArr.length ? `Mình đã gợi ý ${outfitsArr.length} set cho bạn.` : 'Mình chưa tìm được set phù hợp, bạn muốn mình thử phong cách khác không?');
+
+        if (sessionId && replyText && !rec._persistedByGenerator) {
+          try {
+            // Nếu generator không tự lưu, persist reply và kèm metadata khi có followUp/outfits
+            if (rec && (rec.followUp || (Array.isArray(outfitsArr) && outfitsArr.length))) {
+              await client.query(
+                `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at) VALUES ($1,'assistant',$2,$3::jsonb,NOW())`,
+                [sessionId, replyText, JSON.stringify({ outfits: outfitsArr, followUp: rec.followUp || null })]
+              );
+            } else {
+              await client.query(`INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1,'assistant',$2,NOW())`, [sessionId, replyText]);
+            }
+            await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+          } catch (e) {
+            console.error('[aiService.handleGeneralMessage] persist reply failed', e && e.stack ? e.stack : e);
+          }
+        }
+
+        return { reply: replyText, outfits: outfitsArr, followUp: rec.followUp || null, sessionId };
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] delegate to generateOutfitRecommendation failed', e && e.stack ? e.stack : e);
+      }
+    }
+
+    // Replace/adjust follow-up handling for stock/size/color intents
+    // (insert into the place that handles resolvedRef and size/stock/color intents)
+    {
+      // e.g. const targetVariantId = resolveRefFromLastRecommendation(lastRec, message) || variantHintFromMsg;
+      const targetVariantId = (typeof resolveRefFromLastRecommendation === 'function') ? resolveRefFromLastRecommendation(lastRec, message) : null;
+      if (targetVariantId) {
+        // Handle "size / availability" question
+        if (sizeIntentRe.test(lowerMsg) || /\b(size|size|cỡ|M|L|XL|S)\b/i.test(message)) {
+          const info = await checkVariantAvailability(targetVariantId);
+          if (!info) return { reply: 'Mình không tìm thấy sản phẩm đó nữa.' };
+          // only respond with product name + availability for requested size (no numeric stock)
+          const sizeRequestedMatch = message.match(/\b(size|size|cỡ|M|L|XL|S)\b/i);
+          const sizeLabel = sizeRequestedMatch ? sizeRequestedMatch[0] : info.size;
+          const availabilityText = info.available ? 'còn hàng' : 'hết hàng';
+          const reply = `${info.product_name || 'Sản phẩm'} — size ${sizeLabel}: ${availabilityText}.`;
+          // optionally persist assistant message, return structured minimal data (no counts)
+          return { reply, selected: { product_id: info.product_id, variant_id: info.variant_id } };
+        }
+
+        // Handle "color preference / list colors" user utterance
+        if (colorIntentRe.test(lowerMsg) || /màu|color|đỏ|đen|xanh|kem|trắng/i.test(message)) {
+          // list COLORS only for same product_id
+          const colors = await getVariantColorsByVariant(targetVariantId);
+          if (!colors || colors.length === 0) return { reply: 'Mình không tìm thấy màu nào cho sản phẩm đó.' };
+          // Build human-friendly list: "Đen (còn hàng), Kem (hết hàng)."
+          const parts = [];
+          const productName = (await (async () => {
+            const c = await checkVariantAvailability(targetVariantId);
+            return c ? c.product_name : null;
+          })()) || 'Sản phẩm';
+          for (const c of colors) {
+            parts.push(`${c.color}${c.available ? ' (còn hàng)' : ' (hết hàng)'}`);
+          }
+          const reply = `Sản phẩm ${productName} có các màu: ${parts.join(', ')}.`;
+          return { reply, selected: { product_id: colors[0].product_id || null } };
+        }
+      }
+    }
+
+    // If nothing matched, fallback reply
+    return { reply: 'Mình chưa hiểu ý bạn lắm. Bạn muốn mình gợi ý outfit hay hỏi về sản phẩm trong gợi ý trước đó?', outfits: [], sessionId };
+  } catch (err) {
+    console.error('[aiService.handleGeneralMessage] uncaught error', err && err.stack ? err.stack : err);
+    return { reply: 'Mình đang bận thử đồ, thử lại sau nhé!', outfits: [], sessionId: opts?.sessionId || null };
+  } finally {
+    try { client.release(); } catch (e) { /* ignore */ }
+  }
 };
+
+// async function handleMeasurementInput(userId, message, sessionId, client) {
+//   const normalized = String(message || '')
+//     .toLowerCase()
+//     .normalize('NFD')
+//     .replace(/[\u0300-\u036f]/g, ''); // bỏ dấu tiếng Việt
+
+//   // Regex tìm height: 160-190cm, 1.65m, 170 cm, 1m65, v.v.
+//   const heightMatch = normalized.match(/(\d{1,3}(?:\.\d{1,2})?)\s*(cm|m|met)/);
+//   let height = null;
+//   if (heightMatch) {
+//     const val = parseFloat(heightMatch[1]);
+//     height = heightMatch[2].startsWith('m') ? Math.round(val * 100) : Math.round(val); // chuyển m → cm
+//     height = Math.min(Math.max(height, 100), 250); // giới hạn hợp lý
+//   }
+
+//   // Regex tìm weight: 50kg, 60 kí, 55 cân, 65kg, v.v.
+//   const weightMatch = normalized.match(/(\d{1,3}(?:\.\d{1,2})?)\s*(kg|ki|kí|can|cân)/);
+//   let weight = null;
+//   if (weightMatch) {
+//     weight = Math.round(parseFloat(weightMatch[1]));
+//     weight = Math.min(Math.max(weight, 30), 200); // giới hạn hợp lý
+//   }
+
+//   // Nếu tìm thấy trong tin nhắn → ưu tiên dùng cái này
+//   if (height !== null || weight !== null) {
+//     return {
+//       height,
+//       weight,
+//       source: 'message'
+//     };
+//   }
+
+//   // Nếu không có trong tin nhắn → fallback về profile
+//   try {
+//     const res = await client.query(
+//       `SELECT height, weight FROM users WHERE id = $1 LIMIT 1`,
+//       [userId]
+//     );
+//     if (res.rows[0] && (res.rows[0].height || res.rows[0].weight)) {
+//       return {
+//         height: res.rows[0].height || null,
+//         weight: res.rows[0].weight || null,
+//         source: 'profile'
+//       };
+//     }
+//   } catch (err) {
+//     console.error('[extractMeasurementsFromMessage] failed to read from profile', err);
+//   }
+
+//   return {
+//     height: null,
+//     weight: null,
+//     source: 'none'
+//   };
+// };
+
+
 
 // ---  helper: normalize items to prefer Top+Bottom, avoid same-category duplicates ---
 const normalizeOutfitItemsGlobal = (items = [], namesByVariant = {}, maxItems = 4) => {
@@ -3447,7 +3664,6 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
          VALUES ($1, 'user', $2, NOW())`,
         [sessionId, String(message).trim()]
       );
-      // keep caller informed that message was persisted
       opts._userMessagePersisted = true;
       await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
     }
@@ -3756,13 +3972,30 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
     if (top.length === 7) quickReplies.push('Xem thêm');
     quickReplies.push('Không thích cái nào');
     const followUp = { quickReplies, extra: [] };
+
+    const fullAccessories = top.map(t => ({
+      variant_id: String(t.variant_id),
+      product_id: String(t.product_id || ''),
+      name: t.name,
+      description: t.description || null,
+      color: t.color,
+      price: t.price,
+      category_name: t.category_name || '',
+      image_url: t.image_url || null
+    }));
   
     // Lưu tin nhắn assistant
     if (sessionId) {
       await client.query(
         `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
          VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
-        [sessionId, reply, JSON.stringify({ type: 'accessories', items: top, followUp })]
+        [sessionId, reply, JSON.stringify({
+          type: 'accessories_suggestion',
+          accessories: fullAccessories,
+          items: top,
+          followUp,
+          message: String(message || '')
+        })]
       );
     }
 
@@ -3781,6 +4014,7 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
             color: t.color,
             price: t.price
           })) }),
+          JSON.stringify({ accessories: fullAccessories }),  // THÊM: full list
           'luna-accessories-v1'
         ]
       );
@@ -3788,7 +4022,11 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
       console.warn('[suggestAccessories] failed to persist ai_recommendations (non-fatal)', e && e.stack ? e.stack : e);
     }
 
-    return { reply, accessories: top, data: top, followUp };
+    return { 
+      reply, 
+      accessories: fullAccessories, 
+      data: fullAccessories, 
+      followUp };
 
   } catch (err) {
     console.error('[suggestAccessories] error', err);

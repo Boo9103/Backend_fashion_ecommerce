@@ -363,10 +363,11 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
     }
     if (intent.type === 'more') {
       try {
-        // Load last recommendation (use service helper) and reuse its context (occasion/weather)
-        const lastRec = typeof aiService.getLastRecommendationForUser === 'function' ? await aiService.getLastRecommendationForUser(userId) : null;
+        const lastRec = typeof aiService.getLastRecommendationForUser === 'function' 
+          ? await aiService.getLastRecommendationForUser(userId) 
+          : null;
 
-        // Debug: luôn log lastRec shape so we can see why branch chosen
+        // Debug log
         try {
           console.debug('[aiRecommendationController.more] lastRec preview', {
             lastRecId: lastRec?.id || null,
@@ -376,18 +377,19 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
           });
         } catch (e) { /* ignore logging errors */ }
 
-        // build excludeVariantIds from lastRec (support legacy arrays, outfits, items, or { excluded: [...] } shape)
-        const excludeVariantIds = []; // danh sách variant_id cần loại trừ
+        // ❌ HIỆN TẠI: Build excludeVariantIds từ TẤT CẢ outfits (chỉ đúng cho outfit flow)
+        // Điều này không work cho product_search vì products không nằm trong outfits array
+        const excludeVariantIds = [];
         if (lastRec && lastRec.items) {
           let raw = lastRec.items;
           if (typeof raw === 'string') {
             try { raw = JSON.parse(raw); } catch (e) { /* keep raw string */ }
           }
 
-          // If object contains "excluded" array (seen in logs), use it
+          // ❌ VẤNĐỀ: chỉ lấy từ parsed.outfits, không lấy từ parsed.products
           if (raw && typeof raw === 'object' && Array.isArray(raw.excluded)) {
-            excludeVariantIds.push(...raw.excluded.filter(Boolean)); //nếu có excluded -> dùng luôn
-          } else { //còn k có thì duyệt qua toàn bộ items/outfits để lấy variant_id -> để loại trừ
+            excludeVariantIds.push(...raw.excluded.filter(Boolean));
+          } else {
             const parsed = parseRecommendationItems(raw);
             if (Array.isArray(parsed.outfits) && parsed.outfits.length) {
               for (const o of parsed.outfits) {
@@ -402,7 +404,110 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
           }
         }
 
-        // decide accessory vs outfit path using robust helper (also consider context.action)
+        // Persist user message for history
+        const persistSessionId = session_id || (lastRec && lastRec.session_id) || null;
+        if (persistSessionId && (message && String(message).trim())) {
+          try {
+            const chatPayload = { sessionId: persistSessionId, role: 'user', content: String(message).trim() };
+            if (typeof aiService.saveChatMessage === 'function') {
+              await aiService.saveChatMessage(userId, chatPayload);
+              console.debug('[aiRecommendationController.more] saveChatMessage OK', { sessionId: persistSessionId });
+            } else if (typeof aiService.appendChatMessage === 'function') {
+              await aiService.appendChatMessage(userId, chatPayload);
+            }
+          } catch (e) {
+            console.error('[aiRecommendationController.more] persist user message failed', e && e.stack ? e.stack : e);
+          }
+        }
+
+        // 🆕 THÊM: Detect product_search path
+        let isProductSearchPath = false;
+        let lastSearchQuery = null;
+
+        if (lastRec) {
+          let contextObj = lastRec.context;
+          if (typeof contextObj === 'string') {
+            try { contextObj = JSON.parse(contextObj); } catch (e) { contextObj = {}; }
+          }
+
+          // Check if last recommendation was product_search
+          if (contextObj?.type === 'product_search' || contextObj?.action === 'product_search') {
+            isProductSearchPath = true;
+            lastSearchQuery = contextObj?.query || null;
+            console.debug('[aiRecommendationController.more] product_search path detected', { lastSearchQuery });
+          }
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // 🆕 BRANCH 1: Product Search "Xem thêm" 
+        // ─────────────────────────────────────────────────────────────────
+        if (isProductSearchPath && lastSearchQuery) {
+          try {
+            const excludeVariantsForSearch = [];
+            if (lastRec && lastRec.items) {
+              let raw = lastRec.items;
+              if (typeof raw === 'string') {
+                try { raw = JSON.parse(raw); } catch (e) { raw = null; }
+              }
+
+              //Extract từ .products array (đây là key cho product_search)
+              if (raw && Array.isArray(raw.products)) {
+                excludeVariantsForSearch.push(
+                  ...raw.products.map(p => String(p.variant_id || p.id)).filter(Boolean)
+                );
+              }
+              // Fallback: nếu products không có, fallback về items (compatibility)
+              else if (raw && Array.isArray(raw.items)) {
+                excludeVariantsForSearch.push(
+                  ...raw.items.map(p => String(p.variant_id || p.id)).filter(Boolean)
+                );
+              }
+            }
+
+            console.debug('[aiRecommendationController.more] calling searchProducts with exclusions', { 
+              query: lastSearchQuery, 
+              excludeCount: excludeVariantsForSearch.length  //dùng excludeVariantsForSearch thay vì excludeVariantIds
+            });
+
+            const searchRes = await aiService.searchProducts(userId, lastSearchQuery, {
+              sessionId: persistSessionId,
+              limit: 6,
+              excludeVariantIds: excludeVariantsForSearch  //truyền đúng list
+            });
+
+            if (!searchRes) {
+              console.error('[aiRecommendationController.more] searchProducts returned empty (product_search more)');
+              return res.status(500).json({ success: false, message: 'Luna đang tìm sản phẩm, thử lại sau nha!' });
+            }
+
+            // Persist search recommendation
+            try {
+              await aiService.saveRecommendation(userId, {
+                type: 'product_search',
+                items: searchRes.products || [],
+                context: { query: lastSearchQuery, type: 'product_search' },
+                sessionId: persistSessionId
+              });
+            } catch (e) {
+              console.warn('[aiRecommendationController.more] save product_search recommendation failed', e);
+            }
+
+            return res.json({
+              success: true,
+              message: searchRes.reply || 'Mình tìm thêm vài mẫu khác cho bạn nè.',
+              data: searchRes.products || [],
+              followUp: searchRes.followUp || null,
+              sessionId: searchRes.sessionId || persistSessionId
+            });
+          } catch (err) {
+            console.error('[aiRecommendationController.more] searchProducts error (product_search more)', err && err.stack ? err.stack : err);
+            // fallthrough to accessory/outfit branches
+          }
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // BRANCH 2: Accessory "Xem thêm" (existing)
+        // ─────────────────────────────────────────────────────────────────
         let isAccessoryPath = false;
         try {
           if (lastRec) {
@@ -411,7 +516,6 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
             const accessoryList = extractAccessoryList(parsed, lastRec.context);
             if (Array.isArray(accessoryList) && accessoryList.length > 0) isAccessoryPath = true;
 
-            // parse context and check action-based hints (e.g. accessory_reject_all)
             let ctx = lastRec.context;
             if (typeof ctx === 'string') {
               try { ctx = JSON.parse(ctx); } catch (e) { /* keep string */ }
@@ -422,42 +526,48 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
               if (a.includes('accessory') || a.includes('phụ kiện') || a.includes('reject')) isAccessoryPath = true;
             }
           }
-        } catch (e) { /* ignore parse errors */ }
+        } catch (e) { /* ignore */ }
 
-        console.debug('[aiRecommendationController.more] reuse context', { occasionFromContext: null, weatherFromContext: null, excludeCount: excludeVariantIds.length, isAccessoryPath });
-
-        // Persist user message for history regardless (best-effort)
-        const persistSessionId = session_id || (lastRec && lastRec.session_id) || null;
-        if (persistSessionId && (message && String(message).trim())) {
-          try {
-            const chatPayload = { sessionId: persistSessionId, role: 'user', content: String(message).trim() };
-            if (typeof aiService.saveChatMessage === 'function') {
-              await aiService.saveChatMessage(userId, chatPayload);
-              console.debug('[aiRecommendationController.more] saveChatMessage OK', { sessionId: persistSessionId });
-            } else if (typeof aiService.appendChatMessage === 'function') {
-              await aiService.appendChatMessage(userId, chatPayload);
-              console.debug('[aiRecommendationController.more] appendChatMessage OK', { sessionId: persistSessionId });
-            } else {
-              console.debug('[aiRecommendationController.more] no chat-save function available on aiService; skipping chat persist');
-            }
-          } catch (e) {
-            console.error('[aiRecommendationController.more] persist incoming "more" user message failed', e && e.stack ? e.stack : e);
-          }
-        }
-
-        // If accessory path -> call suggestAccessories (so accessory flow + persistence is used)
         if (isAccessoryPath) {
           try {
+
+            const excludeVariantsForAccessory = [];
+            if (lastRec && lastRec.items) {
+              let raw = lastRec.items;
+              if (typeof raw === 'string') {
+                try { raw = JSON.parse(raw); } catch (e) { raw = null; }
+              }
+
+              // ✅ Extract từ .accessories array (đây là key cho accessory response)
+              if (raw && Array.isArray(raw.accessories)) {
+                excludeVariantsForAccessory.push(
+                  ...raw.accessories.map(a => String(a.variant_id || a.id)).filter(Boolean)
+                );
+              }
+              // Fallback: nếu accessories không có, fallback về items (compatibility)
+              else if (raw && Array.isArray(raw.items)) {
+                excludeVariantsForAccessory.push(
+                  ...raw.items.map(a => String(a.variant_id || a.id)).filter(Boolean)
+                );
+              }
+            }
+
+            console.debug('[aiRecommendationController.more] calling suggestAccessories with exclusions', { 
+              query: message,
+              excludeCount: excludeVariantsForAccessory.length  //dùng excludeVariantsForAccessory
+            });
+
             const accRes = await aiService.suggestAccessories(userId, message || 'Gợi ý thêm mẫu khác', {
               sessionId: persistSessionId,
-              excludeVariantIds,
+              excludeVariantIds: excludeVariantsForAccessory, //truyền đúng list
               max: 6
             });
 
             if (!accRes) {
-              console.error('[aiRecommendationController.handleChat] suggestAccessories returned empty (more/accessory)');
+              console.error('[aiRecommendationController.more] suggestAccessories returned empty');
               return res.status(500).json({ success: false, message: 'Luna đang bận chọn phụ kiện, thử lại sau nha!' });
             }
+
             if (accRes.ask) {
               const askMessage = (typeof accRes.ask === 'string') ? accRes.ask : (accRes.ask && accRes.ask.prompt) ? accRes.ask.prompt : null;
               const payload = {
@@ -465,10 +575,10 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
                 message: accRes.reply || askMessage || 'Mình cần hỏi thêm một chút để gợi ý chính xác hơn.',
                 sessionId: accRes.sessionId || persistSessionId
               };
-              // only include ask if it's not a plain boolean true
               if (typeof accRes.ask !== 'boolean') payload.ask = accRes.ask;
               return res.json(payload);
             }
+
             return res.json({
               success: true,
               message: accRes.reply || 'Mình đã tìm thêm vài mẫu cho bạn.',
@@ -477,12 +587,14 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
               sessionId: accRes.sessionId || persistSessionId
             });
           } catch (e) {
-            console.error('[aiRecommendationController.handleChat] suggestAccessories (more) error', e && e.stack ? e.stack : e);
-            // fallback to outfit flow below
+            console.error('[aiRecommendationController.more] suggestAccessories error', e && e.stack ? e.stack : e);
+            // fallthrough to outfit
           }
         }
 
-        // Fallback: reuse last recommendation context for outfit generation
+        // ─────────────────────────────────────────────────────────────────
+        // BRANCH 3: Outfit "Xem thêm" (existing - fallback)
+        // ─────────────────────────────────────────────────────────────────
         let occasionFromContext = null;
         let weatherFromContext = null;
         if (lastRec && lastRec.context) {
@@ -490,24 +602,23 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
             const ctx = typeof lastRec.context === 'string' ? JSON.parse(lastRec.context) : lastRec.context;
             occasionFromContext = ctx && ctx.occasion ? ctx.occasion : null;
             weatherFromContext = ctx && ctx.weather ? ctx.weather : null;
-          } catch (e) { /* ignore parse errors */ }
+          } catch (e) { /* ignore */ }
         }
 
-        // IMPORTANT: do NOT forward the "more" user message to generator (may trigger parser to ask)
         const moreRes = await aiService.generateOutfitRecommendation(userId, occasionFromContext, weatherFromContext, {
           productId: product_id,
           variantId: variant_id,
-          sessionId: session_id || null,
-          // message intentionally omitted to force reuse of stored context
+          sessionId: persistSessionId || null,
           more: true,
           excludeVariantIds,
           maxOutfits: 1
         });
 
         if (!moreRes) {
-          console.error('[aiRecommendationController.handleChat] generateOutfitRecommendation returned empty (more)');
+          console.error('[aiRecommendationController.more] generateOutfitRecommendation returned empty');
           return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
         }
+
         if (moreRes.ask) {
           const askMessage = (typeof moreRes.ask === 'string') ? moreRes.ask : (moreRes.ask && moreRes.ask.prompt) ? moreRes.ask.prompt : null;
           const payload = {
@@ -525,8 +636,8 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
           sessionId: moreRes.sessionId || null
         });
       } catch (err) {
-        console.error('[aiRecommendationController.handleChat] generateOutfitRecommendation (more) error', err && err.stack ? err.stack : err);
-        return res.status(500).json({ success: false, message: 'Luna đang bận thử đồ, thử lại sau nha!' });
+        console.error('[aiRecommendationController.more] unexpected error', err && err.stack ? err.stack : err);
+        return res.status(500).json({ success: false, message: 'Luna đang bận, thử lại sau nha!' });
       }
     }
 

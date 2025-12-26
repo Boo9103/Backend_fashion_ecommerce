@@ -300,3 +300,57 @@ exports.getProductFromVariant = async (variantId) => {
         client.release();
     }
 };
+
+exports.checkStockQuantity = async (variantIds) => {
+    if(!Array.isArray(variantIds) || variantIds.length === 0) {
+        const err = new Error('variantIds must be a non-empty array');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const client = await pool.connect();
+    try{
+        // Lấy thông tin tồn kho cho các variantId đã cho
+        const q = `
+            SELECT 
+                pv.id AS variant_id,
+                pv.stock_qty AS stock_quantity,
+                pv.sku,
+                p.name AS product_name,
+                p.status AS product_status
+            FROM product_variants pv
+            INNER JOIN products p ON pv.product_id = p.id
+            WHERE pv.id = ANY($1::uuid[])
+            `;
+
+        const { rows } = await client.query(q, [variantIds]);
+        // Check if all requested variants were found
+        if (rows.length !== variantIds.length) {  
+            const foundIds = rows.map(r => r.variant_id);
+            const notFound = variantIds.filter(id => !foundIds.includes(id));
+            console.warn('[checkStockQuantity] some variants not found', { notFound });
+        }
+
+        // Tạo một bản đồ từ variantId đến thông tin tồn kho
+        const stockData = rows.map(row => ({
+            variantId: row.variant_id,
+            stockQty: parseInt(row.stock_quantity, 10),  //stock_qty → stock_quantity (alias)
+            productName: row.product_name,
+            sku: row.sku,
+            productStatus: row.product_status
+        }));
+
+        console.debug('[checkStockQuantity] stock check completed', {
+            checkedCount: variantIds.length,
+            foundCount: rows.length,
+            availableCount: stockData.length
+        });
+
+        return stockData;
+    }catch (error) {
+        console.error('[checkStockQuantity] error', error && error.stack ? error.stack : error);
+        throw error;
+    } finally {
+        client.release();
+    }
+};
