@@ -23,7 +23,7 @@ exports.createSupplier = async (req, res) => {
       return res.status(404).json({ message: error.message });
     }
     return res.status(500).json({
-      message: 'Server error',
+      message: error.message || 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
