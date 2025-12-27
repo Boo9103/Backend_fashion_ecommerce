@@ -102,7 +102,8 @@ exports.getHomeProducts = async ({ type = 'all', suppliers = [], limit = 8, curs
       const useCursorNewest = cursor !== undefined && cursor !== null;
       const resp = await productService.getProducts({
         limit: perPage,
-        order,
+        order: 'desc',
+        sort_by: 'created_at',
         ...(useCursorNewest ? { cursor } : {})
       }).catch(() => ({ products: [], nextCursor: null }));
 
@@ -123,9 +124,15 @@ exports.getReviewsByProduct = async (productId, {page = 1, limit = 10} = {}) => 
     try {
       //list reviews
       const q = `
-        SELECT p.name AS product_name, r.id as review_id, r.user_id, r.rating, r.comment, COALESCE(r.images, '[]'::jsonb) AS images, r.created_at
+        SELECT p.name AS product_name, r.id as review_id, r.user_id, r.rating, r.comment, COALESCE(r.images, '[]'::jsonb) AS images, r.created_at,
+            CASE 
+              WHEN TRIM(COALESCE(u.full_name, '')) != '' THEN TRIM(u.full_name)
+              WHEN TRIM(COALESCE(u.name, '')) != '' THEN TRIM(u.name)
+              ELSE 'Khách hàng ẩn danh'
+            END AS user_name
         FROM reviews r
         JOIN products p On p.id = r.product_id
+        JOIN users u ON u.id = r.user_id
         WHERE product_id = $1
         ORDER BY created_at DESC
         LIMIT $2 OFFSET $3        
