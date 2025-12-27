@@ -700,6 +700,7 @@ exports.getProductById = async (productId) => {
       p.price,
       p.sale_percent,
       p.is_flash_sale,
+      p.status,
       c.name AS category_name,
       s.name AS supplier_name,
       COALESCE(
@@ -814,7 +815,7 @@ exports.updateProductStatus = async (productId, status) => {
     //update trạng thái inactive -> active hoặc ngược lại
     const updateRes = await client.query(
       `UPDATE products 
-      SET satus = $1, updated_at = NOW()
+      SET status = $1, updated_at = NOW()
       WHERE id = $2
       RETURNING *`,
       [normalizedStatus, productId]
