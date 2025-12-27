@@ -50,17 +50,40 @@ exports.getUserProfileAndBehavior = async (userId) => {
     }
 };
 
-exports.getChatSessionById = async (user_id) => {
-    const client = await pool.connect();
-    try {
-        const res = await client.query(
-          `SELECT id FROM ai_chat_sessions WHERE user_id = $1 LIMIT 1 RETURNING id`, [user_id]
-        );
-        if (res.rowCount === 0) return null;
-        return res.rows[0];
-    } finally {
-        client.release();
-    }
+exports.getChatSessionById = async (userId) => {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `SELECT id, user_id, last_message_at
+       FROM ai_chat_sessions
+       WHERE user_id = $1
+       ORDER BY last_message_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+
+    return res.rowCount > 0 ? res.rows[0] : null;
+  } catch (error) {
+    console.error('[getChatSessionById] error', error && error.stack ? error.stack : error);
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+exports.updateSessionTimestamp = async (sessionId) => {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`,
+      [sessionId]
+    );
+  } catch (error) {
+    console.error('[updateSessionTimestamp] error', error && error.stack ? error.stack : error);
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
 //start or resume chat session when user opens chatbox
@@ -1495,9 +1518,14 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
   const client = await pool.connect();
   
   try {
-    const { message = '', sessionId = null, lastRecommendationAllowed = true } = opts || {};
-    console.log('[aiService.handleGeneralMessage] start (no early persist)', { userId, sessionId, message: String(message).slice(0,120) });
-
+    const { message = '', sessionId = null, lastRecommendationAllowed = true, userRole = null } = opts || {};
+    console.log('[aiService.handleGeneralMessage] start (no early persist)', { 
+      userId, 
+      sessionId, 
+      message: String(message).slice(0,120),
+      userRole  //Log để debug
+    });
+    
     // persist user message only if valid
     let _userMessagePersisted = false;
     if (sessionId && message && String(message).trim().length) {
@@ -1508,8 +1536,68 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
         );
         await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
         _userMessagePersisted = true;
+        console.debug('[aiService.handleGeneralMessage] user message persisted', { sessionId });
       } catch (e) {
         console.error('[aiService.handleGeneralMessage] persist user message failed', e && e.stack ? e.stack : e);
+      }
+    }
+
+    const revenueIntentRe = /\b(doanh thu|báo cáo|revenue|report|tính tiền|tổng tiền|sale|sales)\b/i;
+    
+    if (revenueIntentRe.test(String(message).toLowerCase())) {
+      console.debug('[handleGeneralMessage] revenue intent detected', { userId, userRole });
+      
+      // User is ADMIN → show revenue report
+      if (userRole === 'admin') {
+        try {
+          const revRes = await exports.handleAdminRevenueQuery(userId, message, {
+            sessionId,
+            _userMessagePersisted
+          });
+
+          return {
+            type: 'admin_report',
+            reply: revRes.reply || revRes.message,
+            data: revRes.data,
+            breakdown: revRes.breakdown || [],
+            meta: revRes.meta || {},
+            sessionId
+          };
+        } catch (e) {
+          console.error('[handleGeneralMessage] admin revenue query failed', e && e.stack ? e.stack : e);
+          return {
+            reply: 'Mình gặp lỗi khi xử lý báo cáo. Admin thử lại sau nhé!',
+            data: null,
+            sessionId
+          };
+        }
+      }
+      // CASE 2: User is NOT admin → deny access with friendly message
+      else {
+        console.warn('[handleGeneralMessage] non-admin user attempted revenue query', { userId, userRole });
+        
+        const reply = '❌ Xin lỗi, chỉ admin mới có quyền xem báo cáo doanh thu. Bạn muốn tìm gì khác không?';
+        
+        // Persist assistant reply
+        if (sessionId) {
+          try {
+            await client.query(
+              `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'assistant', $2, NOW())`,
+              [sessionId, reply]
+            );
+            await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+          } catch (e) {
+            console.warn('[handleGeneralMessage] persist unauthorized reply failed (non-fatal)', e && e.stack ? e.stack : e);
+          }
+        }
+
+        //CRITICAL: RETURN here to prevent fallthrough!
+        return {
+          type: 'info',
+          reply,
+          data: null,
+          sessionId
+        };
       }
     }
 
@@ -1527,6 +1615,91 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
         console.error('[aiService.handleGeneralMessage] load last recommendation failed', e && e.stack ? e.stack : e);
       }
     }
+
+    // // Xử lý admin revenue query (chỉ dành cho admin)
+    // if (userRole === 'admin') {
+    //   const revenueIntentRe = /\b(doanh thu|báo cáo|revenue|report|tính tiền|tổng tiền|sale|sales)\b/i;
+    //   if (revenueIntentRe.test(String(message).toLowerCase())) {
+      
+    //     try {
+    //       console.debug('[handleGeneralMessage] admin revenue intent detected', { userId, message: String(message).slice(0,200) });
+          
+    //       // Persist user message nếu chưa
+    //       if (sessionId && !_userMessagePersisted && message && String(message).trim()) {
+    //         try {
+    //           await client.query(
+    //             `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
+    //             [sessionId, String(message).trim()]
+    //           );
+    //           await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+    //           _userMessagePersisted = true;
+    //         } catch (e) {
+    //           console.warn('[handleGeneralMessage] persist admin message failed', e && e.stack ? e.stack : e);
+    //         }
+    //       }
+
+    //       // Call admin revenue handler
+    //       const revRes = await exports.handleAdminRevenueQuery(userId, message, {
+    //         sessionId
+    //       });
+
+    //       return {
+    //         type: 'admin_report',
+    //         reply: revRes.reply || revRes.message,
+    //         data: revRes.data,
+    //         breakdown: revRes.breakdown || [],
+    //         meta: revRes.meta || {},
+    //         sessionId
+    //       };
+    //     } catch (e) {
+    //       console.error('[handleGeneralMessage] admin revenue query failed', e && e.stack ? e.stack : e);
+    //       return {
+    //         reply: 'Mình gặp lỗi khi xử lý báo cáo. Admin thử lại sau nhé!',
+    //         data: null,
+    //         sessionId
+    //       };
+    //     }
+    //   }
+    //   else {
+    //     console.warn('[handleGeneralMessage] non-admin user attempted revenue query', { userId, userRole });
+    
+    //     // Persist user message
+    //     if (sessionId && !_userMessagePersisted && message && String(message).trim()) {
+    //       try {
+    //         await client.query(
+    //           `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
+    //           [sessionId, String(message).trim()]
+    //         );
+    //         await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+    //         _userMessagePersisted = true;
+    //       } catch (e) {
+    //         console.warn('[handleGeneralMessage] persist non-admin message failed', e && e.stack ? e.stack : e);
+    //       }
+    //     }
+
+    //     const reply = '❌ Xin lỗi, chỉ admin mới có quyền xem báo cáo doanh thu. Bạn muốn tìm gì khác không?';
+        
+    //     // Persist assistant reply
+    //     if (sessionId) {
+    //       try {
+    //         await client.query(
+    //           `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'assistant', $2, NOW())`,
+    //           [sessionId, reply]
+    //         );
+    //         await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+    //       } catch (e) {
+    //         console.warn('[handleGeneralMessage] persist unauthorized reply failed (non-fatal)', e && e.stack ? e.stack : e);
+    //       }
+    //     }
+
+    //     return {
+    //       type: 'info',
+    //       reply,
+    //       data: null,
+    //       sessionId
+    //     };
+    //   }
+    // }
 
     // Debug: surface lastRec content so we can see if context exists / is parseable
     try {
@@ -2420,7 +2593,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       // Handle "Không thích cái nào" — gọi suggestAccessories loại trừ các variant đã hiển thị
       if (/\b(không thích cái nào|khong thich cai nao)\b/i.test(String(message || ''))) {
         try {
-          // ✅ STEP 1: Persist user message NGAY nếu chưa persist
+          // STEP 1: Persist user message NGAY nếu chưa persist
           if (sessionId && !_userMessagePersisted && message && String(message).trim().length) {
             try {
               await client.query(
@@ -2434,7 +2607,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
             }
           }
 
-          // ✅ STEP 2: Lấy last accessories recommendation từ CÁCH NGUỒN (không chỉ ai_recommendations)
+          //STEP 2: Lấy last accessories recommendation từ CÁCH NGUỒN (không chỉ ai_recommendations)
           let excludeIds = [];
           let lastAccessoryQuery = null;
           let lastAccessoryContext = {};
@@ -2463,7 +2636,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
             console.debug('[handleGeneralMessage] getLastRecommendationForUser (accessories) failed, trying ai_chat_messages', e && e.message ? e.message : e);
           }
 
-          // 🆕 Cố gắng 2: Lấy từ ai_chat_messages metadata (nếu suggestAccessories chỉ persist metadata)
+          // STEP 2: Lấy last accessories recommendation từ CÁCH NGUỒN (không chỉ ai_recommendations)
           if (excludeIds.length === 0 && sessionId) {
             try {
               const aQ = await client.query(
@@ -2502,9 +2675,9 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
             lastQuery: lastAccessoryQuery || null
           });
 
-          // ✅ STEP 3: Gọi suggestAccessories với excludeVariantIds
+          // STEP 3: Gọi suggestAccessories với excludeVariantIds
           try {
-            // 🆕 THÊM: Nếu biết query gốc, truyền lại để tìm phụ kiện cùng loại
+            //Nếu biết query gốc, truyền lại để tìm phụ kiện cùng loại
             const accRes = await exports.suggestAccessories(userId, lastAccessoryQuery || message || 'Gợi ý thêm mẫu khác', {
               sessionId,
               context: lastAccessoryContext,
@@ -2513,7 +2686,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
               max: 6
             });
 
-            // ✅ STEP 4: Trả response đúng format
+            // STEP 4: Trả response đúng format
             if (accRes && Array.isArray(accRes.accessories) && accRes.accessories.length > 0) {
               return {
                 reply: accRes.reply || 'Mình tìm thêm vài mẫu khác cho bạn nè.',
@@ -4750,6 +4923,235 @@ exports.getRevenueReport = async (opts = {}) => {
       // Fallback tương tự như trên...
     }
     throw err;
+  } finally {
+    client.release();
+  }
+};
+
+exports.handleAdminRevenueQuery = async (userId, message = '', opts = {}) => {
+  const client = await pool.connect();
+
+  try {
+    //xác định user là admin
+    const userQ = await client.query(
+      `SELECT id, role FROM users WHERE id = $1 LIMIT 1`,
+      [userId]
+    );
+    if (!userQ.rowCount || userQ.rows[0].role !== 'admin') {
+      const err = new Error('Unauthorized: only admin can access Revue data');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    //parse date range from message (VD: "doanh thu từ 2023-01-01 đến 2023-01-31")
+    const parseRevenueMessage = (text = '') => {
+      const m = String(text).toLocaleLowerCase();
+
+      //xác định từ khóa breakdown
+      let breakdown = 'daily';
+      if (/\b(tuần|week|weekly)\b/i.test(m)) breakdown = 'weekly';
+      if (/\b(tháng|month|monthly)\b/i.test(m)) breakdown = 'monthly';
+      
+      //tìm range ngày
+      let startDate = null;
+      let endDate = null;
+
+      //p1: "từ DD/MM/YYYY đến DD/MM/YYYY" or "từ 2024-01-01 đến 2024-01-31"
+      const dateRangeMatch = m.match(/từ\s+(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(?:đến|tới)\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      if (dateRangeMatch) {
+        const [, d1, m1, y1, d2, m2, y2] = dateRangeMatch;
+        // Create Date from components (Month is 0-indexed in JS)
+        startDate = new Date(Number(y1), Number(m1) - 1, Number(d1), 0, 0, 0, 0);
+        endDate = new Date(Number(y2), Number(m2) - 1, Number(d2), 23, 59, 59, 999);
+      }
+
+      // Parse YYYY-MM-DD format (ISO)
+      if (!startDate) {
+        const isoMatch = m.match(/từ\s+(\d{4})-(\d{2})-(\d{2})\s+(?:đến|tới)\s+(\d{4})-(\d{2})-(\d{2})/);
+        if (isoMatch) {
+          const [, y1, m1, d1, y2, m2, d2] = isoMatch;
+          startDate = new Date(Number(y1), Number(m1) - 1, Number(d1), 0, 0, 0, 0);
+          endDate = new Date(Number(y2), Number(m2) - 1, Number(d2), 23, 59, 59, 999);
+        }
+      }
+
+      //p2: "tháng N" (month N)
+      const monthMatch = m.match(/tháng\s+(\d{1,2})/);
+      if (monthMatch && !startDate) {
+        const month = Number(monthMatch[1]);
+        const now = new Date();
+        const year = now.getFullYear();
+        startDate = new Date(year, month - 1, 1);
+        endDate = new Date(year, month, 0); // last day of month
+      }
+
+      //p3: last N days. ví dụ "7 ngày gần đây"
+      if (!startDate) {
+        const daysMatch = m.match(/(\d{1,3})\s+(?:ngày|day)(?:\s+gần\s+đây)?/);
+        if (daysMatch) {
+          const days = Number(daysMatch[1]);
+          endDate = new Date();
+          endDate.setHours(23, 59, 59, 999);
+          startDate = new Date(endDate.getTime() - days * 24 * 60 * 60 * 1000);
+        }
+      }
+
+      //mặc định: last 30 days
+      if (!startDate || !endDate) {
+        endDate = new Date();
+        startDate = new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+      }
+
+      //validate dates
+      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+        console.warn('[parseRevenueMessage] invalid dates detected, using defaults', {
+          text: text.slice(0, 100),
+          startDate: startDate.toString(),
+          endDate: endDate.toString()
+        });
+        endDate = new Date();
+        endDate.setHours(23, 59, 59, 999);
+        startDate = new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+      }
+
+      return { startDate, endDate, breakdown };
+    };
+
+    const parsed = parseRevenueMessage(message);
+    const startDate = opts.startDate || parsed.startDate;
+    const endDate = opts.endDate || parsed.endDate;
+    const breakdown = opts.breakdown || parsed.breakdown;
+
+    console.debug('[handleAdminRevenueQuery] parsed', {
+      userId,
+      startDate: startDate.toISOString(),
+      endDate: endDate.toISOString(),
+      breakdown
+    });
+
+    //3. lấy báo cáo doanh thu
+    let revenueData = null;
+    try {
+      revenueData = await exports.getRevenueReport({
+        startDate,
+        endDate,
+        breakdown
+      });
+    }catch (e) {
+      console.error('[handleAdminRevenueQuery] getRevenueReport failed', e && e.stack ? e.stack : e);
+      // Return friendly error instead of throwing
+      const errorReply = `Mình không lấy được dữ liệu doanh thu lúc này (${e && e.message ? e.message : 'lỗi DB'}). Admin có thể thử lại sau vài phút nhé.`;
+      return {
+        message: errorReply,
+        reply: errorReply,
+        data: null,
+        breakdown: [],
+        sessionId: opts.sessionId
+      };
+    }
+
+    //4. format reply
+    const formatCurrency = (n) => {
+      const num = Number(n || 0);
+      if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M đ';
+      if (num >= 1_000) return (num / 1_000).toFixed(0) + 'K đ';
+      return num.toLocaleString('vi-VN') + ' vnđ';
+    };
+
+    const totalFormatted = formatCurrency(revenueData.total);
+    const dateRangeStr = `${startDate.toLocaleDateString('vi-VN')} - ${endDate.toLocaleDateString('vi-VN')}`;
+    
+    // Build breakdown details
+    let breakdownText = '';
+    if (Array.isArray(revenueData.breakdown) && revenueData.breakdown.length > 0) {
+      const lines = revenueData.breakdown.map(item => {
+        const key = item.date || item.week_start || item.month_start || 'N/A';
+        const val = formatCurrency(item.value);
+        return `  • ${key}: ${val}`;
+      }).join('\n');
+      breakdownText = `\nChi tiết theo ${breakdown}:\n${lines}`;
+    }
+
+    const reply = `📊 Báo cáo doanh thu (${breakdown})\n\n`
+      + `Kỳ: ${dateRangeStr}\n`
+      + `Tổng doanh thu: ${totalFormatted}`
+      + breakdownText
+      + `\n\nBạn muốn xem báo cáo khác (tháng khác, range khác) không?`;
+
+
+      //5. Persist to chat history (optional, for audit)
+      if (opts.sessionId) {
+      try {
+        await client.query(
+          `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+           VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
+          [
+            opts.sessionId,
+            reply,
+            JSON.stringify({
+              type: 'admin_revenue_report',
+              startDate: startDate.toISOString(),
+              endDate: endDate.toISOString(),
+              breakdown,
+              total: revenueData.total,
+              itemCount: Array.isArray(revenueData.breakdown) ? revenueData.breakdown.length : 0
+            })
+          ]
+        );
+        await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [opts.sessionId]);
+      } catch (e) {
+        console.warn('[handleAdminRevenueQuery] persist to chat history failed (non-fatal)', e && e.stack ? e.stack : e);
+      }
+    }
+
+    //6. Persist audit log (who accessed what, when)
+    // try {
+    //   await client.query(
+    //     `INSERT INTO admin_audit_logs (user_id, action, details, created_at)
+    //      VALUES ($1, $2, $3::jsonb, NOW())`,
+    //     [
+    //       userId,
+    //       'revenue_query_via_chat',
+    //       JSON.stringify({
+    //         startDate: startDate.toISOString(),
+    //         endDate: endDate.toISOString(),
+    //         breakdown,
+    //         total: revenueData.total
+    //       })
+    //     ]
+    //   );
+    // } catch (e) {
+    //   console.warn('[handleAdminRevenueQuery] audit log insert failed (non-fatal)', e && e.stack ? e.stack : e);
+    // }
+
+    return {
+      reply,
+      data: revenueData,
+      breakdown: revenueData.breakdown || [],
+      sessionId: opts.sessionId,
+      meta: {
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
+        breakdown,
+        total: revenueData.total
+      }
+    };
+  }catch (err) {
+    console.error('[handleAdminRevenueQuery] error', err && err.stack ? err.stack : err);
+    
+    // Handle authorization error
+    if (err.statusCode === 403) {
+      return {
+        reply: 'Bạn không có quyền xem báo cáo doanh thu. Chỉ admin mới được phép.',
+        data: null,
+        sessionId: opts.sessionId
+      };
+    }
+    return {
+      reply: 'Mình gặp lỗi khi lấy doanh thu. Admin thử lại sau nhé!',
+      data: null,
+      sessionId: opts.sessionId
+    };
   } finally {
     client.release();
   }

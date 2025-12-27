@@ -174,6 +174,8 @@ exports.loadSessionMessages = async (req, res) => {
 exports.handleChat = async (req, res) => {
   try {
     const userId = req.user?.id || null;
+    const userRole = req.user?.role || null;
+
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
 
     const { message, product_id, variant_id, occasion, weather, session_id } = req.body || {};
@@ -188,8 +190,53 @@ exports.handleChat = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Empty message: call /api/ai/chat/start (startSession) to open chat or provide a message.' });
     }
 
+    if (userRole === 'admin') {
+      const revenueIntentRe = /\b(doanh thu|báo cáo|revenue|report|tính tiền|tổng tiền|sale|sales)\b/i;
+      if (revenueIntentRe.test(String(message).toLowerCase())) {
+        console.debug('[aiRecommendationController.handleChat] admin revenue intent detected', { userId });
+        
+        try {
+          // Persist user message nếu chưa
+          if (session_id && message && String(message).trim()) {
+            try {
+              await aiService.saveChatMessage(userId, {
+                sessionId: session_id,
+                role: 'user',
+                content: String(message).trim()
+              });
+              await aiService.updateSessionTimestamp(session_id);
+            } catch (e) {
+              console.warn('[handleChat] persist admin message failed', e && e.stack ? e.stack : e);
+            }
+          }
+
+          // 🔑 Call ONLY for admin revenue
+          const revRes = await aiService.handleAdminRevenueQuery(userId, message, {
+            sessionId: session_id
+          });
+
+          return res.json({
+            success: true,
+            type: 'admin_report',
+            message: revRes.reply,
+            data: revRes.data,
+            breakdown: revRes.breakdown || [],
+            meta: revRes.meta || {},
+            sessionId: revRes.sessionId
+          });
+        } catch (err) {
+          console.error('[handleChat] admin revenue query failed', err && err.stack ? err.stack : err);
+          return res.status(500).json({
+            success: false,
+            message: 'Mình gặp lỗi khi xử lý báo cáo. Admin thử lại sau nhé!',
+            error: err && err.message ? err.message : 'Unknown error'
+          });
+        }
+      }
+    }
+
     const intent = typeof detectSimpleIntent === 'function' ? detectSimpleIntent(message) : { type: 'default' };
-console.debug('[aiRecommendationController.handleChat] detected intent:', intent);
+    console.debug('[aiRecommendationController.handleChat] detected intent:', intent);
 
     if (intent.type === 'select') {
       try {
@@ -377,7 +424,7 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
           });
         } catch (e) { /* ignore logging errors */ }
 
-        // ❌ HIỆN TẠI: Build excludeVariantIds từ TẤT CẢ outfits (chỉ đúng cho outfit flow)
+        // Build excludeVariantIds từ TẤT CẢ outfits (chỉ đúng cho outfit flow)
         // Điều này không work cho product_search vì products không nằm trong outfits array
         const excludeVariantIds = [];
         if (lastRec && lastRec.items) {
@@ -386,7 +433,7 @@ console.debug('[aiRecommendationController.handleChat] detected intent:', intent
             try { raw = JSON.parse(raw); } catch (e) { /* keep raw string */ }
           }
 
-          // ❌ VẤNĐỀ: chỉ lấy từ parsed.outfits, không lấy từ parsed.products
+          // VẤN ĐỀ: chỉ lấy từ parsed.outfits, không lấy từ parsed.products
           if (raw && typeof raw === 'object' && Array.isArray(raw.excluded)) {
             excludeVariantIds.push(...raw.excluded.filter(Boolean));
           } else {
