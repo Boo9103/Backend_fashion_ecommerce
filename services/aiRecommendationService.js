@@ -3355,7 +3355,7 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
 
     // Tạo danh sách tất cả từ khóa để detect intent
     const allKeywords = typeMap.flatMap(item => item.kws);
-    const productSearchIntentRe = new RegExp('\\b(' + allKeywords.join('|') + ')\\b', 'i');
+    const productSearchIntentRe = new RegExp('^(?:' + allKeywords.join('|') + ')$', 'i');
 
     // Kiểm tra xem tin nhắn có chứa từ khóa tìm kiếm sản phẩm không
     if (productSearchIntentRe.test(lowerMsg)) {
