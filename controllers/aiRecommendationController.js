@@ -750,6 +750,58 @@ exports.handleChat = async (req, res) => {
       }
     }
 
+    const lowerMsg = String(message || '').toLowerCase();
+    const latestProductIntentRe = /\b(sản phẩm mới nhất|sản phẩm mới|hàng mới|sp mới|cái gì mới|mới nhất|mới về|vừa về|có gì mới)\b/i;
+    const isLatestProductIntent = latestProductIntentRe.test(lowerMsg);
+    
+    if (isLatestProductIntent) {
+      try {
+        console.debug('[aiRecommendationController.handleChat] latest product intent detected', { userId });
+        
+        // Persist user message nếu chưa
+        const persistSessionId = session_id || null;
+        if (persistSessionId && message && String(message).trim()) {
+          try {
+            await aiService.saveChatMessage(userId, {
+              sessionId: persistSessionId,
+              role: 'user',
+              content: String(message).trim()
+            });
+            await aiService.updateSessionTimestamp(persistSessionId);
+          } catch (e) {
+            console.warn('[handleChat] persist latest-product user message failed (non-fatal)', e && e.stack ? e.stack : e);
+          }
+        }
+
+        const latestRes = await aiService.getLatestProductsByLastRecommendation(userId, persistSessionId);
+
+        // Nếu user chưa có recommendation trước đó → hỏi xem liệu có muốn xem sản phẩm mới không
+        if (latestRes.ask) {
+          return res.json({
+            success: true,
+            message: latestRes.ask,
+            sessionId: persistSessionId
+          });
+        }
+
+        return res.json({
+          success: true,
+          type: 'latest_products',
+          message: latestRes.reply,
+          data: latestRes.products || [],
+          followUp: latestRes.followUp || null,
+          sessionId: latestRes.sessionId || persistSessionId
+        });
+      } catch (err) {
+        console.error('[handleChat] latest products flow error', err && err.stack ? err.stack : err);
+        return res.status(500).json({ 
+          success: false, 
+          message: 'Luna đang tìm sản phẩm mới, thử lại sau nha!',
+          error: err && err.message ? err.message : 'Unknown error'
+        });
+      }
+    }
+
     // default: xử lý câu hỏi chung 
     try {
       const result = await aiService.handleGeneralMessage(userId, {

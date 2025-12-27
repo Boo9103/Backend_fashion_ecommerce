@@ -1616,91 +1616,6 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       }
     }
 
-    // // Xử lý admin revenue query (chỉ dành cho admin)
-    // if (userRole === 'admin') {
-    //   const revenueIntentRe = /\b(doanh thu|báo cáo|revenue|report|tính tiền|tổng tiền|sale|sales)\b/i;
-    //   if (revenueIntentRe.test(String(message).toLowerCase())) {
-      
-    //     try {
-    //       console.debug('[handleGeneralMessage] admin revenue intent detected', { userId, message: String(message).slice(0,200) });
-          
-    //       // Persist user message nếu chưa
-    //       if (sessionId && !_userMessagePersisted && message && String(message).trim()) {
-    //         try {
-    //           await client.query(
-    //             `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
-    //             [sessionId, String(message).trim()]
-    //           );
-    //           await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-    //           _userMessagePersisted = true;
-    //         } catch (e) {
-    //           console.warn('[handleGeneralMessage] persist admin message failed', e && e.stack ? e.stack : e);
-    //         }
-    //       }
-
-    //       // Call admin revenue handler
-    //       const revRes = await exports.handleAdminRevenueQuery(userId, message, {
-    //         sessionId
-    //       });
-
-    //       return {
-    //         type: 'admin_report',
-    //         reply: revRes.reply || revRes.message,
-    //         data: revRes.data,
-    //         breakdown: revRes.breakdown || [],
-    //         meta: revRes.meta || {},
-    //         sessionId
-    //       };
-    //     } catch (e) {
-    //       console.error('[handleGeneralMessage] admin revenue query failed', e && e.stack ? e.stack : e);
-    //       return {
-    //         reply: 'Mình gặp lỗi khi xử lý báo cáo. Admin thử lại sau nhé!',
-    //         data: null,
-    //         sessionId
-    //       };
-    //     }
-    //   }
-    //   else {
-    //     console.warn('[handleGeneralMessage] non-admin user attempted revenue query', { userId, userRole });
-    
-    //     // Persist user message
-    //     if (sessionId && !_userMessagePersisted && message && String(message).trim()) {
-    //       try {
-    //         await client.query(
-    //           `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())`,
-    //           [sessionId, String(message).trim()]
-    //         );
-    //         await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-    //         _userMessagePersisted = true;
-    //       } catch (e) {
-    //         console.warn('[handleGeneralMessage] persist non-admin message failed', e && e.stack ? e.stack : e);
-    //       }
-    //     }
-
-    //     const reply = '❌ Xin lỗi, chỉ admin mới có quyền xem báo cáo doanh thu. Bạn muốn tìm gì khác không?';
-        
-    //     // Persist assistant reply
-    //     if (sessionId) {
-    //       try {
-    //         await client.query(
-    //           `INSERT INTO ai_chat_messages (session_id, role, content, created_at) VALUES ($1, 'assistant', $2, NOW())`,
-    //           [sessionId, reply]
-    //         );
-    //         await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
-    //       } catch (e) {
-    //         console.warn('[handleGeneralMessage] persist unauthorized reply failed (non-fatal)', e && e.stack ? e.stack : e);
-    //       }
-    //     }
-
-    //     return {
-    //       type: 'info',
-    //       reply,
-    //       data: null,
-    //       sessionId
-    //     };
-    //   }
-    // }
-
     // Debug: surface lastRec content so we can see if context exists / is parseable
     try {
       if (lastRec) {
@@ -2051,6 +1966,49 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
     if (/\bthanks?\b/.test(norm) || /\btks\b/.test(norm) || /\btnx\b/.test(norm)) return true;
     return false;
   }
+
+
+  const latestProductIntentRe = /\b(sản phẩm mới nhất|sản phẩm mới|hàng mới|sp mới|cái gì mới|mới nhất là gì|mới về|vừa về)\b/i;
+    
+    if (latestProductIntentRe.test(lowerMsg)) {
+      try {
+        // Persist user message if not already done
+        if (sessionId && !_userMessagePersisted && message && String(message).trim().length) {
+          try {
+            await client.query(
+              `INSERT INTO ai_chat_messages (session_id, role, content, created_at)
+               VALUES ($1, 'user', $2, NOW())`,
+              [sessionId, String(message).trim()]
+            );
+            await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+            _userMessagePersisted = true;
+          } catch (e) {
+            console.warn('[handleGeneralMessage] persist latest-products user message failed (non-fatal)', e && e.stack ? e.stack : e);
+          }
+        }
+
+        const latestRes = await exports.getLatestProductsByLastRecommendation(userId, sessionId);
+        
+        if (latestRes.ask) {
+          return { ask: latestRes.ask, sessionId };
+        }
+
+        return {
+          reply: latestRes.reply,
+          products: latestRes.products || [],
+          data: latestRes.products || [],
+          followUp: latestRes.followUp || null,
+          sessionId: latestRes.sessionId || sessionId
+        };
+      } catch (e) {
+        console.error('[handleGeneralMessage] latest products flow failed', e && e.stack ? e.stack : e);
+        return {
+          reply: 'Mình không tìm được sản phẩm mới nhất lúc này, thử lại sau nhé!',
+          products: [],
+          sessionId
+        };
+      }
+    }
 
     // handle "Chọn size giúp mình", "Xem thêm outfit", "Đủ rồi, cảm ơn Luna!"
     try {
@@ -4179,16 +4137,19 @@ exports.suggestAccessories = async (userId, message, opts = {}) => {
         [
           userId,
           JSON.stringify({ message: message || '', type: 'accessories' }),
-          JSON.stringify({ accessories: top.map(t => ({
-            variant_id: String(t.variant_id),
-            product_id: String(t.product_id || ''),
-            name: t.name,
-            description: t.description || null,
-            color: t.color,
-            price: t.price
-          })) }),
-          JSON.stringify({ accessories: fullAccessories }),  // THÊM: full list
-          'luna-accessories-v1'
+          JSON.stringify({ 
+            accessories: top.map(t => ({
+              variant_id: String(t.variant_id),
+              product_id: String(t.product_id || ''),
+              name: t.name,
+              description: t.description || null,
+              color: t.color,
+              price: t.price,
+              image_url: t.image_url || null,
+              category_name: t.category_name || ''
+            }))
+          }),
+          'luna-accessories-v1'  // ← $4: model_version
         ]
       );
     } catch (e) {
@@ -4943,6 +4904,25 @@ exports.handleAdminRevenueQuery = async (userId, message = '', opts = {}) => {
       throw err;
     }
 
+    //so sánh với tháng/kỳ trước
+    const parseComparisonIntent = (text = '')=>{
+      const m = String(text).toLowerCase();
+
+      // Pattern: "tháng 12 so sánh với tháng 10"
+      //          "doanh thu tháng 12 và tháng 10"
+      //          "tháng 12 vs tháng 11"
+
+      const comparisonRe = /(?:so\s*sánh\s*với|và|vs|so\s*với|với).*?tháng\s*(\d{1,2})/i;
+      const match = m.match(comparisonRe);
+
+      if(match && match[1]){
+        const compareMonth = Number(match[1]);
+        return { isComparison: true, compareMonth };
+      }
+
+      return { isComparison: false, compareMonth: null };
+    };
+
     //parse date range from message (VD: "doanh thu từ 2023-01-01 đến 2023-01-31")
     const parseRevenueMessage = (text = '') => {
       const m = String(text).toLocaleLowerCase();
@@ -5017,6 +4997,44 @@ exports.handleAdminRevenueQuery = async (userId, message = '', opts = {}) => {
       return { startDate, endDate, breakdown };
     };
 
+    //helper format currency
+    const formatCurrency = (n) => {
+      const num = Number(n || 0);
+      if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M vnđ';
+      if (num >= 1_000) return (num / 1_000).toFixed(0) + 'K vnđ';
+      return num.toLocaleString('vi-VN') + ' vnđ';
+    };
+
+    //helper so sánh
+    const compareRevenue = (current, previous) => {
+      const diff = current - previous;
+      const percent = previous > 0 ? ((diff / previous) *100).toFixed(1):0;
+
+      if(diff > 0){
+        return {
+          status: 'increase',
+          diff: Math.abs(diff),
+          percent: Math.abs(percent),
+          text: `📈 Tăng ${formatCurrency(Math.abs(diff))} (↑${percent}%)`
+        };
+      }else if(diff < 0){
+        return {
+          status: 'decrease',
+          diff: Math.abs(diff),
+          percent: Math.abs(percent),
+          text: `📉 Giảm ${formatCurrency(Math.abs(diff))} (↓${percent}%)`
+        };
+      }else {
+        return {
+          status: 'equal',
+          diff: 0,
+          percent: 0,
+          text: `➡️ Không thay đổi`
+        };
+      }
+    };
+
+    const comparisonIntent = parseComparisonIntent(message);
     const parsed = parseRevenueMessage(message);
     const startDate = opts.startDate || parsed.startDate;
     const endDate = opts.endDate || parsed.endDate;
@@ -5050,14 +5068,38 @@ exports.handleAdminRevenueQuery = async (userId, message = '', opts = {}) => {
       };
     }
 
-    //4. format reply
-    const formatCurrency = (n) => {
-      const num = Number(n || 0);
-      if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M đ';
-      if (num >= 1_000) return (num / 1_000).toFixed(0) + 'K đ';
-      return num.toLocaleString('vi-VN') + ' vnđ';
-    };
+    //nếu user muốn so sánh, lưu dữ liệu của tháng so sánh
+    let comparisonData = null;
+    let comparisonText = '';
 
+    if (comparisonIntent.isComparison && comparisonIntent.compareMonth) {
+      try {
+        const now = new Date();
+        const compareYear = now.getFullYear();
+        const compareStartDate = new Date(compareYear, comparisonIntent.compareMonth - 1, 1, 0, 0, 0, 0);
+        const compareEndDate = new Date(compareYear, comparisonIntent.compareMonth, 0, 23, 59, 59, 999);
+
+        comparisonData = await exports.getRevenueReport({
+          startDate: compareStartDate,
+          endDate: compareEndDate,
+          breakdown: 'monthly'
+        });
+
+        const comparison = compareRevenue(revenueData.total, comparisonData.total);
+        const currentMonth = startDate.toLocaleDateString('vi-VN', { month: 'long', year: 'numeric' });
+        const compareMonth = compareStartDate.toLocaleDateString('vi-VN', { month: 'long', year: 'numeric' });
+        
+        comparisonText = `\n\nSo sánh:\n`
+          + `• Tháng hiện tại (${currentMonth}): ${formatCurrency(revenueData.total)}\n`
+          + `• Tháng so sánh (${compareMonth}): ${formatCurrency(comparisonData.total)}\n`
+          + `• ${comparison.text}`;
+      } catch (e) {
+        console.error('[handleAdminRevenueQuery] comparison failed', e && e.stack ? e.stack : e);
+        comparisonText = `\n\nMình không lấy được dữ liệu so sánh, bạn thử lại nhé.`;
+      }
+    }
+
+    //format reply
     const totalFormatted = formatCurrency(revenueData.total);
     const dateRangeStr = `${startDate.toLocaleDateString('vi-VN')} - ${endDate.toLocaleDateString('vi-VN')}`;
     
@@ -5076,7 +5118,8 @@ exports.handleAdminRevenueQuery = async (userId, message = '', opts = {}) => {
       + `Kỳ: ${dateRangeStr}\n`
       + `Tổng doanh thu: ${totalFormatted}`
       + breakdownText
-      + `\n\nBạn muốn xem báo cáo khác (tháng khác, range khác) không?`;
+      +comparisonText
+      + `\n\nBạn muốn xem báo cáo doanh thu tháng khác không?`;
 
 
       //5. Persist to chat history (optional, for audit)
@@ -5094,7 +5137,11 @@ exports.handleAdminRevenueQuery = async (userId, message = '', opts = {}) => {
               endDate: endDate.toISOString(),
               breakdown,
               total: revenueData.total,
-              itemCount: Array.isArray(revenueData.breakdown) ? revenueData.breakdown.length : 0
+              comparison: comparisonData ? {
+                compareMonth: comparisonIntent.compareMonth,
+                compareTotal: comparisonData.total,
+                difference: revenueData.total - comparisonData.total
+              } : null
             })
           ]
         );
@@ -5129,6 +5176,12 @@ exports.handleAdminRevenueQuery = async (userId, message = '', opts = {}) => {
       data: revenueData,
       breakdown: revenueData.breakdown || [],
       sessionId: opts.sessionId,
+      comparison: comparisonData ? {
+        compareMonth: comparisonIntent.compareMonth,
+        compareTotal: comparisonData.total,
+        difference: revenueData.total - comparisonData.total,
+        percentChange: ((revenueData.total - comparisonData.total) / comparisonData.total * 100).toFixed(1)
+      } : null,
       meta: {
         startDate: startDate.toISOString(),
         endDate: endDate.toISOString(),
@@ -5151,6 +5204,179 @@ exports.handleAdminRevenueQuery = async (userId, message = '', opts = {}) => {
       reply: 'Mình gặp lỗi khi lấy doanh thu. Admin thử lại sau nhé!',
       data: null,
       sessionId: opts.sessionId
+    };
+  } finally {
+    client.release();
+  }
+};
+
+// ...existing code...
+
+// NEW: Handle "Sản phẩm mới nhất là gì?" intent
+exports.getLatestProductsByLastRecommendation = async (userId, sessionId = null) => {
+  const client = await pool.connect();
+  try {
+    // Step 1: Lấy last recommendation (outfit, search, hoặc accessory)
+    const lastRec = await exports.getLastRecommendationForUser(userId);
+    if (!lastRec) {
+      return {
+        ask: 'Mình chưa có gợi ý nào trước đó. Bạn muốn mình gợi ý sản phẩm mới nhất trong cửa hàng không?',
+        sessionId
+      };
+    }
+
+    // Step 2: Parse last recommendation để lấy variant IDs
+    let recJson = lastRec.items;
+    if (typeof recJson === 'string') {
+      try { recJson = JSON.parse(recJson); } catch (e) { recJson = null; }
+    }
+
+    // Determine type: outfit, search, accessories
+    let variantIds = [];
+    let recType = null;
+
+    // Type 1: Outfit (recJson.outfits[].items)
+    if (recJson && recJson.outfits && Array.isArray(recJson.outfits) && recJson.outfits.length > 0) {
+      const outfit = recJson.outfits[0];
+      variantIds = Array.isArray(outfit.items) ? outfit.items.map(String) : [];
+      recType = 'outfit';
+    }
+    // Type 2: Search products (recJson.products[])
+    else if (recJson && recJson.products && Array.isArray(recJson.products) && recJson.products.length > 0) {
+      variantIds = recJson.products.map(p => String(p.variant_id || p.id)).filter(Boolean);
+      recType = 'search';
+    }
+    // Type 3: Accessories (recJson.accessories[])
+    else if (recJson && recJson.accessories && Array.isArray(recJson.accessories) && recJson.accessories.length > 0) {
+      variantIds = recJson.accessories.map(a => String(a.variant_id || a.id)).filter(Boolean);
+      recType = 'accessories';
+    }
+
+    if (variantIds.length === 0) {
+      return {
+        ask: 'Mình chưa tìm được sản phẩm nào trong gợi ý trước đó.',
+        sessionId
+      };
+    }
+
+    // Step 3: Lấy category_id cho từng variant từ last recommendation
+    const catQ = await client.query(
+      `SELECT DISTINCT p.category_id
+       FROM product_variants pv
+       JOIN products p ON pv.product_id = p.id
+       WHERE pv.id = ANY($1::uuid[])`,
+      [variantIds]
+    );
+    const categoryIds = catQ.rows.map(r => r.category_id).filter(Boolean);
+
+    if (categoryIds.length === 0) {
+      return {
+        reply: 'Mình không tìm thấy danh mục sản phẩm phù hợp.',
+        sessionId
+      };
+    }
+
+    // Step 4: Lấy sản phẩm mới nhất theo từng category
+    const latestQ = await client.query(
+      `SELECT DISTINCT ON (p.category_id)
+              p.id AS product_id,
+              pv.id AS variant_id,
+              p.name,
+              pv.color_name,
+              p.created_at,
+              c.name AS category_name,
+              COALESCE(p.final_price, p.price)::integer AS price,
+              COALESCE(
+                (SELECT url FROM product_images WHERE variant_id = pv.id ORDER BY position LIMIT 1),
+                (SELECT url FROM product_images WHERE product_id = p.id ORDER BY position LIMIT 1)
+              ) AS image_url,
+              pv.stock_qty
+       FROM products p
+       JOIN product_variants pv ON pv.product_id = p.id
+       LEFT JOIN categories c ON c.id = p.category_id
+       WHERE p.category_id = ANY($1::uuid[])
+         AND p.status = 'active'
+         AND pv.stock_qty > 0
+       ORDER BY p.category_id, p.created_at DESC`,
+      [categoryIds]
+    );
+
+    const latestProducts = latestQ.rows || [];
+
+    if (latestProducts.length === 0) {
+      return {
+        reply: 'Mình không tìm thấy sản phẩm mới nhất trong các danh mục.',
+        sessionId
+      };
+    }
+
+    // Step 5: Format reply + persist chat message
+    const lines = latestProducts.map((p, idx) => {
+      const colorPart = p.color_name ? ` (${p.color_name})` : '';
+      const datePart = ` - mới cập nhật ${new Date(p.created_at).toLocaleDateString('vi-VN')}`;
+      return `${idx + 1}. ${p.name}${colorPart}${datePart}`;
+    }).join('\n');
+
+    const reply = `📦 Sản phẩm mới nhất trong các danh mục bạn vừa xem:\n${lines}\n\nBạn thích mẫu nào không?`;
+
+    // Persist assistant message
+    if (sessionId) {
+      try {
+        const itemsMeta = latestProducts.map(p => ({
+          variant_id: String(p.variant_id),
+          product_id: String(p.product_id),
+          name: p.name,
+          color: p.color_name,
+          category_name: p.category_name,
+          image_url: p.image_url,
+          price: p.price,
+          created_at: p.created_at
+        }));
+
+        await client.query(
+          `INSERT INTO ai_chat_messages (session_id, role, content, metadata, created_at)
+           VALUES ($1, 'assistant', $2, $3::jsonb, NOW())`,
+          [
+            sessionId,
+            reply,
+            JSON.stringify({
+              type: 'latest_products',
+              products: itemsMeta,
+              recommendation_type: recType
+            })
+          ]
+        );
+        await client.query(`UPDATE ai_chat_sessions SET last_message_at = NOW() WHERE id = $1`, [sessionId]);
+      } catch (e) {
+        console.warn('[getLatestProductsByLastRecommendation] persist message failed (non-fatal)', e && e.stack ? e.stack : e);
+      }
+    }
+
+    // Prepare follow-up quick replies
+    // const quickReplies = latestProducts.slice(0, 6).map((_, i) => `Mẫu ${i + 1}`);
+    // quickReplies.push('Xem thêm sản phẩm');
+
+    return {
+      reply,
+      products: latestProducts.map(p => ({
+        variant_id: String(p.variant_id),
+        product_id: String(p.product_id),
+        name: p.name,
+        color: p.color_name,
+        category_name: p.category_name,
+        image_url: p.image_url,
+        price: p.price,
+        created_at: p.created_at
+      })),
+      followUp: { },
+      sessionId
+    };
+  } catch (err) {
+    console.error('[getLatestProductsByLastRecommendation] error', err && err.stack ? err.stack : err);
+    return {
+      reply: 'Mình không tìm được sản phẩm mới nhất lúc này, thử lại sau nhé!',
+      products: [],
+      sessionId
     };
   } finally {
     client.release();
