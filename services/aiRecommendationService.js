@@ -3338,9 +3338,9 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       // QUẦN
       { slug: 'quan-jean',        kws: ['quần jean', 'quan jean', 'jean', 'jeans', 'denim'] },
       { slug: 'quan-short',       kws: ['quần short', 'quan short', 'short', 'quần đùi', 'quan dui'] },
-      { slug: 'quan-ni',          kws: ['quần nỉ', 'quan ni', 'quần thun', 'quan thun'] },
+      { slug: 'quan-ni',          kws: ['quần nỉ', 'quan ni'] },
       { slug: 'quan-kaki',        kws: ['quần kaki', 'quan kaki', 'kaki'] },
-      { slug: 'quan-au-ong-suong',kws: ['quần âu', 'quan au', 'quần tây', 'quan tay', 'trousers', 'chino', 'kaki'] },
+      { slug: 'quan-au',          kws: ['quần âu', 'quan au', 'quần tây', 'quan tay', 'trousers', 'chino', 'kaki'] },
 
       // TÚI XÁCH NỮ
       { slug: 'tui-xach-nu',      kws: ['túi xách nữ', 'tui xach nu', 'túi cầm tay', 'túi đeo chéo', 'tui deo cheo', 'bag', 'handbag'] },
@@ -3721,13 +3721,21 @@ function inferAccessorySlugsFromMessage(message = '') {
 
   const slugs = new Set(); // dùng Set để tránh trùng lặp
 
-  // TÚI XÁCH NỮ
-  if (/\b(tui|túi|xach|xách|bag|handbag|tote|shoulder|clutch)\b/.test(m)) {
-    slugs.add('tui-xach/tui-xach-nu');
-    if (/\b(đeo cheo|crossbody|deo cheo)\b/.test(m)) {
-      slugs.add('tui-xach/tui-deo-cheo');
+  // TÚI XÁCH
+    if (/\b(tui|túi|xach|xách|bag|handbag|tote|shoulder|clutch)\b/.test(m)) {
+      // Kiểm tra giới tính
+      if (/\b(nam|men|boy|nam|đực)\b/.test(m)) {
+        // User yêu cầu túi xách NAM
+        slugs.add('tui-xach/tui-xach-nam');
+      } else if (/\b(nữ|nu|girl|women|cái|chiếc)\b/.test(m)) {
+        // User yêu cầu túi xách NỮ
+        slugs.add('tui-xach/tui-xach-nu');
+      } else {
+        // Không chỉ định rõ → thêm cả hai (mặc định)
+        slugs.add('tui-xach/tui-xach-nu');
+        slugs.add('tui-xach/tui-xach-nam');
+      }
     }
-  }
 
   // VÍ
   if (/\b(vi|ví|bóp|wallet|purse)\b/.test(m)) {
@@ -4177,7 +4185,15 @@ exports.searchProducts = async (userId, message, opts = {}) => {
 
   //chuẩn hóa query: bỏ dấu, viết thường
   const qRaw = String(message || '').trim();
-  const q = qRaw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const normalize = (s = '') => 
+    String(s || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');  // bỏ dấu
+  
+  const q = normalize(qRaw);
+  console.debug('[searchProducts] normalized query:', { raw: qRaw, normalized: q });
+  
   const tokens = q.split(/\s+/).filter(t => t.length >= 2);
 
   //Mapping từ khóa user nói -> slug category
@@ -4197,8 +4213,16 @@ exports.searchProducts = async (userId, message, opts = {}) => {
   ];
 
   //tìm các category phù hợp với từ khóa
-  const matchedTypes = typeMap.filter(t => t.kws.some(k => q.includes(k)));
+  const matchedTypes = typeMap.filter(t => 
+    t.kws.some(k => q.includes(normalize(k)))
+  );
   const matchedSlugs = matchedTypes.map(t => t.slug);
+
+  console.debug('[searchProducts] matched slugs:', { 
+    query: q, 
+    matched: matchedSlugs,
+    tokens 
+  });
 
   //tạo mảng pattern tìm kiếm: ưu tiên slug category + tên sản phẩm
   const likePatterns = [];
