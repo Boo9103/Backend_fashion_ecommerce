@@ -268,6 +268,12 @@ const googleLogin = async (user) => {
   try {
     await client.query('BEGIN');
 
+    if (user.status === 'banned') {
+      const error = new Error('Account is banned');
+      error.statusCode = 403;
+      throw error;
+    }
+
     const token = generateToken(user);
 
     const refreshToken = generateFreshToken();

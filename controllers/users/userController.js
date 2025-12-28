@@ -133,7 +133,7 @@ exports.deactivateAccount = async(req, res, next) => {
             return res.status(401).json({ message: 'Unauthorized' });
         }
 
-        const updated = await userService.deactivateUserAccount(userId);
+        const updated = await userService.deactiveUserAccount(userId);
         if(!updated){
             return res.status(400).json({ message: 'User not found' });
         }
