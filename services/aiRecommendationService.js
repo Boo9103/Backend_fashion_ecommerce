@@ -2913,6 +2913,77 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       // fallthrough to normal processing
     }
 
+    // detect product search intent based on keywords - user hỏi sản phẩm
+    const typeMap = [
+      // ÁO
+      { slug: 'ao-thun',          kws: ['áo thun', 'ao thun', 't-shirt', 'tshirt', 'tee', 'thun'] },
+      { slug: 'ao-so-mi',         kws: ['sơ mi', 'so mi', 'áo sơ mi', 'ao so mi', 'shirt', 'blouse'] },
+      { slug: 'ao-hoodie-sweater',kws: ['hoodie', 'áo hoodie', 'ao hoodie', 'sweater', 'áo sweater', 'áo len', 'ao len'] },
+      { slug: 'ao-varsity-bomber',kws: ['áo khoác', 'ao khoac', 'áo bomber', 'bomber', 'varsity', 'jacket', 'áo jacket', 'coat', 'blazer'] },
+
+      // QUẦN
+      { slug: 'quan-jean',        kws: ['quần jean', 'quan jean', 'jean', 'jeans', 'denim'] },
+      { slug: 'quan-short',       kws: ['quần short', 'quan short', 'short', 'quần đùi', 'quan dui'] },
+      { slug: 'quan-ni',          kws: ['quần nỉ', 'quan ni'] },
+      { slug: 'quan-kaki',        kws: ['quần kaki', 'quan kaki', 'kaki'] },
+      { slug: 'quan-au',          kws: ['quần âu', 'quan au', 'quần tây', 'quan tay', 'trousers', 'chino', 'kaki'] },
+
+      // TÚI XÁCH NỮ
+      { slug: 'tui-xach-nu',      kws: ['túi xách nữ', 'tui xach nu', 'túi cầm tay', 'túi đeo chéo', 'tui deo cheo', 'bag', 'handbag'] },
+      { slug: 'tui-xach-nam',     kws: ['túi xách nam', 'tui xach nam'] },
+
+      // PHỤ KIỆN
+      { slug: 'vi-nam',           kws: ['ví nam', 'vi nam', 'wallet nam', 'bóp nam'] },
+      { slug: 'vi-nu',            kws: ['ví nữ', 'vi nu', 'wallet nữ', 'bóp nữ'] },
+      { slug: 'kinh-mat',         kws: ['kính mát', 'kinh mat', 'kính râm', 'sunglasses', 'kính nắng'] },
+      { slug: 'gong-kinh',        kws: ['gọng kính', 'gong kinh', 'khung kính'] }
+    ];
+
+    // Tạo danh sách tất cả từ khóa để detect intent
+    const allKeywords = typeMap.flatMap(item => item.kws);
+    //const productSearchIntentRe = new RegExp('^(?:' + allKeywords.join('|') + ')$', 'i');
+// const keywordPattern = allKeywords
+//   .map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))  // escape special chars
+//   .join('|');
+
+// ✅ CÁCH 1: Match word boundary (preferred)
+// const productSearchIntentRe = new RegExp(`\\b(${keywordPattern})\\b`, 'i');
+
+const keywordPattern = allKeywords
+  .map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  .join('|');
+
+const productSearchIntentRe = new RegExp(`\\b(${keywordPattern})\\b`, 'i');
+
+    // Kiểm tra xem tin nhắn có chứa từ khóa tìm kiếm sản phẩm không
+    if (productSearchIntentRe.test(lowerMsg)) {
+      try {
+        const res = await exports.searchProducts(userId, message, {
+          sessionId,
+          limit: 6
+        });
+
+        // searchProducts đã tự persist reply + metadata + recommendation audit
+        // Chỉ cần trả về cho frontend
+        return {
+          reply: res.reply,
+          products: res.products || [],
+          data: res.products || [],  // giữ cả 2 để tương thích FE cũ
+          followUp: res.followUp || null,
+          sessionId: res.sessionId || sessionId
+        };
+      } catch (e) {
+        console.error('[aiService.handleGeneralMessage] product search failed', e && e.stack ? e.stack : e);
+        return {
+          reply: 'Mình đang tìm hàng mà hơi chậm một chút, bạn thử lại sau vài giây nhé!',
+          products: [],
+          data: [],
+          sessionId
+        };
+      }
+    }
+
+
     // if slotHints indicates accessories intent, prefer accessory path BEFORE calling outfit generator
     if (slotHints.wantsAccessories) {
       console.debug('[aiService.handleGeneralMessage] slotHints indicates wantsAccessories, delegating to suggestAccessories', { message: String(message).slice(0,200) });
@@ -3327,63 +3398,69 @@ exports.handleGeneralMessage = async (userId, opts = {}) => {
       }
     }
 
-    // detect product search intent based on keywords - user hỏi sản phẩm
-    const typeMap = [
-      // ÁO
-      { slug: 'ao-thun',          kws: ['áo thun', 'ao thun', 't-shirt', 'tshirt', 'tee', 'thun'] },
-      { slug: 'ao-so-mi',         kws: ['sơ mi', 'so mi', 'áo sơ mi', 'ao so mi', 'shirt', 'blouse'] },
-      { slug: 'ao-hoodie-sweater',kws: ['hoodie', 'áo hoodie', 'ao hoodie', 'sweater', 'áo sweater', 'áo len', 'ao len'] },
-      { slug: 'ao-varsity-bomber',kws: ['áo khoác', 'ao khoac', 'áo bomber', 'bomber', 'varsity', 'jacket', 'áo jacket', 'coat', 'blazer'] },
+//     // detect product search intent based on keywords - user hỏi sản phẩm
+//     const typeMap = [
+//       // ÁO
+//       { slug: 'ao-thun',          kws: ['áo thun', 'ao thun', 't-shirt', 'tshirt', 'tee', 'thun'] },
+//       { slug: 'ao-so-mi',         kws: ['sơ mi', 'so mi', 'áo sơ mi', 'ao so mi', 'shirt', 'blouse'] },
+//       { slug: 'ao-hoodie-sweater',kws: ['hoodie', 'áo hoodie', 'ao hoodie', 'sweater', 'áo sweater', 'áo len', 'ao len'] },
+//       { slug: 'ao-varsity-bomber',kws: ['áo khoác', 'ao khoac', 'áo bomber', 'bomber', 'varsity', 'jacket', 'áo jacket', 'coat', 'blazer'] },
 
-      // QUẦN
-      { slug: 'quan-jean',        kws: ['quần jean', 'quan jean', 'jean', 'jeans', 'denim'] },
-      { slug: 'quan-short',       kws: ['quần short', 'quan short', 'short', 'quần đùi', 'quan dui'] },
-      { slug: 'quan-ni',          kws: ['quần nỉ', 'quan ni'] },
-      { slug: 'quan-kaki',        kws: ['quần kaki', 'quan kaki', 'kaki'] },
-      { slug: 'quan-au',          kws: ['quần âu', 'quan au', 'quần tây', 'quan tay', 'trousers', 'chino', 'kaki'] },
+//       // QUẦN
+//       { slug: 'quan-jean',        kws: ['quần jean', 'quan jean', 'jean', 'jeans', 'denim'] },
+//       { slug: 'quan-short',       kws: ['quần short', 'quan short', 'short', 'quần đùi', 'quan dui'] },
+//       { slug: 'quan-ni',          kws: ['quần nỉ', 'quan ni'] },
+//       { slug: 'quan-kaki',        kws: ['quần kaki', 'quan kaki', 'kaki'] },
+//       { slug: 'quan-au',          kws: ['quần âu', 'quan au', 'quần tây', 'quan tay', 'trousers', 'chino', 'kaki'] },
 
-      // TÚI XÁCH NỮ
-      { slug: 'tui-xach-nu',      kws: ['túi xách nữ', 'tui xach nu', 'túi cầm tay', 'túi đeo chéo', 'tui deo cheo', 'bag', 'handbag'] },
-      { slug: 'tui-xach-nam',     kws: ['túi xách nam', 'tui xach nam'] },
+//       // TÚI XÁCH NỮ
+//       { slug: 'tui-xach-nu',      kws: ['túi xách nữ', 'tui xach nu', 'túi cầm tay', 'túi đeo chéo', 'tui deo cheo', 'bag', 'handbag'] },
+//       { slug: 'tui-xach-nam',     kws: ['túi xách nam', 'tui xach nam'] },
 
-      // PHỤ KIỆN
-      { slug: 'vi-nam',           kws: ['ví nam', 'vi nam', 'wallet nam', 'bóp nam'] },
-      { slug: 'vi-nu',            kws: ['ví nữ', 'vi nu', 'wallet nữ', 'bóp nữ'] },
-      { slug: 'kinh-mat',         kws: ['kính mát', 'kinh mat', 'kính râm', 'sunglasses', 'kính nắng'] },
-      { slug: 'gong-kinh',        kws: ['gọng kính', 'gong kinh', 'khung kính'] }
-    ];
+//       // PHỤ KIỆN
+//       { slug: 'vi-nam',           kws: ['ví nam', 'vi nam', 'wallet nam', 'bóp nam'] },
+//       { slug: 'vi-nu',            kws: ['ví nữ', 'vi nu', 'wallet nữ', 'bóp nữ'] },
+//       { slug: 'kinh-mat',         kws: ['kính mát', 'kinh mat', 'kính râm', 'sunglasses', 'kính nắng'] },
+//       { slug: 'gong-kinh',        kws: ['gọng kính', 'gong kinh', 'khung kính'] }
+//     ];
 
-    // Tạo danh sách tất cả từ khóa để detect intent
-    const allKeywords = typeMap.flatMap(item => item.kws);
-    const productSearchIntentRe = new RegExp('^(?:' + allKeywords.join('|') + ')$', 'i');
+//     // Tạo danh sách tất cả từ khóa để detect intent
+//     const allKeywords = typeMap.flatMap(item => item.kws);
+//     //const productSearchIntentRe = new RegExp('^(?:' + allKeywords.join('|') + ')$', 'i');
+// const keywordPattern = allKeywords
+//   .map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))  // escape special chars
+//   .join('|');
 
-    // Kiểm tra xem tin nhắn có chứa từ khóa tìm kiếm sản phẩm không
-    if (productSearchIntentRe.test(lowerMsg)) {
-      try {
-        const res = await exports.searchProducts(userId, message, {
-          sessionId,
-          limit: 6
-        });
+// // ✅ CÁCH 1: Match word boundary (preferred)
+// const productSearchIntentRe = new RegExp(`\\b(${keywordPattern})\\b`, 'i');
 
-        // searchProducts đã tự persist reply + metadata + recommendation audit
-        // Chỉ cần trả về cho frontend
-        return {
-          reply: res.reply,
-          products: res.products || [],
-          data: res.products || [],  // giữ cả 2 để tương thích FE cũ
-          followUp: res.followUp || null,
-          sessionId: res.sessionId || sessionId
-        };
-      } catch (e) {
-        console.error('[aiService.handleGeneralMessage] product search failed', e && e.stack ? e.stack : e);
-        return {
-          reply: 'Mình đang tìm hàng mà hơi chậm một chút, bạn thử lại sau vài giây nhé!',
-          products: [],
-          data: [],
-          sessionId
-        };
-      }
-    }
+//     // Kiểm tra xem tin nhắn có chứa từ khóa tìm kiếm sản phẩm không
+//     if (productSearchIntentRe.test(lowerMsg)) {
+//       try {
+//         const res = await exports.searchProducts(userId, message, {
+//           sessionId,
+//           limit: 6
+//         });
+
+//         // searchProducts đã tự persist reply + metadata + recommendation audit
+//         // Chỉ cần trả về cho frontend
+//         return {
+//           reply: res.reply,
+//           products: res.products || [],
+//           data: res.products || [],  // giữ cả 2 để tương thích FE cũ
+//           followUp: res.followUp || null,
+//           sessionId: res.sessionId || sessionId
+//         };
+//       } catch (e) {
+//         console.error('[aiService.handleGeneralMessage] product search failed', e && e.stack ? e.stack : e);
+//         return {
+//           reply: 'Mình đang tìm hàng mà hơi chậm một chút, bạn thử lại sau vài giây nhé!',
+//           products: [],
+//           data: [],
+//           sessionId
+//         };
+//       }
+//     }
 
     // thì xử lý branch phụ kiện NGAY lập tức (không gọi generator outfit).
     const accessoryRequestForExistingOutfitRe = /\b(tư vấn thêm phụ kiện|tư vấn phụ kiện|thêm phụ kiện|chọn thêm phụ kiện|phụ kiện cho (?:outfit|bộ)|phụ kiện cho bộ|cho outfit này|cho bộ này|bộ vừa rồi|outfit vừa rồi)\b/i;
