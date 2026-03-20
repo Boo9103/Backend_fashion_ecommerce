@@ -1,6 +1,12 @@
+const { getRedisClient } = require('../config/redis');
 const pool = require('../config/db');
 const productService = require('../services/productService');
 
+//constants
+const CART_CACHE_EXPIRY = 86400*7; // 7 ngày (seconds)
+const getCartCacheKey = (userId) => `cart:${userId}`;
+
+// helper to get or create cart for user, with optional client for transaction reuse
 async function getOrCreateCart(userId, client = null){
     const useClient = client || (await pool.connect());
     const release = !client;
@@ -31,15 +37,21 @@ async function getOrCreateCart(userId, client = null){
         if (!client) {
             await useClient.query('ROLLBACK');
         }
-        // handle race: if unique violation, select existing cart
         if (err && err.code === '23505') {
-            const { rows: retry } = await useClient.query(
-                `SELECT id FROM carts WHERE user_id = $1 LIMIT 1`,
-                [userId]
-            );
-            if (retry.length) {
-                if (!client) await useClient.query('COMMIT');
-                return retry[0].id;
+            console.debug('[getOrCreateCart] cart already exists (race), retrying', { userId });
+            // Recursive retry or simple fallback
+            if (!client) {
+                // Reconnect và query lại
+                const retryClient = await pool.connect();
+                try {
+                    const { rows: retry } = await retryClient.query(
+                        `SELECT id FROM carts WHERE user_id = $1 LIMIT 1`,
+                        [userId]
+                    );
+                    if (retry.length) return retry[0].id;
+                } finally {
+                    retryClient.release();
+                }
             }
         }
         throw err;
@@ -48,89 +60,314 @@ async function getOrCreateCart(userId, client = null){
     }
 }
 
-exports.getCart = async (userId) => {
-    const client = await pool.connect();
-    try{
-        //đảm bảo giỏ hàng tồn tại
-        const qCart = `SELECT id FROM carts WHERE user_id = $1 LIMIT 1`;
-        const cRes = await client.query(qCart, [userId]);
-        if(cRes.rows.length === 0) return { id: null, items: [], totalQty: 0, subtotal: 0 };
-
-        const cartId = cRes.rows[0].id;
-        const q = `
-            SELECT
-                ci.id,
-                ci.variant_id,
-                ci.qty,
-                ci.price_snapshot,
-                ci.size_snapshot,
-                pv.sku,
-                pv.color_name,
-                pv.sizes,
-                pv.stock_qty,
-                p.id AS product_id,
-                p.name AS product_name,
-                p.price AS product_price,
-                p.sale_percent,
-                p.is_flash_sale,
-                p.final_price,
-                p.status,
-                s.name AS supplier_name,
-                (SELECT pi.url FROM product_images pi WHERE pi.variant_id = pv.id LIMIT 1) AS image_url
-            FROM cart_items ci
-            LEFT JOIN product_variants pv ON ci.variant_id = pv.id
-            LEFT JOIN products p ON p.id = pv.product_id
-            LEFT JOIN suppliers s ON s.id = p.supplier_id
-            WHERE ci.cart_id = $1
-            ORDER BY ci.created_at DESC
-        `;
-        const { rows } = await client.query(q, [cartId]);
-
-        let subtotal = 0;
-        let totalQty = 0;
-        const items = rows.map(r => {
-            const unitPriceSnapshot = Number(r.price_snapshot);
-            const qty = Number(r.qty);
-            const lineTotal = Number((unitPriceSnapshot * qty).toFixed(2));
-
-            const productPrice = Number(r.product_price || 0);
-            const salePercent = Number(r.sale_percent || 0);
-            const isFlash = !!r.is_flash_sale;
-            const flashPrice = (r.final_price != null) ? Number(r.final_price) : null;
-            const salePriceComputed = isFlash && flashPrice !== null
-              ? flashPrice
-              : (salePercent > 0 ? Math.round(productPrice * (1 - salePercent / 100) * 100) / 100 : null);
-
-            const line = {
-                id: r.id,
-                variant_id: r.variant_id,
-                sku: r.sku,
-                color_name: r.color_name || null,
-                size: r.size_snapshot || null,
-                product_id: r.product_id,
-                product_name: r.product_name,
-                supplier_name: (r.supplier_name && r.supplier_name.trim()) ? r.supplier_name.trim() : null,
-                qty: qty,
-                stock_qty: r.stock_qty,
-                unit_price: unitPriceSnapshot,
-                line_total: lineTotal,
-                image_url: r.image_url,
-                status: r.status,
-
-                //flash sale / sale info
-                is_flash_sale: isFlash,
-                sale_percent: salePercent, // percentage
-                sale_price: salePriceComputed // current sale price (flash or percentage), null if none
-            };
-
-            subtotal += line.line_total;
-            totalQty += line.qty;
-            return line;
-        });
-        return { id: cartId, items, totalQty, subtotal: Number(subtotal.toFixed(2)) };
-    }finally{
-        client.release();
+// Helper: safe Redis get (returns null if Redis unavailable)
+const safeRedisGet = async (key) => {
+    try {
+        const client = getRedisClient();
+        console.debug('[safeRedisGet] key:', key, 'client.isOpen:', client?.isOpen);
+        
+        if (!client || !client.isOpen){
+            console.debug('[safeRedisGet] Redis not available');
+            return null;
+        }
+        
+        const cachedData = await client.get(key);
+        console.debug('[safeRedisGet] cachedData:', cachedData ? 'found' : 'not found', { key });
+        
+        return cachedData;
+    } catch (err) {
+        console.warn('[safeRedisGet] error', err.message);
+        return null;
     }
+};
+
+// Helper: safe Redis set (doesn't throw)
+const safeRedisSet = async (key, value, expiry) => {
+    try {
+        const client = getRedisClient();
+        console.debug('[safeRedisSet] attempting to set', { key, expiry, valueLength: value?.length });
+        
+        if (!client || !client.isOpen){
+            console.debug('[safeRedisSet] Redis not available');
+            return;
+        }
+        
+        await client.setEx(key, expiry, value);
+        console.debug('[safeRedisSet] set successfully', { key, expiry });
+    } catch (err) {
+        console.warn('[safeRedisSet] error', err.message);
+    }
+};
+
+// Helper: safe Redis delete
+const safeRedisDel = async (key) => {
+    try {
+        const client = getRedisClient();
+        if (!client || !client.isOpen){
+            return null; // Redis not connected
+        }
+        await client.del(key);
+    } catch (err) {
+        console.warn('[safeRedisDel] error', err.message);
+    }
+};
+
+const updateCartCacheWithData = async (userId, cartData) => {
+    try {
+        const client = getRedisClient();
+        if (!client || !client.isOpen) return;
+
+        await client.setEx(
+            getCartCacheKey(userId),
+            CART_CACHE_EXPIRY,
+            JSON.stringify(cartData)
+        );
+        console.debug('[updateCartCacheWithData] cache updated with new data', { userId });
+    } catch (err) {
+        console.warn('[updateCartCacheWithData] error', err.message);
+    }
+}
+
+
+//Dùng Lock(setnx) 
+const LOCK_TTL = 5; // 5 second lock per user cart read
+const generateLockToken = () => {
+    return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+};
+
+const acquireLock = async(userId) => {
+    try {
+        const client = getRedisClient();
+        if (!client || !client.isOpen){
+            console.debug('[acquireLock] Redis not available');
+            return null;
+        }
+        const getCartLockKey = (userId) => `cart:${userId}:lock`;
+
+        //SET NX để đảm bảo chỉ có 1 process có thể set thành công
+        const lockKey = getCartLockKey(userId);
+        const lockToken = generateLockToken(); //tạo token duy nhất cho lock này
+
+        const lockAcquired = await client.set(lockKey, lockToken, {
+            NX: true, // Chỉ set nếu key chưa tồn tại
+            PX: LOCK_TTL * 1000 // Thời gian lock tự động hết hạn sau 5 giây (tránh deadlock)
+        });
+
+        return lockAcquired ? { lockKey, lockToken } : null;
+    }catch (err) {
+        console.warn('[acquireLock] error', err.message);
+        return null;
+    }
+};
+
+const releaseLock = async (lockKey, lockToken) => {
+    try {
+        const client = getRedisClient();
+        if (!client || !client.isOpen) return;
+
+        //Lua script để đảm bảo chỉ xóa lock nếu token khớp (tránh trường hợp lock bị cướp sau khi hết TTL)
+        const luaScript = `
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("del", KEYS[1])
+            else
+                return 0
+            end
+        `;
+        const result = await client.eval(luaScript, {
+            keys: [lockKey],
+            arguments: [lockToken]
+        });
+
+        if (result === 0) {
+            console.warn('[releaseLock] lock token mismatch (lock expired or taken over)', { lockKey });
+        } else {
+            console.debug('[releaseLock] lock released successfully', { lockKey });
+        }
+    }catch (err) {        
+        console.warn('[releaseLock] error', err.message);
+    }
+};
+
+exports.getCart = async (userId) => {
+
+    //1. check redis cache first
+    const cachedCart = await safeRedisGet(getCartCacheKey(userId));
+    if (cachedCart) {
+        console.debug('[getCart] cache hit', { userId });
+        return JSON.parse(cachedCart);
+    }
+
+    //2. try to acquire lock to prevent thundering herd on cache miss
+    let lock = null;
+    try {
+        lock = await acquireLock(userId);
+        if (!lock) {
+            // Implement exponential backoff, max 3 retries
+            let retries = 0;
+            const maxRetries = 3;
+            const maxWait = 500; // max 500ms
+            
+            while (retries < maxRetries) {
+                const waitTime = Math.min(100 * Math.pow(2, retries), maxWait); // 100ms, 200ms, 400ms
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                
+                const retryCache = await safeRedisGet(getCartCacheKey(userId));
+                if (retryCache) {
+                    console.debug('[getCart] cache hit after retry', { userId, retries: retries + 1 });
+                    return JSON.parse(retryCache);
+                }
+                retries++;
+            }
+            
+            // Sau khi retry hết, fallback query DB (có risk nhưng acceptable)
+            console.warn('[getCart] lock not acquired, fallback to DB query', { userId });
+        }
+
+        //3. Double-check cache sau khi acquire lock (trường hợp lock thành công nhưng có request khác đã set cache trong lúc chờ)
+        const doubleCheckCache = await safeRedisGet(getCartCacheKey(userId));
+        if (doubleCheckCache) {
+            console.debug('[getCart] cache hit after acquiring lock', { userId });
+            return JSON.parse(doubleCheckCache);
+        }
+
+        //4. query DB (chỉ instance nào có lock mới vào đây)
+        const client = await pool.connect();
+        try{
+            //đảm bảo giỏ hàng tồn tại
+            const qCart = `SELECT id FROM carts WHERE user_id = $1 LIMIT 1`;
+            const cRes = await client.query(qCart, [userId]);
+            if(cRes.rows.length === 0) return { id: null, items: [], totalQty: 0, subtotal: 0 };
+
+            const cartId = cRes.rows[0].id;
+            const q = `
+                SELECT
+                    ci.id,
+                    ci.variant_id,
+                    ci.qty,
+                    ci.price_snapshot,
+                    ci.size_snapshot,
+                    pv.sku,
+                    pv.color_name,
+                    pv.sizes,
+                    pv.stock_qty,
+                    p.id AS product_id,
+                    p.name AS product_name,
+                    p.price AS product_price,
+                    p.sale_percent,
+                    p.is_flash_sale,
+                    p.final_price,
+                    p.status,
+                    s.name AS supplier_name,
+                    (SELECT pi.url FROM product_images pi WHERE pi.variant_id = pv.id LIMIT 1) AS image_url
+                FROM cart_items ci
+                LEFT JOIN product_variants pv ON ci.variant_id = pv.id
+                LEFT JOIN products p ON p.id = pv.product_id
+                LEFT JOIN suppliers s ON s.id = p.supplier_id
+                WHERE ci.cart_id = $1
+                ORDER BY ci.created_at DESC
+            `;
+            const { rows } = await client.query(q, [cartId]);
+
+            let subtotal = 0;
+            let totalQty = 0;
+            const items = rows.map(r => {
+                const unitPriceSnapshot = Number(r.price_snapshot);
+                const qty = Number(r.qty);
+                const lineTotal = Number((unitPriceSnapshot * qty).toFixed(2));
+
+                const productPrice = Number(r.product_price || 0);
+                const salePercent = Number(r.sale_percent || 0);
+                const isFlash = !!r.is_flash_sale;
+                const flashPrice = (r.final_price != null) ? Number(r.final_price) : null;
+                const salePriceComputed = isFlash && flashPrice !== null
+                ? flashPrice
+                : (salePercent > 0 ? Math.round(productPrice * (1 - salePercent / 100) * 100) / 100 : null);
+
+                const line = {
+                    id: r.id,
+                    variant_id: r.variant_id,
+                    sku: r.sku,
+                    color_name: r.color_name || null,
+                    size: r.size_snapshot || null,
+                    product_id: r.product_id,
+                    product_name: r.product_name,
+                    supplier_name: (r.supplier_name && r.supplier_name.trim()) ? r.supplier_name.trim() : null,
+                    qty: qty,
+                    stock_qty: r.stock_qty,
+                    unit_price: unitPriceSnapshot,
+                    line_total: lineTotal,
+                    image_url: r.image_url,
+                    status: r.status,
+
+                    //flash sale / sale info
+                    is_flash_sale: isFlash,
+                    sale_percent: salePercent, // percentage
+                    sale_price: salePriceComputed // current sale price (flash or percentage), null if none
+                };
+
+                subtotal += line.line_total;
+                totalQty += line.qty;
+                return line;
+            });
+
+            const cartData = { id: cartId, items, totalQty, subtotal: Number(subtotal.toFixed(2)) };
+
+            await updateCartCacheWithData(userId, cartData);
+
+            return cartData;
+        }finally{
+            client.release();
+        }
+    } finally {        
+        if (lock) {
+            await releaseLock(lock.lockKey, lock.lockToken);
+        }
+    }
+};
+
+const buildCartData = (cartId, rows) => {
+    let subtotal = 0;
+    let totalQty = 0;
+    const items = rows.map(r => {
+        const unitPriceSnapshot = Number(r.price_snapshot);
+        const qty = Number(r.qty);
+        const lineTotal = Number((unitPriceSnapshot * qty).toFixed(2));
+
+        const productPrice = Number(r.product_price || 0);
+        const salePercent = Number(r.sale_percent || 0);
+        const isFlash = !!r.is_flash_sale;
+        const flashPrice = (r.final_price != null) ? Number(r.final_price) : null;
+        const salePriceComputed = isFlash && flashPrice !== null
+        ? flashPrice
+        : (salePercent > 0 ? Math.round(productPrice * (1 - salePercent / 100) * 100) / 100 : null);
+
+        const line = {
+            id: r.id,
+            variant_id: r.variant_id,
+            sku: r.sku,
+            color_name: r.color_name || null,
+            size: r.size_snapshot || null,
+            product_id: r.product_id,
+            product_name: r.product_name,
+            supplier_name: (r.supplier_name && r.supplier_name.trim()) ? r.supplier_name.trim() : null,
+            qty: qty,
+            stock_qty: r.stock_qty,
+            unit_price: unitPriceSnapshot,
+            line_total: lineTotal,
+            image_url: r.image_url,
+            status: r.status,
+
+            is_flash_sale: isFlash,
+            sale_percent: salePercent,
+            sale_price: salePriceComputed
+        };
+
+        subtotal += line.line_total;
+        totalQty += line.qty;
+        return line;
+    });
+
+    return { id: cartId, items, totalQty, subtotal: Number(subtotal.toFixed(2)) };
 };
 
 exports.addItem = async (userId, variantId, qty = 1, size = null) => {
@@ -202,13 +439,35 @@ exports.addItem = async (userId, variantId, qty = 1, size = null) => {
         );
     }
 
-    // touch cart
-    await client.query(`UPDATE carts SET updated_at = NOW() WHERE id = $1`, [cartId]);
+        // touch cart
+        await client.query(`UPDATE carts SET updated_at = NOW() WHERE id = $1`, [cartId]);
 
-    await client.query('COMMIT');
+        await client.query('COMMIT');
 
-    // return current cart snapshot (assumes exports.getCart exists)
-        return await exports.getCart(userId);
+        // Fetch fresh cart data một lần
+        const q = `
+            SELECT
+                ci.id, ci.variant_id, ci.qty, ci.price_snapshot, ci.size_snapshot,
+                pv.sku, pv.color_name, pv.sizes, pv.stock_qty,
+                p.id AS product_id, p.name AS product_name, p.price AS product_price,
+                p.sale_percent, p.is_flash_sale, p.final_price, p.status,
+                s.name AS supplier_name,
+                (SELECT pi.url FROM product_images pi WHERE pi.variant_id = pv.id LIMIT 1) AS image_url
+            FROM cart_items ci
+            LEFT JOIN product_variants pv ON ci.variant_id = pv.id
+            LEFT JOIN products p ON p.id = pv.product_id
+            LEFT JOIN suppliers s ON s.id = p.supplier_id
+            WHERE ci.cart_id = $1
+            ORDER BY ci.created_at DESC
+        `;
+        const freshRes = await client.query(q, [cartId]);
+        const cartData = buildCartData(cartId, freshRes.rows);
+        
+        // Write cache một lần thôi
+        await updateCartCacheWithData(userId, cartData);
+
+
+        return cartData;
     } catch (err) {
         await client.query('ROLLBACK');
         throw err;
@@ -289,9 +548,28 @@ exports.updateItem = async (userId, itemId, qty) => {
         );
         await client.query('COMMIT');
 
-        // trả về snapshot giỏ hàng sau khi cập nhật
-        const cart = await exports.getCart(userId);
-        return cart;
+        const cartQ = `
+            SELECT
+                ci.id, ci.variant_id, ci.qty, ci.price_snapshot, ci.size_snapshot,
+                pv.sku, pv.color_name, pv.sizes, pv.stock_qty,
+                p.id AS product_id, p.name AS product_name, p.price AS product_price,
+                p.sale_percent, p.is_flash_sale, p.final_price, p.status,
+                s.name AS supplier_name,
+                (SELECT pi.url FROM product_images pi WHERE pi.variant_id = pv.id LIMIT 1) AS image_url
+            FROM cart_items ci
+            LEFT JOIN product_variants pv ON ci.variant_id = pv.id
+            LEFT JOIN products p ON p.id = pv.product_id
+            LEFT JOIN suppliers s ON s.id = p.supplier_id
+            WHERE ci.cart_id = $1
+            ORDER BY ci.created_at DESC
+        `;
+        const freshCartRes = await client.query(cartQ, [cartId]);
+        const cartData = buildCartData(cartId, freshCartRes.rows);
+
+        // Write cache một lần thôi
+        await updateCartCacheWithData(userId, updatedCart);
+
+        return cartData;
     }catch(err){
         await client.query('ROLLBACK');
         throw err;
@@ -310,9 +588,19 @@ exports.clearCart = async (userId) => {
     try {
         await client.query('BEGIN');
         const q = `DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1)`;
+        const cartRes = await client.query(
+            `SELECT id FROM carts WHERE user_id = $1 LIMIT 1`, 
+            [userId]
+        );
+        const cartId = cartRes.rows.length > 0 ? cartRes.rows[0].id : null;
+
         await client.query(q, [userId]);
         await client.query(`UPDATE carts SET updated_at = NOW() WHERE user_id = $1`, [userId]);
         await client.query('COMMIT');
+
+        const emptyCart = { id: cartId, items: [], totalQty: 0, subtotal: 0 };
+        await updateCartCacheWithData(userId, emptyCart);
+
         return { cleared: true };
     } catch (e) {
         await client.query('ROLLBACK');
@@ -438,7 +726,9 @@ exports.removeInvalidItems = async (userId, variantIds) => {
             });
             //không có item nào để xóa
             await client.query('COMMIT');
-            return { removedCount: 0 };
+            const emptyCart = { id: cartId, items: [], totalQty: 0, subtotal: 0 };
+            await updateCartCacheWithData(userId, emptyCart);
+            return { removedCount: 0, cart: emptyCart };
         }
 
         const itemIdsToRemove = findRes.rows.map(r => r.id);
@@ -465,8 +755,25 @@ exports.removeInvalidItems = async (userId, variantIds) => {
         );
         await client.query('COMMIT');
 
-        //5. return result
-        const updatedCart = await exports.getCart(userId);
+        const cartQ = `
+            SELECT
+                ci.id, ci.variant_id, ci.qty, ci.price_snapshot, ci.size_snapshot,
+                pv.sku, pv.color_name, pv.sizes, pv.stock_qty,
+                p.id AS product_id, p.name AS product_name, p.price AS product_price,
+                p.sale_percent, p.is_flash_sale, p.final_price, p.status,
+                s.name AS supplier_name,
+                (SELECT pi.url FROM product_images pi WHERE pi.variant_id = pv.id LIMIT 1) AS image_url
+            FROM cart_items ci
+            LEFT JOIN product_variants pv ON ci.variant_id = pv.id
+            LEFT JOIN products p ON p.id = pv.product_id
+            LEFT JOIN suppliers s ON s.id = p.supplier_id
+            WHERE ci.cart_id = $1
+            ORDER BY ci.created_at DESC
+        `;
+        const freshRes = await client.query(cartQ, [cartId]);
+        const updatedCart = buildCartData(cartId, freshRes.rows);
+
+        await updateCartCacheWithData(userId, updatedCart);
 
         return {
             success: true,

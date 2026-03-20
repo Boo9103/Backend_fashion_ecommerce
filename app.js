@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const { redisClient, connectRedis } = require('./config/redis');
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const userRoutes = require('./routes/userRoutes');
@@ -22,6 +23,12 @@ const app = express();
 // chỉ dùng express.json once, giới hạn body size
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true }));
+
+//connect redis
+connectRedis().catch((err) => {
+    console.error('[Redis] Failed to connect at startup:', err.message);
+    console.warn('[Redis] App will continue without caching');
+});
 
 // CORS
 app.use(cors({
